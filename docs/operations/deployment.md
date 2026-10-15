@@ -79,7 +79,10 @@ To restore for real: stop the app, keep a copy of `~/.iip/iip.db`, then use `iip
 | `IIP_DATA_DIR` | `~/.iip` | Database, token and backups |
 | `IIP_AUTH` | `on` | `off` only with `IIP_ENV=test` |
 | `IIP_DEV_ORIGINS` | — | Extra browser origin for the Vite dev server (dev only) |
-| `IIP_LLM` | `off` | The optional LLM adapter is not part of v1 (see known limitations) |
+| `IIP_LLM` | `off` | `off`, `local` or `cloud` (ADR-0007). `local` with a non-loopback base URL, or `cloud` with a URL off the allowlist, refuses startup. A config saved in Settings overrides it. |
+| `IIP_LLM_BASE_URL` | `http://127.0.0.1:11434/v1` in local mode | OpenAI-compatible base URL |
+| `IIP_LLM_MODEL` | — | Model name, e.g. a model already pulled into Ollama |
+| `IIP_LLM_API_KEY_ENV` | — | The NAME of the env var that holds the provider key (never the key itself) |
 
 ## Status labels for this document
 

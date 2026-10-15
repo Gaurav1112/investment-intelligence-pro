@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { PageHeader } from "../components/PageHeader";
 import { Link } from "react-router-dom";
 import { Loading } from "../components/States";
+import { LlmSettings } from "../components/LlmSettings";
 import { api } from "../lib/api";
 import { groupIndian } from "../lib/format";
 import { useProfile } from "../lib/profile";
@@ -262,11 +263,7 @@ export default function Settings() {
         }}
       />
 
-      <h2>Local language model</h2>
-      <p className="small">
-        An optional local LLM for wording is not part of version 1. Nothing is sent to any AI service; every number and sentence
-        comes from the deterministic engine and dated sources.
-      </p>
+      <LlmSettings />
     </section>
   );
 }

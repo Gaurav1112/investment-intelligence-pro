@@ -262,7 +262,7 @@ Cache-Control: no-store            (all /api/* responses)
 ### C-11 LLM boundary and prompt-injection defences (optional feature)
 The design principle: **the LLM writes captions for decisions that have already been made. It never makes them, never changes them, and its numbers are never trusted.**
 
-1. **Off by default.** `IIP_LLM_ENABLED=false`. The UI is fully functional without it; every explanation has a deterministic template version.
+1. **Off by default.** `IIP_LLM=off` (`off|local|cloud`; cloud is an allowlisted, redacted opt-in — ADR-0007). The UI is fully functional without it; every explanation has a deterministic template version.
 2. **Loopback only.** The `IIP_LLM_BASE_URL` host must resolve only to `127.0.0.1` or `::1`, otherwise the app refuses to start. Its client is separate from the fetcher client. Timeout 60 s, `max_tokens` ≤ 600, one concurrent request, and the call is cancelled if the browser disconnects.
 3. **Order of operations.** The ranking or feasibility result is computed by the deterministic engine, serialised, and hashed (`result_sha256`) **before** any LLM call. The LLM response is attached to that frozen result and cannot modify it. A test asserts that the hash is identical with and without the LLM, and with an injected document.
 4. **Minimal facts payload (LLM02).** The prompt contains only an allowlisted `ExplanationFacts` schema: category names, objective code, horizon, percentages, rank positions, rule ids that fired, data-freshness flags and source citations. It contains **no** rupee holdings amounts, tax slab, access token, file paths or env values. Rupee amounts are an explicit opt-in, and the prompt builder unit test covers it.

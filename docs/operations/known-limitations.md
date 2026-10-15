@@ -68,7 +68,7 @@ Living document, last updated 2026-10-15.
 
 | Item | Status | Detail |
 |---|---|---|
-| Optional LLM explanations | Not built in v1 | The supervisor supports an `llm_rephrase` hook with numeric and banned-phrase validation (tested). No adapter or provider configuration UI exists yet. The deterministic template writer is complete on its own. |
+| Optional LLM explanations | Built, optional, off by default; IMPLEMENTED, NOT VERIFIED against a live model | One OpenAI-compatible adapter: a local loopback model, or an allowlisted free-tier cloud provider that receives a redacted packet. The model only rewords the deterministic claims; on any validation or connection failure the template is shown. Tested against a stub server only (no local model was running when it was built). Cloud providers' data-use terms are NOT VERIFIED. In cloud mode, sentences with personal values are held back and shown unreworded. |
 | CAS (CAMS/KFintech) statement import | Not built | CSV/XLSX holdings import only. |
 | Clean-machine setup | IMPLEMENTED, NOT VERIFIED | |
 | UI polish pass | Deferred by request | The user asked to prioritise functionality, so polish is a later stage. |

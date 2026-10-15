@@ -20,6 +20,14 @@ class ComplianceViolation(RuntimeError):
     """A deterministic template produced banned text — a defect in our own copy, so fail loudly."""
 
 
+class RephraseFailed(RuntimeError):
+    """The optional rephraser could not produce text (timeout, refused, invalid output). The template is used."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 @dataclass(frozen=True)
 class RenderedClaim:
     worker: str
@@ -84,7 +92,14 @@ def build_report(
     writer = "template"
     rejected: list[str] = []
     if llm_rephrase is not None and narrative:
-        candidate = llm_rephrase(narrative)
+        try:
+            candidate = llm_rephrase(narrative)
+        except RephraseFailed as exc:
+            rejected.append(f"llm_unavailable: {exc.reason}")
+            return Report(tuple(rendered), tuple(conflicts), disclosures, writer, narrative, tuple(rejected))
+        except Exception as exc:  # SEC-76: an untrusted optional writer must never fail the request
+            rejected.append(f"llm_unavailable: {type(exc).__name__}")
+            return Report(tuple(rendered), tuple(conflicts), disclosures, writer, narrative, tuple(rejected))
         bad_numbers = compliance.unsupported_numbers(candidate, facts.displays())
         banned = compliance.blocked(candidate)
         if bad_numbers:

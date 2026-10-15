@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import date
 from functools import lru_cache
 from typing import Any
@@ -21,6 +22,8 @@ from iip.services import discovery, fixtures, ingestion, instruments
 from iip.services import profile as profile_svc
 from iip.store import coordination
 from iip.supervisor import compliance
+
+_log = logging.getLogger("iip.api")
 
 
 @lru_cache(maxsize=1)
@@ -142,10 +145,15 @@ def _backfill_batch(st: Any, body: BatchBackfillIn, amcs: dict[int, str]) -> Any
             now=st.clock,
         )  # fmt: skip
     if st.hosted:
-        deadline = st.monotonic() + st.job_budget_s
-        return ingestion.backfill_batch_step(
+        t0 = st.monotonic()
+        deadline = t0 + st.job_budget_s
+        out = ingestion.backfill_batch_step(
             st.conn, st.fetcher(), now=st.clock, pause=st.pause, stop=lambda: st.monotonic() >= deadline
         )
+        # Timings and counts only (no values, C-13): diagnoses where a hosted step spends its time.
+        _log.info("backfill-batch step done=%s phase=%s windows=%s/%s in %.1fs", out.get("done"), out.get("phase"),
+                  out.get("windows_done"), out.get("windows_total"), st.monotonic() - t0)  # fmt: skip
+        return out
     return ingestion.run_batch_backfill_locally(st.conn, st.fetcher(), now=st.clock, pause=st.pause)
 
 
@@ -319,7 +327,9 @@ def router() -> APIRouter:  # noqa: PLR0915 - route table
         try:
             return _backfill_batch(st, body, amcs)
         finally:
+            t0 = st.monotonic()
             st.backfill_lock.release()
+            _log.info("backfill-batch lock released in %.1fs", st.monotonic() - t0)
 
     @r.get("/data-health")
     def data_health(request: Request) -> dict[str, Any]:

@@ -1,4 +1,5 @@
 import { useState, type FormEvent, type ReactNode } from "react";
+import { FdCardRates } from "../components/FdCardRates";
 import { PageHeader } from "../components/PageHeader";
 import { Link } from "react-router-dom";
 import { FreshnessBadge } from "../components/FreshnessBadge";
@@ -201,7 +202,7 @@ export function ManualAge({ asOf, staleAfter, fixture }: { asOf: string; staleAf
   );
 }
 
-function CiteLink({ url }: { url: string | null | undefined }) {
+export function CiteLink({ url }: { url: string | null | undefined }) {
   if (!url) return <span className="subtle">none stored</span>;
   if (!url.startsWith("https://")) return <span className="mono small">{url}</span>;
   let host = url;
@@ -665,7 +666,7 @@ export const RATING_STALE_DAYS = 365; // backend services/instruments.py RATING_
 
 const BOND_KIND_LABEL: Record<BondKind, string> = { gsec: "G-sec", sdl: "SDL", corp_bond: "Corporate bond" };
 
-function QuoteCell({ item }: { item: BondListItem }) {
+export function QuoteCell({ item }: { item: BondListItem }) {
   const q = item.quote;
   if (!q) return <span className="subtle">{item.quote_problem ?? "no quote stored"}</span>;
   const comp = q.convention?.match(/compounding=(\w+)/)?.[1];
@@ -677,7 +678,7 @@ function QuoteCell({ item }: { item: BondListItem }) {
   );
 }
 
-function QuoteAge({ item }: { item: BondListItem }) {
+export function QuoteAge({ item }: { item: BondListItem }) {
   const q = item.quote;
   if (!q) return <>—</>;
   if (item.fixture) return <FreshnessBadge freshness="FIXTURE" date={q.quote_date} />;
@@ -694,7 +695,7 @@ function QuoteAge({ item }: { item: BondListItem }) {
   );
 }
 
-function RatingCell({ item }: { item: BondListItem }) {
+export function RatingCell({ item }: { item: BondListItem }) {
   if (item.kind === "gsec") return <span className="small">Sovereign (Government of India)</span>;
   if (item.kind === "sdl") return <span className="small">State government (not sovereign; tier T2)</span>;
   const r = item.rating;
@@ -1339,7 +1340,10 @@ export default function FixedIncome() {
         {tab === "bonds" ? (
           <BondsPanel />
         ) : (
-          <KindList key={tab} kind={tab} />
+          <>
+            <KindList key={tab} kind={tab} />
+            {tab === "fd" ? <FdCardRates /> : null}
+          </>
         )}
       </div>
     </section>

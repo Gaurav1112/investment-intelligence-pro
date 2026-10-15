@@ -215,6 +215,19 @@ def test_fd_rate_tables(conn: Any) -> None:
     assert len(inp.list_fd_rate_tables(conn)["tables"]) == 2
 
 
+def test_fd_rate_table_list_reports_freshness_and_the_current_table(conn: Any) -> None:
+    """The UI shows a freshness badge per table; it comes from the backend (bank.fd: 30 days), never computed there."""
+    inp.add_fd_rate_table(conn, table(date(2026, 9, 1)), NOW)
+    inp.add_fd_rate_table(conn, table(), NOW)
+    out = inp.list_fd_rate_tables(conn, AS_OF)
+    assert out["as_of"] == "2026-10-15" and out["stale_after_days"] == 30
+    by_date = {t["as_of"]: t for t in out["tables"]}
+    assert by_date["2026-10-10"]["freshness"] == "MANUAL" and by_date["2026-10-10"]["age_days"] == 5
+    assert by_date["2026-10-10"]["current"] is True
+    assert by_date["2026-09-01"]["freshness"] == "STALE" and by_date["2026-09-01"]["age_days"] == 44
+    assert by_date["2026-09-01"]["current"] is False  # superseded by the later table for the same bank
+
+
 @pytest.mark.parametrize(
     "bad",
     [

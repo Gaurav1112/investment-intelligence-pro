@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from "react";
+import { ApiError } from "../lib/api";
 import { dateLabel, utcStamp } from "../lib/format";
 import {
   isCpiResponse,
@@ -7,6 +8,8 @@ import {
   type CpiBase,
   type CpiIn,
   type CpiResponse,
+  type MospiFetchIn,
+  type MospiFetchOut,
   type MospiStatus,
   type RiskFreeIn,
   type RiskFreeResponse,
@@ -46,7 +49,76 @@ const OUTCOME_TEXT: Record<string, string> = {
 
 // ------------------------------------------------------------------------------------------- MoSPI status
 
-function MospiPanel() {
+/** The server's {detail: {code, message}} refusal, in words (HTTPException with a dict detail). */
+function mospiRefusal(e: unknown): string {
+  const d = (e instanceof ApiError ? (e.detail as { detail?: unknown } | undefined)?.detail : undefined) as
+    | { code?: unknown; message?: unknown }
+    | undefined;
+  if (d && typeof d.message === "string") {
+    if (d.code === "REQUIRES_CONFIGURATION") return `REQUIRES CONFIGURATION: ${d.message}`;
+    return `${d.message} (${String(d.code ?? "error")}). Nothing was stored.`;
+  }
+  return errorText(e);
+}
+
+function MospiFetch({ onStored }: { onStored: () => void }) {
+  const [base, setBase] = useState<"2012" | "2024">("2024");
+  const [month, setMonth] = useState("");
+  const [err, setErr] = useState<string | undefined>();
+  const [done, setDone] = useState<string | null>(null);
+  const m = useMutation<MospiFetchIn, MospiFetchOut>("POST", "/api/inputs/mospi/fetch");
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    setDone(null);
+    const ym = /^(\d{4})-(\d{2})$/.exec(month);
+    if (!ym) {
+      setErr("Choose the reference month to fetch.");
+      return;
+    }
+    setErr(undefined);
+    const out = await m.run({ base_year: base === "2024" ? 2024 : 2012, year: Number(ym[1]), month: Number(ym[2]) });
+    if (out) {
+      setDone(
+        `${OUTCOME_TEXT[out.outcome] ?? "Saved."} CPI for ${out.month} (base ${base}) fetched from MoSPI. NOT VERIFIED: check it against the MoSPI release.`,
+      );
+      onStored();
+    }
+  }
+  return (
+    <form className="inputs-form" onSubmit={submit} aria-label="Fetch CPI from MoSPI" noValidate>
+      <div className="inputs-grid">
+        <div className="field">
+          <label htmlFor="mospi-base">Base year (series)</label>
+          <select id="mospi-base" value={base} onChange={(e) => setBase(e.target.value as "2012" | "2024")}>
+            <option value="2024">2024 = 100</option>
+            <option value="2012">2012 = 100</option>
+          </select>
+        </div>
+        <div className="field">
+          <label htmlFor="mospi-month">Reference month</label>
+          <input id="mospi-month" type="month" value={month} onChange={(e) => setMonth(e.target.value)} aria-invalid={Boolean(err)} aria-describedby="mospi-month-err" />
+          <FieldError id="mospi-month-err" msg={err} />
+        </div>
+      </div>
+      {m.error ? (
+        <div className="field-error" role="alert">
+          {mospiRefusal(m.error)}
+        </div>
+      ) : null}
+      <button type="submit" className="btn" disabled={m.pending}>
+        {m.pending ? "Fetching…" : "Fetch CPI from MoSPI"}
+      </button>
+      {done ? (
+        <p className="small" role="status">
+          {done}
+        </p>
+      ) : null}
+    </form>
+  );
+}
+
+function MospiPanel({ onStored }: { onStored: () => void }) {
   const res = useApi<MospiStatus>("/api/inputs/mospi/status");
   if (res.loading) return <p className="small subtle">Loading MoSPI configuration status…</p>;
   if (res.error) return <p className="small field-error">MoSPI status could not be loaded: {errorText(res.error)}</p>;
@@ -74,7 +146,14 @@ function MospiPanel() {
           ))}
         </p>
       ) : null}
-      <p className="small subtle">Until it is configured, enter CPI values by hand below, with the official release as the citation.</p>
+      {configured ? (
+        <MospiFetch onStored={onStored} />
+      ) : (
+        <p className="small subtle">
+          Fetching from MoSPI is unavailable until it is configured (REQUIRES CONFIGURATION). Until then, enter CPI values by hand
+          below, with the official release as the citation.
+        </p>
+      )}
     </div>
   );
 }
@@ -347,6 +426,8 @@ function RiskFreePanel() {
 
 /** Data health → Macro inputs: MoSPI status, CPI points and the 91-day T-bill series, each entered with a citation. */
 export function MacroInputs() {
+  // A MoSPI fetch stores a CPI point; remounting the CPI panel reloads its list.
+  const [cpiKey, setCpiKey] = useState(0);
   return (
     <section className="inputs-section" aria-labelledby="macro-h">
       <h2 id="macro-h">Macro inputs</h2>
@@ -354,8 +435,8 @@ export function MacroInputs() {
         Inflation (CPI) and the risk-free rate are entered by you with an official citation. Nothing here is assumed: without these values,
         real returns, inflation shocks and the Sharpe ratio are refused.
       </p>
-      <MospiPanel />
-      <CpiPanel />
+      <MospiPanel onStored={() => setCpiKey((k) => k + 1)} />
+      <CpiPanel key={cpiKey} />
       <RiskFreePanel />
     </section>
   );

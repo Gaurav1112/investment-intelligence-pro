@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import logging
 import secrets
 import time
 from collections import deque
@@ -22,6 +23,8 @@ from http.cookies import SimpleCookie
 from typing import Any
 
 from iip.api.settings import Settings
+
+log = logging.getLogger("iip.api")
 
 Scope = MutableMapping[str, Any]
 Message = MutableMapping[str, Any]
@@ -186,10 +189,16 @@ class SecurityMiddleware:
             return
 
         scope.setdefault("state", {})["session"] = session
-        receive = self._capped_receive(receive)
+        await self._dispatch(scope, self._capped_receive(receive), send, is_api=is_api)
+
+    async def _dispatch(self, scope: Scope, receive: Receive, send: Send, *, is_api: bool) -> None:
+        """Run the app with the security headers added to its response; no exception escapes (see below)."""
+        started = False
 
         async def send_wrapper(message: Message) -> None:
+            nonlocal started
             if message["type"] == "http.response.start":
+                started = True
                 headers = [
                     h for h in message.get("headers", []) if h[0].lower() not in {k for k, _ in SECURITY_HEADERS}
                 ]
@@ -206,6 +215,13 @@ class SecurityMiddleware:
             await self.app(scope, receive, send_wrapper)
         except _BodyTooLarge:
             await _reject(send, 413, "PAYLOAD_TOO_LARGE")
+        except Exception as exc:
+            # SEC-21 / C-13 (ECC F2): Starlette re-raises after its 500 handler, and uvicorn would then log the full
+            # traceback including the exception MESSAGE, which can carry user values. Nothing leaves this layer:
+            # log the class only, and answer 500 if no response has started yet.
+            log.error("unhandled error escaped the app type=%s", type(exc).__name__)
+            if not started:
+                await _reject(send, 500, "INTERNAL_ERROR")
 
     def _origin_ok(self, scope: Scope) -> bool:
         origins = _header_values(scope, b"origin")

@@ -186,6 +186,23 @@ def test_unknown_isin_is_unmatched_and_rejected_never_fuzzy(
     assert e.value.code == "NOTHING_TO_APPLY"
 
 
+def test_failed_isin_lookup_is_reported_as_such_not_as_unknown(conn: sqlite3.Connection) -> None:
+    """F3 (ECC panel): when the AMFI lookup fails, the rows are not 'unknown': the user is told to retry."""
+    from iip.services import ingestion
+
+    def failing(_isins: set[str]) -> dict[str, str]:
+        raise ingestion.IsinLookupFailed("FetchFailed")
+
+    st = syn.Statement(schemes=(syn.SchemeBlock("Z9X", "TEST Liquid Fund A", syn.ISIN_UNKNOWN, "0.000", "10.000",
+                                                (syn.Row("10-Jan-2024", "Purchase", "100.00", "10.000", "10.0000",
+                                                         "10.000"),)),))  # fmt: skip
+    pid = make_pf(conn)
+    p = cas.preview_cas_import(conn, pid, syn.build_pdf(st), syn.PASSWORD, NOW, resolve_isins=failing)
+    assert [r["reason"] for r in p["rejected"]] == ["ISIN_LOOKUP_FAILED"]  # type: ignore[index]
+    assert p["schemes"][0]["match"] == "ISIN_LOOKUP_FAILED"  # type: ignore[index]
+    assert any("could not be looked up" in w for w in p["warnings"])  # type: ignore[attr-defined]
+
+
 def test_ambiguous_isin_rejected(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE instruments SET isin=? WHERE instrument_id='mf:990003'", (syn.ISIN_GROWTH,))
     p = preview(conn, make_pf(conn))

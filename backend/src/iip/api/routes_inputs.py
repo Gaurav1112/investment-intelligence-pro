@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from iip.data import mospi
-from iip.data.fetch import Fetcher, FetchError
+from iip.data.fetch import FetchError
 from iip.data.models import DataError
 from iip.services import inputs
 
@@ -63,7 +63,7 @@ def router() -> APIRouter:
             raise HTTPException(409, {"code": "REQUIRES_CONFIGURATION", **mospi.status(config)})
         try:
             rec = mospi.fetch_cpi_month(
-                config, getattr(st, "fetcher_factory", Fetcher)(), base_year=body.base_year, year=body.year,
+                config, st.fetcher(), base_year=body.base_year, year=body.year,
                 month=body.month,
             )  # fmt: skip
         except mospi.MospiError as exc:

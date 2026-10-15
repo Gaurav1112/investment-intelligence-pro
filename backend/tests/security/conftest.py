@@ -6,6 +6,7 @@ from fastapi import APIRouter, Request
 from starlette.testclient import TestClient
 
 from iip.api.app import create_app
+from iip.api.routes import all_routers
 from iip.api.settings import Settings
 
 BASE = "http://127.0.0.1:8741"
@@ -33,7 +34,7 @@ def settings(tmp_path: Path) -> Settings:
 
 @pytest.fixture
 def client(settings: Settings) -> Iterator[TestClient]:
-    app = create_app(settings, routers=[_test_router()])
+    app = create_app(settings, routers=[_test_router(), *all_routers()])
     with TestClient(app, base_url=BASE, raise_server_exceptions=False) as c:
         yield c
 

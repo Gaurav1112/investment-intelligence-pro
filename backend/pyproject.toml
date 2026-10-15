@@ -1,0 +1,63 @@
+[project]
+name = "iip"
+version = "0.1.0"
+description = "Investment Intelligence Pro — deterministic investment research engine (personal use)"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.30,<1",
+    "pydantic>=2.8,<3",
+    "httpx>=0.27,<1",
+    "numpy>=2.0,<3",
+    "scipy>=1.13,<2",
+    "pyyaml>=6.0,<7",
+    "python-multipart>=0.0.9,<1",
+    "openpyxl>=3.1,<4",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3,<9",
+    "hypothesis>=6.100,<7",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "types-pyyaml",
+    "pytest-cov>=5",
+]
+oracle = [
+    "QuantLib==1.44",
+    "pyxirr>=0.10.8,<0.11",
+    "scoringrules>=0.11,<0.12",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/iip"]
+
+[tool.uv]
+default-groups = ["dev", "oracle"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = ["oracle: cross-check against an independent library", "network: requires internet (skipped by default)"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "PL", "RUF"]
+ignore = ["PLR2004", "PLR0911", "PLR0912", "PLR0913", "S101", "RUF001", "RUF002", "RUF003"]
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S", "PLR"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src/iip"]
+[[tool.mypy.overrides]]
+module = ["scipy.*", "QuantLib.*", "pyxirr.*", "scoringrules.*"]
+ignore_missing_imports = true

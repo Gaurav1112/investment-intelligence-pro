@@ -17,6 +17,7 @@ from iip.engine.ranking import CREDIT_SCALE, Objective
 from iip.store.db import write_tx
 
 PROFILE_ID = "default"
+SURCHARGE_BANDS = frozenset({Decimal("0"), Decimal("0.10"), Decimal("0.15"), Decimal("0.25")})
 ILLUSTRATIVE_AMOUNT = Decimal("100000")
 ILLUSTRATIVE_HORIZON_DAYS = 182
 
@@ -36,6 +37,8 @@ class Profile(BaseModel):
     exclude_nbfc_deposits: bool = True
     tax_regime: Literal["new", "old"] | None = None
     slab_rate: Decimal | None = Field(default=None, ge=0, le=Decimal("0.5"))
+    # New-regime surcharge band on total income (0 below ₹50 lakh; 10 % / 15 % / 25 % above ₹50 L / ₹1 Cr / ₹2 Cr).
+    surcharge_rate: Decimal | None = None
     return_aspiration: Decimal | None = Field(default=None, ge=0, le=5)  # stated aspiration, never an optimiser target
 
     @field_validator("credit_floor")
@@ -45,7 +48,14 @@ class Profile(BaseModel):
             raise ValueError(f"unknown credit floor; use one of {CREDIT_SCALE}")
         return v
 
-    @field_validator("amount", "max_loss_fraction", "slab_rate", "return_aspiration", mode="before")
+    @field_validator("surcharge_rate")
+    @classmethod
+    def _surcharge_band(cls, v: Decimal | None) -> Decimal | None:
+        if v is not None and v not in SURCHARGE_BANDS:
+            raise ValueError("surcharge_rate must be one of the new-regime bands 0, 0.10, 0.15 or 0.25")
+        return v
+
+    @field_validator("amount", "max_loss_fraction", "slab_rate", "return_aspiration", "surcharge_rate", mode="before")
     @classmethod
     def _no_floats(cls, v: object) -> object:
         if isinstance(v, float):

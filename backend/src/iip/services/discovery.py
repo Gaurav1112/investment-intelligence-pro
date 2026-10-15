@@ -29,6 +29,7 @@ from iip.engine.ranking import (
     Tier,
     rank,
 )
+from iip.services.explain import badge, source_ref
 from iip.services.instruments import FD_RATE_STALE_DAYS, TBILL_STALE_DAYS
 from iip.services.profile import ILLUSTRATIVE_AMOUNT, ILLUSTRATIVE_HORIZON_DAYS, ProfileStatus
 from iip.store.db import write_tx
@@ -72,7 +73,9 @@ class Universe:
 _NAV_SOURCE_PRECEDENCE = ("amfi.navall", "amfi.navhistory", "fixture")
 
 
-def _nav_series(conn: sqlite3.Connection, code: str) -> tuple[list[date], list[Decimal], dict[str, Any]]:
+def _nav_series(
+    conn: sqlite3.Connection, code: str, as_of: date | None = None
+) -> tuple[list[date], list[Decimal], dict[str, Any]]:
     """One NAV per date. The same date can arrive from NAVAll AND the history report (both official AMFI).
 
     Equal values (exact Decimal compare, so '25.9504' == '25.95040') are merged. Unequal values are a SOURCE CONFLICT:
@@ -115,23 +118,33 @@ def _nav_series(conn: sqlite3.Connection, code: str) -> tuple[list[date], list[D
             "sources": sorted({r["source_id"] for r in chosen}),
             "fixture": any(r["quality_status"] == "fixture" for r in chosen),
         })  # fmt: skip
+    prov["freshness"] = badge(prov, as_of) if chosen else "UNAVAILABLE"
     return dates, navs, prov
+
+
+SURCHARGE_UNKNOWN = (
+    "surcharge band not entered, so NO surcharge is applied — tax is understated if your total income exceeds ₹50 lakh"
+)
 
 
 def _tax_profile(status: ProfileStatus) -> tx.TaxProfile | None:
     p = status.profile
     if p.slab_rate is None or p.tax_regime != "new":
         return None  # illustrative 30 % profile is used and labelled (old regime is not modelled)
+    if p.surcharge_rate is None:
+        label = f"your profile (new regime, your marginal slab; {SURCHARGE_UNKNOWN})"
+    else:
+        label = f"your profile (new regime, your marginal slab, surcharge band {pct(p.surcharge_rate)})"
     return tx.TaxProfile(
         regime=tx.Regime.NEW,
         residential_status=tx.ResidentialStatus.RESIDENT,
         slab_rate=p.slab_rate,
-        surcharge_rate=D("0"),
-        label="your profile (new regime, your marginal slab, no surcharge)",
+        surcharge_rate=p.surcharge_rate if p.surcharge_rate is not None else D("0"),
+        label=label,
     )
 
 
-def build_universe(
+def build_universe(  # noqa: PLR0915 - one linear pass per instrument kind
     conn: sqlite3.Connection,
     *,
     amount: Decimal,
@@ -158,7 +171,7 @@ def build_universe(
                 skipped += 1
                 continue
             evaluated += 1
-            dates, navs, prov = _nav_series(conn, r["amfi_code"])
+            dates, navs, prov = _nav_series(conn, r["amfi_code"], as_of)
             if prov["conflicts"]:
                 tier = cb.mf_tier_from_category(r["category_raw"] or "")
                 reason = [f"SOURCE_CONFLICT: official sources disagree on {prov['conflicts'][0]}"]
@@ -190,19 +203,18 @@ def build_universe(
             sources[r["instrument_id"]] = {**prov, "kind": "mf_scheme", "category": cat}
 
     if "tbill" not in excluded_kinds:
-        for r in conn.execute(
-            "SELECT i.instrument_id, i.name, b.maturity_date, o.value, o.observation_date, o.source_url,"
-            " o.retrieved_at,"
-            " o.quality_status"
-            " FROM instruments i JOIN bond_terms b USING(instrument_id) JOIN observations o"
-            " ON o.series_id = 'yield:' || i.instrument_id AND o.superseded_by IS NULL WHERE i.kind='tbill'"
-            " AND o.observation_date = (SELECT MAX(o2.observation_date) FROM observations o2"
-            "   WHERE o2.series_id = o.series_id AND o2.superseded_by IS NULL)"
-            " ORDER BY i.instrument_id"
+        for inst in conn.execute(
+            "SELECT i.instrument_id, i.name, b.maturity_date FROM instruments i JOIN bond_terms b USING(instrument_id)"
+            " WHERE i.kind='tbill' ORDER BY i.instrument_id"
         ):
+            iid, name = inst["instrument_id"], inst["name"]
+            r, problem = tbill_quote(conn, iid, as_of)
+            if r is None:
+                continue  # no usable yield observation at all (as before: the T-bill is not in the universe)
             quote_date = date.fromisoformat(r["observation_date"])
-            iid, name = r["instrument_id"], r["name"]
-            if (as_of - quote_date).days > TBILL_STALE_DAYS:
+            if problem is not None:
+                b = cb._ineligible(iid, name, Tier.T1, [problem], amount)
+            elif (as_of - quote_date).days > TBILL_STALE_DAYS:
                 b = cb._ineligible(iid, name, Tier.T1, [f"STALE_DATA: yield quoted {quote_date}"], amount)
             else:
                 b = cb.tbill_candidate(
@@ -211,7 +223,7 @@ def build_universe(
                     amount=amount,
                     quoted_yield=Decimal(r["value"]),
                     settlement=as_of + timedelta(days=1),
-                    maturity=date.fromisoformat(r["maturity_date"]),
+                    maturity=date.fromisoformat(inst["maturity_date"]),
                     withdrawal=withdrawal,
                     ruleset=ruleset,
                     profile=profile,
@@ -219,13 +231,14 @@ def build_universe(
             built.append(b)
             sources[iid] = {
                 "kind": "tbill",
-                "source_id": "rbi.pr.tbill",
+                "source_id": r["source_id"],  # as stored (a fixture is never labelled as an RBI release)
                 "url": r["source_url"],
                 "retrieved_at": r["retrieved_at"],
                 "observation_date": r["observation_date"],
                 "quality_status": r["quality_status"],
                 "fixture": r["quality_status"] == "fixture",
             }
+            sources[iid]["freshness"] = badge(sources[iid], as_of)
 
     if "fd" not in excluded_kinds:
         for r in conn.execute(
@@ -239,7 +252,10 @@ def build_universe(
                 "SELECT value_json FROM settings WHERE key=?", (f"fd.existing:{iid}",)
             ).fetchone()
             existing = Decimal(json.loads(existing_row["value_json"])) if existing_row else D("0")
-            if (as_of - rate_date).days > FD_RATE_STALE_DAYS:
+            if rate_date > as_of:
+                b = cb._ineligible(iid, name, Tier.T2, [f"LOOK_AHEAD: rate dated {rate_date}, after the analysis date"],
+                                   amount)  # fmt: skip
+            elif (as_of - rate_date).days > FD_RATE_STALE_DAYS:
                 b = cb._ineligible(iid, name, Tier.T2, [f"STALE_DATA: rate as of {rate_date}"], amount)
             else:
                 b = cb.fd_candidate(
@@ -255,18 +271,67 @@ def build_universe(
                     other_deposits_same_bank=existing,
                     ruleset=ruleset,
                     profile=profile,
+                    sovereign_backed=fd_institution_type(conn, iid) == "post_office",
                 )
             built.append(b)
             sources[iid] = {
                 "kind": "fd",
                 "source_id": "bank.fd",
                 "url": r["citation_url"],
-                "retrieved_at": r["created_at"],  # when the user entered the cited rate
+                "retrieved_at": fd_entered_at(conn, iid, r["created_at"]),  # when the user entered the cited rate
                 "observation_date": r["rate_as_of"],
                 "quality_status": "fixture" if r["origin"] == "fixture" else "manual",
                 "fixture": r["origin"] == "fixture",
             }
+            sources[iid]["freshness"] = badge(sources[iid], as_of)
     return Universe(tuple(built), sources, skipped, evaluated)
+
+
+_YIELD_SOURCE_PRECEDENCE = ("rbi.pr.tbill", "fixture")
+
+
+def tbill_quote(conn: sqlite3.Connection, iid: str, as_of: date) -> tuple[sqlite3.Row | None, str | None]:
+    """The yield quote to evaluate a T-bill on ``as_of``: the latest usable observation dated on or before it.
+
+    Returns (row, problem). A quote dated after ``as_of`` is never used (a mistyped future date must not win forever
+    or dodge the staleness rule); if it is the only quote, the problem is LOOK_AHEAD. Two current quotes for the same
+    date that disagree (e.g. a fixture and a manual entry for the same tenor/maturity) are a SOURCE_CONFLICT — one is
+    never picked silently, and the instrument is evaluated once (duplicate ids used to crash the ranking).
+    """
+    rows = conn.execute(
+        "SELECT value, observation_date, source_id, source_url, retrieved_at, quality_status FROM observations"
+        " WHERE series_id=? AND superseded_by IS NULL AND quality_status IN ('ok','manual','fixture')"
+        " ORDER BY observation_date DESC",
+        (f"yield:{iid}",),
+    ).fetchall()
+    if not rows:
+        return None, None
+    usable = [r for r in rows if date.fromisoformat(r["observation_date"]) <= as_of]
+    if not usable:
+        return rows[-1], f"LOOK_AHEAD: yield quoted {rows[-1]['observation_date']}, after the analysis date"
+    same_day = [r for r in usable if r["observation_date"] == usable[0]["observation_date"]]
+
+    def rank(r: sqlite3.Row) -> int:
+        sid = r["source_id"]
+        return _YIELD_SOURCE_PRECEDENCE.index(sid) if sid in _YIELD_SOURCE_PRECEDENCE else len(_YIELD_SOURCE_PRECEDENCE)
+
+    same_day.sort(key=lambda r: (rank(r), r["source_id"]))
+    if len({Decimal(r["value"]) for r in same_day}) > 1:
+        detail = ", ".join(f"{r['source_id']}={r['value']}" for r in same_day)
+        return same_day[0], f"SOURCE_CONFLICT: quotes disagree on {same_day[0]['observation_date']}: {detail}"
+    return same_day[0], None
+
+
+def fd_entered_at(conn: sqlite3.Connection, iid: str, created_at: str) -> str:
+    """When the current FD rate was entered (falls back to the instrument's creation for rows entered before this
+    was recorded)."""
+    row = conn.execute("SELECT value_json FROM settings WHERE key=?", (f"fd.entered_at:{iid}",)).fetchone()
+    return str(json.loads(row["value_json"])) if row else created_at
+
+
+def fd_institution_type(conn: sqlite3.Connection, iid: str) -> str | None:
+    row = conn.execute("SELECT value_json FROM settings WHERE key=?", (f"fd.institution_type:{iid}",)).fetchone()
+    return str(json.loads(row["value_json"])) if row else None
 
 
 # ----------------------------------------------------------------------------- facts & explanations
@@ -304,19 +369,7 @@ def explained_outcome(
         }[which]
     )
     tax = {"q05": ev.tax_low, "q50": ev.tax_mid, "q95": ev.tax_high}[which]
-    sources = []
-    if prov:
-        sources.append(
-            {
-                "source_id": prov.get("source_id", ""),
-                "source_name": prov.get("source_id", ""),
-                "url": prov.get("url", ""),
-                "retrieved_at": prov.get("retrieved_at"),
-                "observation_date": prov.get("observation_date"),
-                "quality_status": prov.get("quality_status", ""),
-                "official": prov.get("quality_status") != "unofficial",
-            }
-        )
+    sources = [source_ref(prov)] if prov else []
     sensitivity = []
     if not c.outcome.is_contractual:
         sensitivity = [
@@ -324,9 +377,7 @@ def explained_outcome(
             {"label": "Median", "display": format_inr(c.outcome.q50)},
             {"label": "High-end", "display": format_inr(c.outcome.q95)},
         ]
-    freshness = (
-        "FIXTURE" if prov.get("fixture") else ("MANUAL" if prov.get("quality_status") == "manual" else "END_OF_DAY")
-    )
+    freshness = str(prov.get("freshness") or "UNKNOWN")  # computed from age at load time; never assumed fresh
     payload = {"id": c.instrument_id, "which": which, "value": str(value), "inputs": ev.inputs}
     return {
         "id": f"{c.instrument_id}.{which}",
@@ -575,6 +626,29 @@ def _exclude_fixtures(universe: Universe, amount: Decimal) -> Universe:
     return Universe(tuple(built), universe.sources, universe.skipped_no_history, universe.evaluated_mf)
 
 
+_NBFC_TYPES = frozenset({"nbfc", "hfc"})
+
+
+def _exclude_nbfc_deposits(conn: sqlite3.Connection, universe: Universe, amount: Decimal) -> Universe:
+    """requirements.md §3.2 item 8: the profile's "exclude NBFC deposits" restriction (default on).
+
+    NBFC/HFC deposits are excluded; so is an uninsured deposit whose institution type was never recorded (it cannot
+    be shown NOT to be an NBFC deposit — never assumed)."""
+    built = []
+    for b in universe.built:
+        c = b.candidate
+        iid = c.instrument_id
+        if universe.sources.get(iid, {}).get("kind") == "fd":
+            kind = fd_institution_type(conn, iid)
+            unknown_uninsured = kind is None and "NOT_DICGC_INSURED" in c.flags
+            if kind in _NBFC_TYPES or unknown_uninsured:
+                reason = ["EXCLUDED_BY_USER: your profile excludes NBFC/HFC deposits"]
+                built.append(cb._ineligible(iid, c.name, c.tier, reason, amount))
+                continue
+        built.append(b)
+    return Universe(tuple(built), universe.sources, universe.skipped_no_history, universe.evaluated_mf)
+
+
 def discover(  # noqa: PLR0915 - one auditable orchestration sequence
     conn: sqlite3.Connection,
     status: ProfileStatus,
@@ -603,6 +677,8 @@ def discover(  # noqa: PLR0915 - one auditable orchestration sequence
         )
         if personalised and not allow_fixtures:
             universe = _exclude_fixtures(universe, amount)
+        if personalised and p.exclude_nbfc_deposits:
+            universe = _exclude_nbfc_deposits(conn, universe, amount)
 
     def present(v: object) -> ContextValue:
         return ContextValue("", present=v is not None, valid=v is not None)
@@ -777,7 +853,9 @@ def discover(  # noqa: PLR0915 - one auditable orchestration sequence
             "withdrawal_date": withdrawal.isoformat(),
             "objective": objective.value,
             "illustrative": not personalised,
-            "tax_basis": "your profile" if tax_profile else "ILLUSTRATIVE 30 % slab (not your profile)",
+            "tax_basis": (
+                tax_profile.label if tax_profile else "ILLUSTRATIVE 30 % slab, no surcharge (not your profile)"
+            ),
         },
         "message": (ranking.message if ranking and ranking.message else None),
         "abstain_reasons": list(sup.abstain_reasons),

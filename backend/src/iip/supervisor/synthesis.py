@@ -6,13 +6,14 @@ passes the numeric-provenance validator and the banned-phrase scan; otherwise th
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from iip.supervisor import compliance
 from iip.supervisor.conflicts import Conflict
 from iip.supervisor.contracts import PLACEHOLDER, Claim, WorkerContract, WorkerStatus
-from iip.supervisor.facts import FactSheet
+from iip.supervisor.facts import FactOrigin, FactSheet
 
 
 class ComplianceViolation(RuntimeError):
@@ -44,6 +45,18 @@ def render_claim(claim: Claim, facts: FactSheet) -> str:
     return PLACEHOLDER.sub(lambda m: facts.get(m.group(1)).display, claim.template)
 
 
+def _own_copy(claim: Claim, facts: FactSheet) -> str:
+    """The text WE wrote: the template plus engine-computed displays. Observation and user-input displays (instrument
+    names, an amount) are source or user DATA, so a name such as "… Capital Protection Oriented Fund" is shown
+    verbatim but is not treated as a defect in our copy (it used to raise and fail every Discovery run)."""
+
+    def sub(m: re.Match[str]) -> str:
+        fact = facts.get(m.group(1))
+        return fact.display if fact.origin is FactOrigin.ENGINE else " "
+
+    return PLACEHOLDER.sub(sub, claim.template)
+
+
 def build_report(
     contracts: list[WorkerContract],
     facts: FactSheet,
@@ -58,7 +71,7 @@ def build_report(
             continue
         for claim in c.claims:
             text = render_claim(claim, facts)
-            hits = compliance.blocked(text)
+            hits = compliance.blocked(_own_copy(claim, facts))
             if hits:
                 raise ComplianceViolation(f"{c.worker}:{claim.claim_id} rendered banned copy: {hits}")
             rendered.append(

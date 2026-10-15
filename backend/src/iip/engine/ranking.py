@@ -188,6 +188,13 @@ def _eligibility(request: RankingRequest, c: Candidate) -> list[tuple[str, str]]
 
         if request.objective in PRESERVING_OBJECTIVES:
             floor = request.amount * (D("1") - request.preservation_floor)
+            if c.outcome.is_contractual and c.tier > Tier.T2:
+                # A contractual promise outside T1/T2 carries unquantified issuer credit risk (e.g. an uninsured
+                # deposit, or one whose maturity value exceeds the DICGC cover). risk-methodology §9 Step 1 lists the
+                # DICGC limit as a hard constraint; ADR-0005: what is unknown is never assumed safe.
+                failures.append(
+                    ("UNINSURED_CREDIT_EXPOSURE", "Part or all of the amount carries uninsured issuer credit risk.")
+                )
             if not c.outcome.is_contractual:
                 if c.loss_frequency is None:
                     failures.append(

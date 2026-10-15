@@ -19,6 +19,7 @@ from iip.engine.deposits import fd_maturity
 from iip.engine.errors import EngineError, InvalidInput
 from iip.engine.feasibility import percentile_type7
 from iip.engine.fixed_income import tbill_days, tbill_price
+from iip.engine.freshness import nav_is_stale
 from iip.engine.money import ONE, ZERO, D, engine_context
 from iip.engine.ranking import Candidate, OutcomeBand, Tier
 
@@ -26,6 +27,7 @@ ENGINE_VERSION = "candidates@1.0.0"
 MIN_INDEPENDENT_WINDOWS = 10  # validation-methodology §8: below this the empirical distribution is refused
 FULL_BAND_INDEPENDENT_WINDOWS = 20  # q05/q95 need ≥ 20 independent windows; otherwise worst observed window
 MAX_NAV_STALENESS_DAYS = 7  # calculation-methodology §0: last price on or before t within 7 calendar days
+MIN_HISTORY_DAYS = 365  # validation-methodology §8: newly launched (< 1 year of history) → suppressed
 
 
 class TaxBasis(StrEnum):
@@ -230,7 +232,10 @@ def fd_candidate(
     ruleset: tx.TaxRuleSet,
     profile: tx.TaxProfile | None,
     short_tenure_cutoff_months: int = 6,
+    sovereign_backed: bool = False,
 ) -> BuiltCandidate:
+    """Cumulative deposit held to maturity. ``sovereign_backed`` = a Post Office Time Deposit (Government of India
+    obligation, not DICGC-insured): contractual sovereign credit, so T1 rather than uninsured bank credit."""
     maturity = start + timedelta(days=tenure_days)
     if maturity > withdrawal:
         return _ineligible(
@@ -247,9 +252,12 @@ def fd_candidate(
     with engine_context():
         exposure = other_deposits_same_bank + res.maturity_amount
         fully_insured = dicgc_eligible and exposure <= DICGC_LIMIT
+        credit_safe = sovereign_backed or fully_insured
         net = res.maturity_amount - tax_amt
     flags: list[str] = []
-    if not dicgc_eligible:
+    if sovereign_backed:
+        flags.append("SOVEREIGN_BACKED_NOT_DICGC")
+    elif not dicgc_eligible:
         flags.append("NOT_DICGC_INSURED")
     elif not fully_insured:
         flags.append("EXCEEDS_DICGC_LIMIT_AT_THIS_BANK")
@@ -285,7 +293,7 @@ def fd_candidate(
         ),
     )
     # Only a fully insured deposit is T2 (contractual non-sovereign). Uninsured exposure is bank credit risk.
-    tier = Tier.T2 if fully_insured else Tier.T3
+    tier = Tier.T1 if sovereign_backed else Tier.T2 if fully_insured else Tier.T3
     with engine_context():
         years = Decimal(tenure_days) / Decimal(365)
         exit_cost = premature_penalty * years if premature_penalty is not None else ONE
@@ -294,11 +302,13 @@ def fd_candidate(
         name=name,
         tier=tier,
         outcome=OutcomeBand.contractual(net),
-        loss_frequency=ZERO if fully_insured else None,
+        loss_frequency=ZERO if credit_safe else None,
         days_to_cash=1 if premature_penalty is not None else tenure_days,
         exit_cost=exit_cost,
         horizon_fit=True,
-        credit_rating=None,
+        # Insured: credit is not the binding risk (None = n/a). Uninsured exposure has no rating in the system, so it
+        # is UNRATED and fails any credit floor the user sets (it is never silently skipped).
+        credit_rating="SOVEREIGN" if sovereign_backed else None if fully_insured else "UNRATED",
         data_ok=True,
         flags=tuple(flags),
     )
@@ -372,13 +382,13 @@ def mf_tier_from_category(category: str) -> Tier:
 
 def sebi_default_exit_load(category: str) -> ExitLoadSpec | None:
     """Loads fixed by regulation (not by the AMC): liquid funds' graded load applies to redemptions within 6 days
-    (max 0.0070 on day 1 — the conservative bound is used); overnight funds carry none."""
+    (max 0.0070 % = 0.000070 on day 1 — the conservative bound is used); overnight funds carry none."""
     c = category.lower()
     if "overnight" in c:
         return ExitLoadSpec(days=0, rate=ZERO, citation="SEBI categorisation: overnight funds carry no exit load")
     if "liquid" in c:
         return ExitLoadSpec(
-            days=6, rate=D("0.0070"), citation="SEBI graded exit load for liquid funds (day 1–6, max 0.0070)"
+            days=6, rate=D("0.000070"), citation="SEBI graded exit load for liquid funds (day 1–6, max 0.0070 %)"
         )
     return None
 
@@ -403,13 +413,28 @@ def _nav_on_or_before(dates: Sequence[date], navs: Sequence[Decimal], target: da
 
 def horizon_window_returns(dates: Sequence[date], navs: Sequence[Decimal], horizon_days: int) -> list[Decimal]:
     """All overlapping calendar-day windows: R = NAV(t + H, last on/before) / NAV(t) − 1 (no look-ahead)."""
+    return [r for _, r in _horizon_windows(dates, navs, horizon_days)]
+
+
+def independent_window_count(starts: Sequence[date], horizon_days: int) -> int:
+    """Non-overlapping evidence actually present: the number of distinct H-day buckets that contain a window start.
+
+    For a gap-free series this equals span // H. Gaps reduce it, so a history with holes (or one ancient NAV before a
+    short recent run) cannot claim independent windows it does not have.
+    """
+    if not starts:
+        return 0
+    return len({(s - starts[0]).days // horizon_days for s in starts})
+
+
+def _horizon_windows(dates: Sequence[date], navs: Sequence[Decimal], horizon_days: int) -> list[tuple[date, Decimal]]:
     if len(dates) != len(navs):
         raise InvalidInput("dates and navs differ in length")
     if any(b <= a for a, b in pairwise(dates)):
         raise InvalidInput("NAV dates must be strictly increasing")
     if any(n <= 0 for n in navs):
         raise InvalidInput("NAVs must be positive")
-    out: list[Decimal] = []
+    out: list[tuple[date, Decimal]] = []
     with engine_context():
         for i, d in enumerate(dates):
             j = _nav_on_or_before(dates, navs, d + timedelta(days=horizon_days), i)
@@ -419,7 +444,7 @@ def horizon_window_returns(dates: Sequence[date], navs: Sequence[Decimal], horiz
                 continue
             if j <= i:
                 continue
-            out.append(navs[j] / navs[i] - ONE)
+            out.append((d, navs[j] / navs[i] - ONE))
     return out
 
 
@@ -446,7 +471,7 @@ def mf_candidate(  # noqa: PLR0915 - one linear, auditable pipeline; splitting h
         raise InvalidInput("withdrawal must be after as_of")
     if not nav_dates:
         return _ineligible(instrument_id, name, tier, ["INSUFFICIENT_OR_STALE_DATA: no NAV history"], amount)
-    if (as_of - nav_dates[-1]).days > MAX_NAV_STALENESS_DAYS:
+    if nav_is_stale(nav_dates[-1], as_of) and nav_dates[-1] <= as_of:
         reasons.append(f"STALE_DATA: latest NAV is dated {nav_dates[-1].isoformat()}")
     if nav_dates[-1] > as_of:
         reasons.append("LOOK_AHEAD: NAV dated after the analysis date")
@@ -455,6 +480,11 @@ def mf_candidate(  # noqa: PLR0915 - one linear, auditable pipeline; splitting h
         reasons.append("CLOSE_ENDED_OR_INTERVAL: units cannot be redeemed with the fund on demand before maturity")
     if lock_in > horizon_days:
         reasons.append(f"HORIZON_MISMATCH: {lock_in}-day lock-in exceeds your {horizon_days}-day horizon")
+    if horizon_days <= settlement_days:
+        # Units bought on as_of can be redeemed at the earliest the next day; proceeds then settle T+settlement_days.
+        reasons.append(
+            f"HORIZON_MISMATCH: redemption proceeds settle T+{settlement_days}, after your {horizon_days}-day horizon"
+        )
     load = exit_load if exit_load is not None else sebi_default_exit_load(category)
     if load is None:
         reasons.append("EXIT_LOAD_UNKNOWN: enter the scheme's exit load from its SID/KIM")
@@ -466,11 +496,19 @@ def mf_candidate(  # noqa: PLR0915 - one linear, auditable pipeline; splitting h
     assert load is not None
 
     try:
-        windows = horizon_window_returns(nav_dates, navs, horizon_days)
+        dated = _horizon_windows(nav_dates, navs, horizon_days)
     except EngineError as exc:
         return _ineligible(instrument_id, name, tier, [f"{exc.code}: {exc}"], amount)
+    windows = [r for _, r in dated]
     span = (nav_dates[-1] - nav_dates[0]).days
-    n_ind = span // horizon_days
+    if span < MIN_HISTORY_DAYS:
+        return _ineligible(
+            instrument_id, name, tier,
+            [f"INSUFFICIENT_HISTORY: {span} days of NAV history (need ≥ {MIN_HISTORY_DAYS}; newly launched or not "
+             "backfilled)"],
+            amount,
+        )  # fmt: skip
+    n_ind = independent_window_count([d for d, _ in dated], horizon_days)
     if n_ind < MIN_INDEPENDENT_WINDOWS or not windows:
         return _ineligible(
             instrument_id, name, tier,
@@ -521,6 +559,9 @@ def mf_candidate(  # noqa: PLR0915 - one linear, auditable pipeline; splitting h
             taxes.append(t)
             rule_ids.update(rep.rule_ids_used)
             unverified = unverified or rep.unverified_assumption
+            if any(cl.exemption_applied_inr > 0 for cl in rep.classifications):
+                # RT-18: the annual LTCG exemption is assumed unused by your other gains this year.
+                tax_flags.add("LTCG_EXEMPTION_ASSUMED_UNUSED")
             if tflag is not None:
                 tax_flags.add(tflag)
     except EngineError as exc:
@@ -577,7 +618,9 @@ def mf_candidate(  # noqa: PLR0915 - one linear, auditable pipeline; splitting h
         days_to_cash=settlement_days,
         exit_cost=load_rate,
         horizon_fit=True,
-        credit_rating=None,
+        # A fund has no single rating (None = n/a), except where SEBI's category mandates mostly sub-AA paper: a Credit
+        # Risk Fund must invest ≥ 65 % in instruments rated AA and below, so it fails any credit floor the user sets.
+        credit_rating="UNRATED" if "credit risk" in category.lower() else None,
         data_ok=True,
         flags=tuple(flags),
     )

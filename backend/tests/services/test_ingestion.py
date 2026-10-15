@@ -108,3 +108,25 @@ def test_history_backfill_keeps_only_the_requested_scheme(conn) -> None:  # type
     assert values == ["1393.087", "1385.402"]  # verbatim from the probe (HDFC Large Cap Direct Growth)
     statuses = {r["quality_status"] for r in conn.execute("SELECT quality_status FROM observations")}
     assert statuses == {"ok"}
+
+
+def test_untracked_schemes_keep_only_the_latest_nav(conn) -> None:  # type: ignore[no-untyped-def]
+    """RT-21: no daily NAV archive accumulates for schemes the user neither holds, watches nor backfilled."""
+    from iip.store.observations import ObservationRow, upsert_observation
+
+    ing.ingest_navall(conn, fetcher(amfi), lambda: NOW)
+    sid = conn.execute("SELECT series_id FROM observations LIMIT 1").fetchone()[0]
+    upsert_observation(conn, ObservationRow(
+        series_id=sid, kind="nav", value="1.0", unit="INR_per_unit", currency="INR", observation_date="2026-09-01",
+        retrieved_at=NOW.isoformat(), source_id="amfi.navall", source_url="https://portal.amfiindia.com/x",
+        quality_status="ok", raw_sha256="a" * 64))  # fmt: skip
+    assert conn.execute("SELECT COUNT(*) FROM observations WHERE series_id=?", (sid,)).fetchone()[0] == 2
+    ing.ingest_navall(conn, fetcher(amfi), lambda: NOW)
+    assert conn.execute("SELECT COUNT(*) FROM observations WHERE series_id=?", (sid,)).fetchone()[0] == 1
+
+
+def test_backfilled_schemes_keep_their_history(conn) -> None:  # type: ignore[no-untyped-def]
+    ing.backfill_history(conn, fetcher(amfi), scheme_code=119018, mf_id=9, start=date(2026, 10, 13),
+                         end=date(2026, 10, 14), now=lambda: NOW)  # fmt: skip
+    ing.ingest_navall(conn, fetcher(amfi), lambda: NOW)
+    assert conn.execute("SELECT COUNT(*) FROM observations WHERE series_id='nav:119018'").fetchone()[0] >= 2

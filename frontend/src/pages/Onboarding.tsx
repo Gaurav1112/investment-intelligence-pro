@@ -182,6 +182,16 @@ export default function Onboarding() {
               <input id="slab" inputMode="decimal" value={slabPct} onChange={(e) => setSlabPct(e.target.value)} />
               <div className="hint">If empty, after-tax figures use a labelled illustrative 30 % slab, not yours.</div>
             </div>
+            <div className="field">
+              <label htmlFor="surcharge">Surcharge band (only if your total income exceeds ₹50 lakh) — optional</label>
+              <select id="surcharge" value={p.surcharge_rate ?? ""} onChange={(e) => set("surcharge_rate", e.target.value || null)}>
+                <option value="">Not given (after-tax figures note that tax may be understated above ₹50 lakh)</option>
+                <option value="0">None (total income up to ₹50 lakh)</option>
+                <option value="0.10">10 % (₹50 lakh – ₹1 crore)</option>
+                <option value="0.15">15 % (₹1 – 2 crore)</option>
+                <option value="0.25">25 % (above ₹2 crore)</option>
+              </select>
+            </div>
             <label className="choice">
               <input type="checkbox" checked={p.tax_regime === "new"} onChange={(e) => set("tax_regime", e.target.checked ? "new" : null)} /> I
               file under the new tax regime

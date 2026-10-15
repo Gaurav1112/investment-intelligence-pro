@@ -119,6 +119,7 @@ class SeriesMeta:
     net_of_fees: bool
     source: str
     currency: str = "INR"
+    display_name: str | None = None  # human-readable instrument name for headlines (falls back to series_id)
 
 
 @dataclass(frozen=True)
@@ -999,7 +1000,7 @@ def _headline(
     realised: Sequence[Decimal],
 ) -> str:
     h = request.horizon_years
-    span = f"Over {meta.series_id}, from {pts[0].date.isoformat()} to {pts[-1].date.isoformat()}"
+    span = f"Over {meta.display_name or meta.series_id}, from {pts[0].date.isoformat()} to {pts[-1].date.isoformat()}"
     target = f"at least {_fmt_rate(request.target_rate)} p.a."
     if level is EvidenceLevel.REFUSED:
         periods = "period" if n_eff == 1 else "periods"

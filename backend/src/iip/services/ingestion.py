@@ -13,10 +13,9 @@ import sqlite3
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from decimal import Decimal
 
 from iip.data.fetch import Fetcher, FetchError
-from iip.data.models import DataError, Observation, ParseResult, QualityStatus, SchemeRecord
+from iip.data.models import DataError, Observation, ParseResult, SchemeRecord
 from iip.data.parsers._amfi import CURRENCY as NAV_CURRENCY
 from iip.data.parsers._amfi import UNIT as NAV_UNIT
 from iip.data.parsers.amfi_navall import parse_navall
@@ -25,11 +24,11 @@ from iip.data.registry import (
     MAX_HISTORY_WINDOW_DAYS,
     REGISTRY,
     SourceMode,
-    get_source,
     navall_request,
     navhistory_request,
 )
-from iip.data.validators import classify_freshness, run_all
+from iip.data.validators import run_all
+from iip.engine.freshness import nav_is_stale
 from iip.store.db import write_tx
 from iip.store.observations import ObservationRow, upsert_observation
 
@@ -203,11 +202,43 @@ def ingest_navall(conn: sqlite3.Connection, fetcher: Fetcher, now: Callable[[], 
     with write_tx(conn):
         _store_schemes(conn, (r for r in result.records if r.scheme_code in scope), payload.retrieved_at)
     stored = _store_observations(conn, observations, run_id, lambda c: c in scope)
+    pruned = prune_untracked_history(conn, tracked)
     rep = result.report
     status = "ok" if rep.rows_rejected == 0 else "partial"
     _finish_run(conn, run_id, now(), status, rep.rows_ok, rep.rows_rejected, payload.sha256, "")
-    return RunSummary(run_id, source, status, rep.rows_ok, rep.rows_rejected, stored,
-                      f"{len(scope)} schemes in the minimised scope")  # fmt: skip
+    detail = f"{len(scope)} schemes in the minimised scope; {pruned} older NAVs of untracked schemes pruned"
+    return RunSummary(run_id, source, status, rep.rows_ok, rep.rows_rejected, stored, detail)
+
+
+def prune_untracked_history(conn: sqlite3.Connection, tracked: set[int]) -> int:
+    """Data minimisation (AMFI ToU; source-registry §2.1; red-team RT-21): for schemes that are neither held,
+    watched nor deliberately backfilled, keep ONLY the latest NAVAll observation — no growing daily archive."""
+    backfilled = {
+        int(r["series_id"].split(":")[1])
+        for r in conn.execute("SELECT DISTINCT series_id FROM observations WHERE source_id='amfi.navhistory'")
+    }
+    keep = tracked | backfilled
+    candidates = conn.execute(
+        "SELECT o.series_id, MAX(o.observation_date) AS latest FROM observations o"
+        " WHERE o.source_id='amfi.navall' AND o.series_id LIKE 'nav:%' GROUP BY o.series_id"
+    ).fetchall()
+    removed = 0
+    with write_tx(conn):
+        for r in candidates:
+            if int(r["series_id"].split(":")[1]) in keep:
+                continue
+            # Break supersede links pointing at rows we delete, then drop older NAVAll rows for this scheme.
+            conn.execute(
+                "UPDATE observations SET superseded_by = NULL WHERE superseded_by IN (SELECT obs_id FROM observations"
+                " WHERE series_id=? AND source_id='amfi.navall' AND observation_date < ?)",
+                (r["series_id"], r["latest"]),
+            )
+            cur = conn.execute(
+                "DELETE FROM observations WHERE series_id=? AND source_id='amfi.navall' AND observation_date < ?",
+                (r["series_id"], r["latest"]),
+            )
+            removed += cur.rowcount
+    return removed
 
 
 def discover_fund_house_id(
@@ -284,30 +315,15 @@ def _validated_list(observations: list[Observation]) -> list[Observation]:
 
 
 def latest_freshness(conn: sqlite3.Connection, code: int, as_of: datetime) -> tuple[str, str | None]:
-    """Freshness of a scheme's latest NAV against the registry SLO → (badge, observation_date)."""
+    """Badge of a scheme's latest NAV using the ONE shared rule (engine.freshness.nav_is_stale) → (badge, date)."""
     row = conn.execute(
-        "SELECT * FROM observations WHERE series_id=? AND superseded_by IS NULL AND quality_status != 'rejected'"
-        " ORDER BY observation_date DESC LIMIT 1",
+        "SELECT observation_date, quality_status FROM observations WHERE series_id=? AND superseded_by IS NULL"
+        " AND quality_status != 'rejected' ORDER BY observation_date DESC LIMIT 1",
         (series_id(code),),
     ).fetchone()
     if row is None:
         return "UNKNOWN", None
     if row["quality_status"] == "fixture":
         return "FIXTURE", row["observation_date"]
-    obs = Observation(
-        source_id=row["source_id"],
-        source_url=row["source_url"],
-        retrieved_at=datetime.fromisoformat(row["retrieved_at"]),
-        observation_date=date.fromisoformat(row["observation_date"]),
-        publication_time=None,
-        entity_key=str(code),
-        value=Decimal(row["value"]),
-        unit=row["unit"],
-        currency=row["currency"],
-        quality_status=QualityStatus(row["quality_status"]),
-        convention=row["convention"] or "nav",
-        raw_sha256=row["raw_sha256"],
-    )
-    res = classify_freshness(obs, get_source("amfi.navall").freshness, as_of=as_of)
-    badge = {"FRESH": "END_OF_DAY", "STALE": "STALE", "EXPIRED": "STALE"}.get(res.freshness.name, "STALE")
-    return badge, row["observation_date"]
+    observed = date.fromisoformat(row["observation_date"])
+    return ("STALE" if nav_is_stale(observed, as_of.date()) else "END_OF_DAY"), row["observation_date"]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from functools import lru_cache
 from importlib import resources
@@ -12,8 +13,39 @@ import yaml
 
 from iip.supervisor.contracts import strip_allowed_literals
 
-# Numbers as they appear in prose: ₹1,00,534.00 · 6.50% · 0.534 · 2026-10-14 · 91-day
-_NUMBER = re.compile(r"\d{4}-\d{2}-\d{2}|₹?\s?\d[\d,]*(?:\.\d+)?%?")
+# Numbers as they appear in prose: ₹1,00,534.00 · 6.50% · 0.534 · 2026-10-14 · 91-day.
+# A leading sign (not glued to a word, so "COVID-19" is not negative), scientific notation and a trailing scale or
+# multiplier ("12x", "5 lakh", "₹5L", "12k") are PART of the token: "-6.50%" or "12x" is not the cited "6.50%" or "12".
+_NUMBER = re.compile(
+    r"(?:(?<!\w)[-+])?"
+    r"(?:\d{4}-\d{2}-\d{2}|₹\s?\d[\d,]*(?:\.\d+)?%?|\d[\d,]*(?:\.\d+)?(?:[eE][-+]?\d+)?%?)"
+    r"(?:\s?(?:x|X|k|K|L|lakhs?|lacs?|crores?|cr|Cr|mn|bn|million|billion|thousand|hundred)\b)?"
+)
+# Spelled-out quantities carry no citation, so the validator cannot trace them: rejected outright ("one" is allowed —
+# it is ordinary prose, and "one percent" is still caught by "percent").
+_NUMBER_WORDS = re.compile(
+    r"\b(?:zero|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|"
+    r"seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundreds?|thousands?|"
+    r"lakhs?|lacs?|crores?|millions?|billions?|trillions?|percent|per\s?cent|percentage points?|bps|basis points?|"
+    r"double[ds]?|doubling|triple[ds]?|tripling|twice|thrice|half|halve[ds]?|dozens?)\b",
+    re.IGNORECASE,
+)
+# Invisible or look-alike characters that would let banned copy slip past a regex (SEC: supervisor bypass).
+_INVISIBLE = dict.fromkeys(map(ord, "\u00ad\u200b\u200c\u200d\u2060\ufeff\u180e"), None)
+_DASHES = dict.fromkeys(map(ord, "\u2010\u2011\u2012\u2013\u2014\u2015\u2212\ufe63\uff0d"), "-")
+_CONFUSABLES = str.maketrans(
+    "\u0430\u0435\u043e\u0440\u0441\u0443\u0445\u0456\u0458\u0455\u0501\u0261\u03bf\u03b1\u03b5\u03c1"
+    "\u0410\u0412\u0415\u041a\u041c\u041d\u041e\u0420\u0421\u0422\u0425\u0391\u0392\u0395\u0397\u0399"
+    "\u039a\u039c\u039d\u039f\u03a1\u03a4\u03a7",
+    "aeopcyxijsdgoaepABEKMHOPCTXABEHIKMNOPTX",
+)
+
+
+def normalise(text: str) -> str:
+    """Canonical form for scanning: NFKC (fullwidth → ASCII), invisible characters removed, dash variants → '-',
+    common Cyrillic/Greek look-alikes → Latin, and every whitespace run → one space."""
+    t = unicodedata.normalize("NFKC", text).translate(_INVISIBLE).translate(_DASHES).translate(_CONFUSABLES)
+    return re.sub(r"\s+", " ", t)
 
 
 @dataclass(frozen=True)
@@ -55,7 +87,7 @@ def _strip_required(text: str, rules: ComplianceRules) -> str:
 
 def scan(text: str, rules: ComplianceRules | None = None) -> list[PhraseHit]:
     rules = rules or load_rules()
-    body = _strip_required(text, rules)
+    body = _strip_required(normalise(text), rules)
     hits: list[PhraseHit] = []
     for category, pattern in rules.block:
         for m in pattern.finditer(body):
@@ -74,6 +106,10 @@ def _norm(token: str) -> str:
     return token.replace("₹", "").replace(",", "").replace(" ", "").strip()
 
 
+def _tokens(text: str) -> list[str]:
+    return [m.group(0).strip() for m in _NUMBER.finditer(text)]
+
+
 def unsupported_numbers(
     text: str, allowed_displays: frozenset[str], extra_allowed: frozenset[str] = frozenset()
 ) -> list[str]:
@@ -82,17 +118,18 @@ def unsupported_numbers(
     This is the guard that stops an LLM (or a careless template) from introducing an unsourced number.
     """
     rules = load_rules()
-    body = strip_allowed_literals(_strip_required(text, rules))
-    allowed_norm = {_norm(d) for d in allowed_displays} | {_norm(x) for x in extra_allowed}
+    body = strip_allowed_literals(_strip_required(normalise(text), rules))
+    allowed_norm = {_norm(normalise(d)) for d in allowed_displays} | {_norm(normalise(x)) for x in extra_allowed}
     allowed_tokens: set[str] = set()
     for display in allowed_displays | extra_allowed:
-        allowed_tokens.update(_norm(m.group(0)) for m in _NUMBER.finditer(display))
+        allowed_tokens.update(_norm(t) for t in _tokens(normalise(display)))
     bad: list[str] = []
-    for m in _NUMBER.finditer(body):
-        tok = _norm(m.group(0))
+    for raw in _tokens(body):
+        tok = _norm(raw)
         if not tok:
             continue
         if tok in allowed_tokens or tok in allowed_norm:
             continue
-        bad.append(m.group(0).strip())
+        bad.append(raw)
+    bad.extend(m.group(0) for m in _NUMBER_WORDS.finditer(body))
     return bad

@@ -38,6 +38,7 @@ from iip.engine.ranking import Tier
 from iip.engine.returns import CashFlow, XirrOutcome, xirr
 from iip.engine.stats.metrics import hhi_from_values
 from iip.services import ingestion
+from iip.services.explain import source_ref
 from iip.services.instruments import TBILL_STALE_DAYS
 from iip.store.db import backup as db_backup
 from iip.store.db import current_version, write_tx
@@ -203,7 +204,7 @@ def _explained(
         "formula": formula,
         "substituted": substituted,
         "inputs": list(inputs),
-        "sources": list(sources),
+        "sources": [source_ref(src) for src in sources],
         "observed": observed,
         "freshness": freshness,
         "assumptions": list(assumptions),
@@ -1003,7 +1004,7 @@ def portfolio_summary(
                 unit="INR", display=format_inr(h.invested), what="Cost of the units still held, by FIFO lots.",
                 formula_id="FIFO_COST@1", formula="Σ remaining lot cost", substituted=format_inr(h.invested),
                 inputs=[f"{len(h.position.lots)} open lot(s)"], sources=[{"source_id": "user.transactions"}],
-                observed=as_of.isoformat(), freshness="USER_DATA",
+                observed=as_of.isoformat(), freshness="USER_INPUT",
             ),
             "market_value": None, "unrealised_pl": None,
         }  # fmt: skip
@@ -1079,7 +1080,7 @@ def portfolio_summary(
                 formula_id="FIFO_COST@1", formula="Σ remaining lot cost",
                 substituted=f"{format_inr(invested_included)} (all holdings at cost: {format_inr(invested_all)})",
                 inputs=[f"{len(txns)} transaction(s)"], sources=[{"source_id": "user.transactions"}],
-                observed=as_of.isoformat(), freshness="USER_DATA", limitations=excl_limit,
+                observed=as_of.isoformat(), freshness="USER_INPUT", limitations=excl_limit,
             ),
             "invested_all_holdings": _s(invested_all),
             "unrealised_pl": _explained(

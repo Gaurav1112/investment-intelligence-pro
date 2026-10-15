@@ -146,6 +146,20 @@ def add_fd(conn: sqlite3.Connection, body: FDIn, now: datetime) -> str:
             " ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json",
             (f"fd.existing:{iid}", json.dumps(format(body.existing_deposits_at_institution, "f"))),
         )
+        # Needed by the profile's "exclude NBFC deposits" restriction and to recognise sovereign-backed post-office
+        # deposits (dicgc_eligible alone cannot tell an NBFC from a post office).
+        conn.execute(
+            "INSERT INTO settings(key, value_json) VALUES (?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json",
+            (f"fd.institution_type:{iid}", json.dumps(body.institution_type)),
+        )
+        # When THIS rate was entered (instruments.created_at is the first entry only; provenance must not show a rate
+        # as "retrieved" before the date it describes).
+        conn.execute(
+            "INSERT INTO settings(key, value_json) VALUES (?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json",
+            (f"fd.entered_at:{iid}", json.dumps(now.isoformat())),
+        )
     return iid
 
 

@@ -96,6 +96,9 @@ def run(
 
     if not gate.complete:
         abstain = [_gap_text(g) for g in gate.blocking]
+    elif not any(w.required for w in workers):
+        # An answer needs at least one required worker's contract; an empty or optional-only run cannot ANSWER.
+        abstain = ["NO_REQUIRED_WORKER: no required worker was run for this question"]
     else:
         for worker in workers:  # fixed order → deterministic
             contract = worker.run(facts, context, payload)

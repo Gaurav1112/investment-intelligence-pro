@@ -318,3 +318,20 @@ def test_live_category_tiers(category: str, tier: Tier) -> None:
 )
 def test_ambiguous_live_categories_are_unknown_for_tax(category: str) -> None:
     assert cb.mf_tax_class_from_category(category) is cb.MfTaxClass.UNKNOWN
+
+
+def test_equity_ltcg_exemption_assumption_is_flagged() -> None:
+    """RT-18: when the ₹1.25 lakh exemption reduces tax, the result says it assumed the exemption was unused.
+
+    Under today's rule table (coverage to 31-Mar-2027) no equity holding started today can reach LTCG, because the
+    coverage clamp shortens the holding period (RT-17, documented). A table with longer coverage exercises the flag.
+    """
+    import dataclasses
+
+    extended = dataclasses.replace(RULES, coverage_to=date(2028, 12, 31))
+    ds, ns = _series(date(2012, 1, 2), FULL_SPAN, "0.0006")
+    b = _liquid(category="Equity Scheme - Large Cap Fund", nav_dates=ds, navs=ns, amount=D("2000000"),
+                withdrawal=date(2027, 11, 19), exit_load=cb.ExitLoadSpec(365, D("0.01"), "SID FIXTURE"),
+                ruleset=extended)  # fmt: skip
+    assert not b.ineligible_reasons, b.ineligible_reasons
+    assert "LTCG_EXEMPTION_ASSUMED_UNUSED" in b.candidate.flags

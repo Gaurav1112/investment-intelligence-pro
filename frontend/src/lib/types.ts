@@ -69,6 +69,7 @@ export interface Profile {
   excluded_kinds: string[];
   tax_regime: "new" | "old" | null;
   slab_rate: string | null;
+  surcharge_rate?: string | null; // new-regime band: "0", "0.10", "0.15" or "0.25" (backend validates)
   return_aspiration: string | null;
 }
 

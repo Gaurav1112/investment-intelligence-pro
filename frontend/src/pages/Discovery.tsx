@@ -16,6 +16,7 @@ const FLAG_TEXT: Record<string, string> = {
   EXCEEDS_DICGC_LIMIT_AT_THIS_BANK: "partly outside DICGC cover",
   NOT_DICGC_INSURED: "not DICGC insured",
   PREMATURE_PENALTY_UNKNOWN: "early-exit penalty unknown",
+  LTCG_EXEMPTION_ASSUMED_UNUSED: "assumes your ₹1.25 lakh equity-gain exemption is unused",
 };
 const flagText = (f: string) =>
   FLAG_TEXT[f] ?? (f.startsWith("TAX_RULES_ASSUMED_UNCHANGED") ? "tax rules assumed beyond legislated year" : f.toLowerCase());

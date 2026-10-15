@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 from decimal import ROUND_DOWN, Decimal
 from itertools import pairwise
@@ -40,12 +40,14 @@ from iip.engine.feasibility import (
 from iip.engine.fixed_income import tbill_days, tbill_price
 from iip.engine.forecasting import baselines as fb
 from iip.engine.forecasting import validation as fv
+from iip.engine.freshness import nav_is_stale
 from iip.engine.money import ONE, PAISA, ZERO, D, engine_context, format_inr, from_float, money, pct
 from iip.engine.ranking import Tier
 from iip.engine.stats import metrics as rm
 from iip.engine.stats.series import Frequency, ReturnSeries
 from iip.services import discovery
 from iip.services import profile as profile_svc
+from iip.services.explain import badge, source_ref
 from iip.services.instruments import FD_RATE_STALE_DAYS, TBILL_STALE_DAYS
 from iip.services.profile import ILLUSTRATIVE_AMOUNT, ILLUSTRATIVE_HORIZON_DAYS
 
@@ -112,7 +114,11 @@ class Context:
                 if self.illustrative
                 else None
             ),
-            "tax_basis": "your profile" if self.tax_profile else "ILLUSTRATIVE 30 % slab (not your profile)",
+            "tax_basis": (
+                self.tax_profile.label
+                if self.tax_profile
+                else "ILLUSTRATIVE 30 % slab, no surcharge (not your profile)"
+            ),
         }
 
     def user_prov(self, what: str) -> dict[str, Any]:
@@ -244,7 +250,7 @@ def _build_mf(
         prov = {"kind": "mf_scheme", "category": cat, "fixture": inst["origin"] == "fixture", "count": n}
         reason = f"INSUFFICIENT_HISTORY: {n} stored NAVs (need ≥ {discovery.MIN_HISTORY_POINTS}; backfill history)"
         return Built(iid, name, "mf_scheme", None, (reason,), prov, category=cat)
-    dates, navs, prov = discovery._nav_series(conn, code)
+    dates, navs, prov = discovery._nav_series(conn, code, as_of)
     if prov["conflicts"]:  # same rule as build_universe: never evaluate a series the official sources disagree on
         conflict = [f"SOURCE_CONFLICT: official sources disagree on {prov['conflicts'][0]}"]
         b = cb._ineligible(iid, name, cb.mf_tier_from_category(cat), conflict, amount)
@@ -272,18 +278,16 @@ def _build_tbill(
     profile: tx.TaxProfile | None,
 ) -> Built:
     iid, name = str(inst["instrument_id"]), str(inst["name"])
-    r = conn.execute(
-        "SELECT b.maturity_date, o.value, o.observation_date, o.source_url, o.retrieved_at, o.quality_status"
-        " FROM bond_terms b JOIN observations o ON o.series_id = 'yield:' || b.instrument_id"
-        " AND o.superseded_by IS NULL WHERE b.instrument_id=? ORDER BY o.observation_date DESC LIMIT 1",
-        (iid,),
-    ).fetchone()
-    if r is None:
+    terms = conn.execute("SELECT maturity_date FROM bond_terms WHERE instrument_id=?", (iid,)).fetchone()
+    r, problem = discovery.tbill_quote(conn, iid, as_of)  # same quote selection as build_universe
+    if r is None or terms is None:
         prov = {"kind": "tbill", "fixture": inst["origin"] == "fixture"}
         return Built(iid, name, "tbill", None, ("MISSING_DATA: no yield observation stored",), prov)
     quote_date = date.fromisoformat(r["observation_date"])
-    maturity = date.fromisoformat(r["maturity_date"])
-    if (as_of - quote_date).days > TBILL_STALE_DAYS:
+    maturity = date.fromisoformat(terms["maturity_date"])
+    if problem is not None:
+        b = cb._ineligible(iid, name, Tier.T1, [problem], amount)
+    elif (as_of - quote_date).days > TBILL_STALE_DAYS:
         b = cb._ineligible(iid, name, Tier.T1, [f"STALE_DATA: yield quoted {quote_date}"], amount)
     else:
         b = cb.tbill_candidate(
@@ -293,13 +297,14 @@ def _build_tbill(
         )  # fmt: skip
     prov = {
         "kind": "tbill",
-        "source_id": "rbi.pr.tbill",
+        "source_id": r["source_id"],
         "url": r["source_url"],
         "retrieved_at": r["retrieved_at"],
         "observation_date": r["observation_date"],
         "quality_status": r["quality_status"],
         "fixture": r["quality_status"] == "fixture",
     }
+    prov["freshness"] = badge(prov, as_of)  # same age-checked badge as discovery.build_universe
     return Built(iid, name, "tbill", b, (), prov, maturity=maturity)
 
 
@@ -326,7 +331,10 @@ def _build_fd(
                      "fixture": fixture})  # fmt: skip
     rate_date = date.fromisoformat(r["rate_as_of"])
     existing = _existing_deposits(conn, iid)
-    if (as_of - rate_date).days > FD_RATE_STALE_DAYS:
+    if rate_date > as_of:
+        b = cb._ineligible(iid, name, Tier.T2, [f"LOOK_AHEAD: rate dated {rate_date}, after the analysis date"],
+                           amount)  # fmt: skip
+    elif (as_of - rate_date).days > FD_RATE_STALE_DAYS:
         b = cb._ineligible(iid, name, Tier.T2, [f"STALE_DATA: rate as of {rate_date}"], amount)
     else:
         b = cb.fd_candidate(
@@ -334,16 +342,18 @@ def _build_fd(
             tenure_days=int(r["tenure_days"]), withdrawal=withdrawal, dicgc_eligible=bool(r["dicgc_eligible"]),
             premature_penalty=None if r["premature_penalty"] is None else Decimal(r["premature_penalty"]),
             other_deposits_same_bank=existing, ruleset=ruleset, profile=profile,
+            sovereign_backed=discovery.fd_institution_type(conn, iid) == "post_office",
         )  # fmt: skip
     prov = {
         "kind": "fd",
         "source_id": "bank.fd",
         "url": r["citation_url"],
-        "retrieved_at": inst["created_at"],
+        "retrieved_at": discovery.fd_entered_at(conn, iid, str(inst["created_at"])),
         "observation_date": r["rate_as_of"],
         "quality_status": "fixture" if fixture else "manual",
         "fixture": fixture,
     }
+    prov["freshness"] = badge(prov, as_of)  # same age-checked badge as discovery.build_universe
     return Built(
         iid, name, "fd", b, (), prov,
         maturity=as_of + timedelta(days=int(r["tenure_days"])), institution=str(r["institution"]),
@@ -358,28 +368,18 @@ def _build_fd(
 def _sources(prov: Mapping[str, Any] | None) -> list[dict[str, Any]]:
     if not prov or not prov.get("source_id"):
         return []
-    return [
-        {
-            "source_id": prov.get("source_id", ""),
-            "source_name": prov.get("source_id", ""),
-            "url": prov.get("url") or "",
-            "retrieved_at": prov.get("retrieved_at"),
-            "observation_date": prov.get("observation_date"),
-            "quality_status": prov.get("quality_status", ""),
-            "official": prov.get("quality_status") not in ("unofficial", "user_input", "illustrative", "fixture"),
-        }
-    ]
+    return [source_ref(prov)]
 
 
 def _freshness(prov: Mapping[str, Any] | None) -> str:
+    """Use the age-checked badge computed at load time (explain.badge); never default to a fresh label."""
     if not prov:
         return "DERIVED"
     if prov.get("fixture"):
         return "FIXTURE"
-    status = prov.get("quality_status")
-    return {"manual": "MANUAL", "user_input": "USER_INPUT", "illustrative": "ILLUSTRATIVE"}.get(
-        str(status), "END_OF_DAY"
-    )
+    if prov.get("quality_status") in ("user_input", "illustrative"):
+        return {"user_input": "USER_INPUT", "illustrative": "ILLUSTRATIVE"}[str(prov["quality_status"])]
+    return str(prov.get("freshness") or "UNKNOWN")
 
 
 def _display(value: Decimal, unit: str) -> str:
@@ -950,7 +950,7 @@ def _scenario_values(b: Built, shock: str, which: str, res: scn.ScenarioResult) 
         "prov": b.prov,
         "engine_version": SERVICE_VERSION,
         "assumptions": list(res.caveats),
-        "limitations": ["Hypothetical shock; not a forecast and not probability-weighted"],
+        "limitations": ["Hypothetical shock; not a forecast and not weighted by how likely it is"],
     }
     return {
         "which": which,
@@ -1006,8 +1006,8 @@ def scenario(
         "request": request,
         "instrument": {"instrument_id": b.instrument_id, "name": b.name, "kind": b.kind, "category": b.category},
         "fixture": b.fixture,
-        "note": "Each shock is applied on its own (not combined). Shocks are hypothetical, not forecasts, and never "
-        "probability-weighted.",
+        "note": "Each shock is applied on its own (not combined). Shocks are hypothetical, not forecasts, and are not "
+        "weighted by how likely they are.",
         "base": None,
         "results": [],
         "disclaimer": DISCLAIMER,
@@ -1342,12 +1342,12 @@ class _Series:
     prov: dict[str, Any]
 
 
-def _nav_series_for(conn: sqlite3.Connection, iid: str) -> _Series:
+def _nav_series_for(conn: sqlite3.Connection, iid: str, as_of: date) -> _Series:
     inst = _instrument_row(conn, iid)
     if inst["kind"] != "mf_scheme" or not inst["amfi_code"]:
         raise AnalysisError(422, "NO_SERIES", "this analysis needs a stored NAV series (mutual fund schemes only)")
     m = conn.execute("SELECT category_raw FROM mf_schemes WHERE instrument_id=?", (iid,)).fetchone()
-    dates, navs, prov = discovery._nav_series(conn, str(inst["amfi_code"]))
+    dates, navs, prov = discovery._nav_series(conn, str(inst["amfi_code"]), as_of)
     if prov["conflicts"]:
         raise AnalysisError(
             409, "SOURCE_CONFLICT", f"official sources disagree on {prov['conflicts'][0]}; the series is not evaluated"
@@ -1381,7 +1381,7 @@ def feasibility(
     horizon_years: int,
     mode: str = "CAGR",
 ) -> dict[str, Any]:
-    s = _nav_series_for(conn, instrument_id)
+    s = _nav_series_for(conn, instrument_id, as_of)
     ctx = resolve_context(conn, as_of=as_of, amount=None, withdrawal=None)
     request = {"instrument_id": instrument_id, "target_annual": str(target_annual), "horizon_years": horizon_years,
                "mode": mode, "as_of": as_of.isoformat()}  # fmt: skip
@@ -1393,7 +1393,7 @@ def feasibility(
         "frequency_label": "historical frequency (overlapping windows), not a forecast",
         "disclaimer": DISCLAIMER,
     }
-    meta = SeriesMeta(series_id=s.series_id, instrument_kind=InstrumentKind.FUND_NAV,
+    meta = SeriesMeta(series_id=s.series_id, display_name=s.name, instrument_kind=InstrumentKind.FUND_NAV,
                       inception_date=s.dates[0], launch_date=None, net_of_fees=True,
                       source=str(s.prov.get("source_id")))  # fmt: skip
     req = FeasibilityRequest(target_rate=target_annual, horizon_years=horizon_years, as_of=as_of, mode=Mode(mode),
@@ -1453,13 +1453,16 @@ def feasibility(
     else:
         out["reached_target"]["frequency"] = None
         out["loss"]["frequency"] = None
-    if rep.percentiles is not None:
+    # §4.5: percentages (percentiles, quantile dots, drawdown percentiles) only with SUFFICIENT evidence; a
+    # LOW_EVIDENCE result is counts only.
+    sufficient = level is EvidenceLevel.SUFFICIENT
+    if rep.percentiles is not None and sufficient:
         out["percentiles"] = {
             k: _feas_ex(s, f"cagr_{k}", f"{k} of window CAGR", v, "fraction", rep.percentiles.method, rep)
             for k, v in rep.percentiles.cagr.items()
         }
     pr = rep.path_risk
-    if pr is not None:
+    if pr is not None and sufficient:
         out["drawdown"] = {
             "in_window_mdd": {k: _feas_ex(s, f"mdd_{k}", f"{k} in-window max drawdown", v, "fraction",
                                           f"Drawdown within each window ({pr.resolution} path)", rep)
@@ -1479,6 +1482,9 @@ def feasibility(
         "recovery_date": fh.recovery_date.isoformat() if fh.recovery_date else None,
         "ongoing": fh.ongoing,
     }
+    if not sufficient:
+        out["run"] = _run_block(request, out, {**_VERSIONS, "feasibility": rep.formula_id})
+        return out
     cagrs = [w.cagr for w in rep.windows]
     dots: list[dict[str, str]] = []
     with engine_context():
@@ -1507,7 +1513,12 @@ def _f(x: float) -> Decimal:
 
 
 def forecast(conn: sqlite3.Connection, *, as_of: date, instrument_id: str, horizon_days: int | None) -> dict[str, Any]:
-    s = _nav_series_for(conn, instrument_id)
+    s = _nav_series_for(conn, instrument_id, as_of)
+    # Point-in-time: nothing observed after as_of may enter the band OR its walk-forward validation (§3.1, §3.3).
+    keep = [i for i, d in enumerate(s.dates) if d <= as_of]
+    if not keep:
+        raise AnalysisError(422, "NO_SERIES", "no NAV observations on or before the analysis date")
+    s = replace(s, dates=[s.dates[i] for i in keep], navs=[s.navs[i] for i in keep])
     ctx = resolve_context(conn, as_of=as_of, amount=None, withdrawal=None)
     hd = horizon_days if horizon_days is not None else ctx.horizon_days
     request = {"instrument_id": instrument_id, "horizon_days": hd, "as_of": as_of.isoformat()}
@@ -1536,6 +1547,14 @@ def forecast(conn: sqlite3.Connection, *, as_of: date, instrument_id: str, horiz
         out["status"] = "REFUSED"
         out["refusal"] = refusal(f"{instrument_id}.forecast", "Scenario range", "INSUFFICIENT_HISTORY",
                                  "no observations inside the requested horizon window")  # fmt: skip
+        out["run"] = _run_block(request, out, _VERSIONS)
+        return out
+    history_days = (last - s.dates[0]).days
+    if history_days < cb.MIN_HISTORY_DAYS:  # validation-methodology §8: newly launched (< 1 year) → suppressed
+        out["status"] = "REFUSED"
+        out["refusal"] = refusal(f"{instrument_id}.forecast", "Scenario range", "INSUFFICIENT_HISTORY",
+                                 f"only {history_days} days of NAV history (need ≥ {cb.MIN_HISTORY_DAYS}; a newly "
+                                 "launched or un-backfilled scheme is not given a scenario range)")  # fmt: skip
         out["run"] = _run_block(request, out, _VERSIONS)
         return out
     try:
@@ -1571,6 +1590,15 @@ def forecast(conn: sqlite3.Connection, *, as_of: date, instrument_id: str, horiz
                                    **common),
         })  # fmt: skip
     zero = fb.zero_drift_baseline(horizon_months=max(1, (hd * 12 + 182) // 365), as_of=as_of)
+    validation = _walk_forward(s, prices, steps)
+    warnings = list(meta.warnings)
+    if nav_is_stale(last, as_of):  # validation-methodology §7: data freshness → mark stale, never silently OK
+        warnings.append(f"STALE_DATA: latest NAV is dated {last.isoformat()}")
+    if validation.get("passes_coverage_gate") is not True:  # §8: calibration unknown/failed → downgrade
+        warnings.append(
+            "CALIBRATION_NOT_ESTABLISHED: the 80 % band did not pass the held-out coverage gate "
+            f"({validation.get('calibration_status', validation.get('status'))}); treat it as indicative only"
+        )
     out.update(
         {
             "status": "OK",
@@ -1584,7 +1612,7 @@ def forecast(conn: sqlite3.Connection, *, as_of: date, instrument_id: str, horiz
                 "n_obs": rng.n_obs,
                 "n_windows": rng.n_windows,
                 "n_eff": rng.n_eff,
-                "warnings": list(meta.warnings),
+                "warnings": warnings,
                 "quantiles": quantiles,
             },
             "baseline_comparator": {
@@ -1596,7 +1624,7 @@ def forecast(conn: sqlite3.Connection, *, as_of: date, instrument_id: str, horiz
             "assumptions": list(meta.assumptions),
             "limitations": list(meta.limitations),
             "unreliable_when": list(meta.unreliable_when),
-            "validation": _walk_forward(s, prices, steps),
+            "validation": validation,
         }
     )
     out["run"] = _run_block(request, out, {**_VERSIONS, "validation": fv.VALIDATION_VERSION})
@@ -1691,7 +1719,7 @@ def _risk_refusal(eid: str, label: str, exc: EngineError, category: rm.AssetCate
 
 
 def risk(conn: sqlite3.Connection, *, as_of: date, instrument_id: str) -> dict[str, Any]:
-    s = _nav_series_for(conn, instrument_id)
+    s = _nav_series_for(conn, instrument_id, as_of)
     ctx = resolve_context(conn, as_of=as_of, amount=None, withdrawal=None)
     cat = _asset_category(s.category)
     request = {"instrument_id": instrument_id, "as_of": as_of.isoformat()}

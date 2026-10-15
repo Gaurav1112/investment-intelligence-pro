@@ -447,3 +447,19 @@ describe("Overview — CSV import", () => {
     expect(await screen.findByText(/The file was refused; nothing was stored. The file is not valid UTF-8/)).toHaveAttribute("role", "alert");
   });
 });
+
+describe("Overview — CAS import placement", () => {
+  it("offers the CAS PDF import next to the CSV import for the open portfolio (flow tested in CasImport.test.tsx)", async () => {
+    const calls = stubFetch((url, method) =>
+      url === "/api/holdings/import-cas" ? json({ code: "WRONG_PASSWORD", message: "the password did not open this PDF" }, 422) : routes()(url, method),
+    );
+    renderPage();
+    await screen.findByText("ACTUAL holdings");
+    expect(screen.getByRole("heading", { name: "Import holdings from a file" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Import CAS statement (PDF)" })).toBeInTheDocument();
+    await userEvent.upload(screen.getByLabelText("CAS statement (.pdf)"), new File(["%PDF-1.4"], "cas.pdf", { type: "application/pdf" }));
+    await userEvent.click(screen.getByRole("button", { name: "Preview CAS import" }));
+    expect(await screen.findByText(/The statement was refused; nothing was stored/)).toBeInTheDocument();
+    expect((calls.find((c) => c.url === "/api/holdings/import-cas")!.body as FormData).get("portfolio_id")).toBe("pf_a1");
+  });
+});

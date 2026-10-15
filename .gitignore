@@ -17,4 +17,5 @@ data/cache/
 coverage/
 htmlcov/
 .DS_Store
-.claude/
+.claude/worktrees/
+.claude/settings.local.json

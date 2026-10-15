@@ -273,6 +273,18 @@ _SOURCES: tuple[SourceSpec, ...] = (
         freshness=_custom("Per entry"),
     ),
     SourceSpec(
+        id="bond.quote",
+        name="Bond price/yield (user-entered with citation)",
+        owner="User (from RBI Retail Direct / exchange / CCIL pages)",
+        official=False,  # the app cannot verify that the cited page is an official one
+        mode=SourceMode.MANUAL,
+        allowed_hosts=frozenset(),
+        terms_url=None,
+        licence_class=LicenceClass.PERSONAL_USE_ONLY,
+        licence_note="NSE/BSE/CCIL/FBIL terms restrict automated use; user enters the quote, page URL and date.",
+        freshness=_custom("<= 7 calendar days, else STALE_DATA (bond excluded)"),
+    ),
+    SourceSpec(
         id="cra.ratings",
         name="Credit rating agency rating actions",
         owner="CRISIL / ICRA / CARE / India Ratings",

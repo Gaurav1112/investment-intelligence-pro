@@ -258,10 +258,12 @@ describe("FixedIncome — fixed deposits and bonds", () => {
     expect(body["existing_deposits_at_institution"]).toBe("0");
   });
 
-  it("states honestly that bond entry is not supported", async () => {
-    stubFetch(realistic);
+  it("opens the bond entry tab (details in FixedIncome.bonds.test.tsx)", async () => {
+    const empty = { as_of: "2026-10-15", quote_stale_after_days: 7, rating_stale_after_days: 365, items: [] };
+    stubFetch((url, method) => (url === "/api/bonds" ? json(empty) : realistic(url, method)));
     renderPage();
     await userEvent.click(await screen.findByRole("tab", { name: "G-secs & bonds" }));
-    expect(screen.getByText(/not yet supported/)).toBeInTheDocument();
+    expect(await screen.findByText(/No G-secs, SDLs or corporate bonds stored yet/)).toBeInTheDocument();
+    expect(screen.queryByText(/not yet supported/)).not.toBeInTheDocument();
   });
 });

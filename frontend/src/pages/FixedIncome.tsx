@@ -15,7 +15,21 @@ import type {
   TBillIn,
   ValidationErrorBody,
 } from "../lib/types";
+import {
+  CORPORATE_RATINGS,
+  RATING_AGENCIES,
+  type BondKind,
+  type BondList,
+  type BondListItem,
+  type CallIn,
+  type CorporateBondIn,
+  type CorporateRating,
+  type GsecIn,
+  type RatingAgency,
+  type YieldCompounding,
+} from "../lib/types-bonds";
 import { useApi } from "../lib/useApi";
+import "../styles/bonds.css";
 
 // ------------------------------------------------------------------ shared helpers (also used by MfExplorer / InstrumentDetail)
 
@@ -200,7 +214,9 @@ function CiteLink({ url }: { url: string | null | undefined }) {
 
 // ------------------------------------------------------------------ list rows
 
-function DeleteButton({ item, onDeleted }: { item: InstrumentListItem; onDeleted: (msg: string) => void }) {
+type Deletable = Pick<InstrumentListItem, "instrument_id" | "name" | "origin" | "fixture">;
+
+function DeleteButton({ item, onDeleted }: { item: Deletable; onDeleted: (msg: string) => void }) {
   const [confirming, setConfirming] = useState(false);
   const [pending, setPending] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -614,6 +630,613 @@ function FdForm({ onSaved }: { onSaved: () => void }) {
   );
 }
 
+// ------------------------------------------------------------------ G-secs, SDLs, corporate bonds
+
+/** ISO 6166 check: 2 letters + 9 alphanumerics + check digit (Luhn over letters expanded to A=10 … Z=35). */
+export function isinProblem(raw: string): string | null {
+  const isin = raw.trim().toUpperCase();
+  if (!/^[A-Z]{2}[A-Z0-9]{9}[0-9]$/.test(isin)) return "Enter the 12-character ISIN exactly as on the official page.";
+  const digits = isin
+    .slice(0, -1)
+    .split("")
+    .map((c) => Number.parseInt(c, 36).toString())
+    .join("");
+  let total = 0;
+  for (let i = 0; i < digits.length; i += 1) {
+    let d = Number(digits[digits.length - 1 - i]);
+    if (i % 2 === 0) {
+      d *= 2;
+      if (d > 9) d -= 9;
+    }
+    total += d;
+  }
+  return (10 - (total % 10)) % 10 === Number(isin[11]) ? null : "The ISIN check digit does not match — re-check it.";
+}
+
+const DECIMAL = /^\d+(\.\d+)?$/;
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+export const BOND_QUOTE_STALE_DAYS = 7; // backend services/instruments.py BOND_QUOTE_STALE_DAYS
+export const RATING_STALE_DAYS = 365; // backend services/instruments.py RATING_STALE_DAYS
+
+const BOND_KIND_LABEL: Record<BondKind, string> = { gsec: "G-sec", sdl: "SDL", corp_bond: "Corporate bond" };
+
+function QuoteCell({ item }: { item: BondListItem }) {
+  const q = item.quote;
+  if (!q) return <span className="subtle">{item.quote_problem ?? "no quote stored"}</span>;
+  const comp = q.convention?.match(/compounding=(\w+)/)?.[1];
+  return (
+    <>
+      {q.kind === "clean_price" ? `${roundHalfUp(q.value, 4)} per ₹100` : `${ratePct(q.value)} YTM`}
+      <div className="small subtle">{q.kind === "clean_price" ? "clean price" : `yield, ${comp ?? "compounding not recorded"}`}</div>
+    </>
+  );
+}
+
+function QuoteAge({ item }: { item: BondListItem }) {
+  const q = item.quote;
+  if (!q) return <>—</>;
+  if (item.fixture) return <FreshnessBadge freshness="FIXTURE" date={q.quote_date} />;
+  const stale = q.freshness === "STALE" || q.age_days > BOND_QUOTE_STALE_DAYS || q.age_days < 0;
+  return (
+    <span className="row-tight">
+      <FreshnessBadge freshness={stale ? "STALE" : "MANUAL"} date={q.quote_date} />
+      <span className="small subtle">
+        {q.age_days < 0 ? "dated in the future — check the quote date" : `${q.age_days} day${q.age_days === 1 ? "" : "s"} old`}
+        {stale && q.age_days >= 0 ? ` (older than ${BOND_QUOTE_STALE_DAYS} days: excluded)` : ""}
+      </span>
+      {item.quote_problem ? <span className="field-error">{item.quote_problem}</span> : null}
+    </span>
+  );
+}
+
+function RatingCell({ item }: { item: BondListItem }) {
+  if (item.kind === "gsec") return <span className="small">Sovereign (Government of India)</span>;
+  if (item.kind === "sdl") return <span className="small">State government (not sovereign; tier T2)</span>;
+  const r = item.rating;
+  if (!r) return <span className="field-error">No rating stored: excluded (MISSING_RATING)</span>;
+  return (
+    <span className="bond-rating">
+      <strong>{r.rating}</strong> <span className="small">{r.agency ?? "agency not stored"}</span>
+      <span className="row-tight small">
+        {r.stale ? <FreshnessBadge freshness="STALE" date={r.rating_date} /> : <span>rated {dateLabel(r.rating_date)}</span>}
+        <span className="subtle">
+          {r.age_days} days old{r.stale ? ` (older than ${RATING_STALE_DAYS} days: excluded)` : ""}
+        </span>
+      </span>
+      <span className="small">
+        Rationale: <CiteLink url={r.citation_url} />
+      </span>
+    </span>
+  );
+}
+
+function BondRow({ item, onDeleted }: { item: BondListItem; onDeleted: (m: string) => void }) {
+  const t = item.terms;
+  return (
+    <tr className={item.fixture ? "fixture-zone" : undefined}>
+      <td>
+        <Link to={`/i/${encodeURIComponent(item.instrument_id)}`}>{item.name}</Link>
+        <div className="row-tight small">
+          <OriginBadge origin={item.origin} />
+          <span className="badge badge--neutral">{BOND_KIND_LABEL[item.kind]}</span>
+          {item.isin ? <span className="mono subtle">{item.isin}</span> : null}
+        </div>
+      </td>
+      <td className="num">
+        {t ? (
+          <>
+            {ratePct(t.coupon_rate)} coupon
+            <div className="small subtle">
+              matures {dateLabel(t.maturity)} · {t.day_count}
+              {t.calls.length ? ` · callable (${t.calls.length})` : ""}
+            </div>
+          </>
+        ) : (
+          <span className="subtle">terms not stored</span>
+        )}
+      </td>
+      <td className="num">
+        <QuoteCell item={item} />
+      </td>
+      <td>
+        <QuoteAge item={item} />
+      </td>
+      <td>
+        <RatingCell item={item} />
+      </td>
+      <td>
+        <CiteLink url={item.quote?.citation_url} />
+      </td>
+      <td>
+        <DeleteButton item={item} onDeleted={onDeleted} />
+      </td>
+    </tr>
+  );
+}
+
+interface QuoteState {
+  mode: "clean_price" | "ytm";
+  value: string;
+  date: string;
+}
+
+/** Shared bond fields → (body fragment, problems). Percent inputs become fractions; nothing is defaulted. */
+function commonBondFields(f: {
+  issuer: string;
+  isin: string;
+  couponPct: string;
+  issue: string;
+  maturity: string;
+  face: string;
+  quote: QuoteState;
+  spreadPct: string;
+  cite: CitationState;
+}): { body: Record<string, unknown>; problems: Record<string, string> } {
+  const problems: Record<string, string> = { ...citationProblems(f.cite) };
+  if (f.issuer.trim().length < 2) problems["issuer"] = "Enter the issuer as named on the official page.";
+  const isinErr = isinProblem(f.isin);
+  if (isinErr) problems["isin"] = isinErr;
+  const coupon = percentToFraction(f.couponPct);
+  if (coupon === null || coupon === "invalid") problems["coupon_rate"] = "Enter the coupon as a plain number of percent, e.g. 7.10.";
+  if (!ISO_DATE.test(f.issue)) problems["issue_date"] = "Enter the issue date.";
+  if (!ISO_DATE.test(f.maturity)) problems["maturity"] = "Enter the maturity date.";
+  else if (ISO_DATE.test(f.issue) && f.maturity <= f.issue) problems["maturity"] = "Maturity must be after the issue date.";
+  const face = f.face.replace(/[,\s₹]/g, "");
+  if (!DECIMAL.test(face) || Number(face) === 0) problems["face_value"] = "Enter the face value of one bond in rupees.";
+  if (!ISO_DATE.test(f.quote.date)) problems["quote_date"] = "Enter the date the price or yield applies to.";
+  let quoteValue: string | null = null;
+  if (f.quote.mode === "clean_price") {
+    if (!DECIMAL.test(f.quote.value.trim())) problems["clean_price"] = "Enter the clean price per ₹100 face, e.g. 99.85.";
+    else quoteValue = f.quote.value.trim();
+  } else {
+    const y = percentToFraction(f.quote.value);
+    if (y === null || y === "invalid") problems["ytm"] = "Enter the yield as a plain number of percent, e.g. 7.12.";
+    else quoteValue = y;
+  }
+  const spread = percentToFraction(f.spreadPct);
+  if (spread === "invalid") problems["transaction_spread"] = "Enter the spread as a plain number of percent, or leave it empty.";
+  const body: Record<string, unknown> = {
+    issuer: f.issuer.trim(),
+    isin: f.isin.trim().toUpperCase(),
+    coupon_rate: coupon,
+    issue_date: f.issue,
+    maturity: f.maturity,
+    face_value: face,
+    clean_price: f.quote.mode === "clean_price" ? quoteValue : null,
+    ytm: f.quote.mode === "ytm" ? quoteValue : null,
+    quote_date: f.quote.date,
+    transaction_spread: spread === "invalid" ? null : spread,
+    citation: citationBody(f.cite),
+  };
+  return { body, problems };
+}
+
+function TextField(props: {
+  id: string;
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  err: string | undefined;
+  hint?: ReactNode;
+  type?: "text" | "date";
+  wrap?: "pct" | "money";
+  wide?: boolean;
+  inputMode?: "decimal" | "numeric" | "text";
+}) {
+  const { id, label, value, onChange, err, hint, type = "text", wrap, wide, inputMode } = props;
+  const input = (
+    <input id={id} type={type} className={wide ? "input-wide" : undefined} value={value} inputMode={inputMode}
+      onChange={(e) => onChange(e.target.value)} aria-invalid={Boolean(err)}
+      aria-describedby={`${hint ? `${id}-hint ` : ""}${id}-err`} />
+  );
+  return (
+    <div className="field">
+      <label htmlFor={id}>{label}</label>
+      {wrap ? <span className={wrap}>{input}</span> : input}
+      {hint ? (
+        <div id={`${id}-hint`} className="hint">
+          {hint}
+        </div>
+      ) : null}
+      <FieldError id={`${id}-err`} msg={err} />
+    </div>
+  );
+}
+
+function QuoteFields({ prefix, quote, onChange, errs, ytmNote }: {
+  prefix: string;
+  quote: QuoteState;
+  onChange: (q: QuoteState) => void;
+  errs: Record<string, string>;
+  ytmNote: ReactNode;
+}) {
+  return (
+    <fieldset className="field bond-quote">
+      <legend>Price or yield (enter exactly one)</legend>
+      <div className="row-tight" role="radiogroup" aria-label="Quote type">
+        <label>
+          <input type="radio" name={`${prefix}-quote-mode`} checked={quote.mode === "clean_price"}
+            onChange={() => onChange({ ...quote, mode: "clean_price", value: "" })} /> Clean price per ₹100
+        </label>
+        <label>
+          <input type="radio" name={`${prefix}-quote-mode`} checked={quote.mode === "ytm"}
+            onChange={() => onChange({ ...quote, mode: "ytm", value: "" })} /> Yield to maturity
+        </label>
+      </div>
+      {quote.mode === "clean_price" ? (
+        <TextField id={`${prefix}-price`} label="Clean price (per ₹100 face)" value={quote.value} inputMode="decimal"
+          onChange={(v) => onChange({ ...quote, value: v })} err={errs["clean_price"]}
+          hint="The quoted price without accrued interest. Accrued interest is added by the engine." />
+      ) : (
+        <TextField id={`${prefix}-ytm`} label="Yield to maturity (% a year)" value={quote.value} wrap="pct" inputMode="decimal"
+          onChange={(v) => onChange({ ...quote, value: v })} err={errs["ytm"]} hint={ytmNote} />
+      )}
+      <TextField id={`${prefix}-qdate`} type="date" label="Date of this price or yield" value={quote.date}
+        onChange={(v) => onChange({ ...quote, date: v })} err={errs["quote_date"]}
+        hint={`Quotes older than ${BOND_QUOTE_STALE_DAYS} days are excluded as STALE_DATA.`} />
+    </fieldset>
+  );
+}
+
+const EMPTY_QUOTE: QuoteState = { mode: "clean_price", value: "", date: "" };
+const BOND_SOURCE_NOTE = (
+  <p className="callout small">
+    Nothing about a bond is fetched. Copy every value from an official page — the RBI notification or RBI Retail Direct for
+    a G-sec or SDL, the exchange or information memorandum for a corporate bond, and the rating agency&apos;s rationale
+    for a rating. Each value is stored with its page URL and date, and shown as MANUAL ENTRY wherever it is used.
+  </p>
+);
+
+function useSubmit(path: string, onSaved: () => void) {
+  const [local, setLocal] = useState<Record<string, string>>({});
+  const [error, setError] = useState<unknown>(null);
+  const [pending, setPending] = useState(false);
+  const [ok, setOk] = useState<string | null>(null);
+  const server = validationErrors(error);
+  const errs = { ...(server ?? {}), ...local };
+  async function send(body: unknown, problems: Record<string, string>, reset: () => void) {
+    setOk(null);
+    setLocal(problems);
+    if (Object.keys(problems).length) return;
+    setPending(true);
+    setError(null);
+    try {
+      const out = await api<{ instrument_id: string }>(path, { method: "POST", body });
+      setOk(`Saved as ${out.instrument_id}.`);
+      reset();
+      onSaved();
+    } catch (err) {
+      setError(err);
+    } finally {
+      setPending(false);
+    }
+  }
+  return { errs, server, error, pending, ok, send };
+}
+
+function GsecForm({ onSaved }: { onSaved: () => void }) {
+  const [kind, setKind] = useState<GsecIn["kind"]>("gsec");
+  const [issuer, setIssuer] = useState("Government of India");
+  const [isin, setIsin] = useState("");
+  const [couponPct, setCouponPct] = useState("");
+  const [issue, setIssue] = useState("");
+  const [maturity, setMaturity] = useState("");
+  const [face, setFace] = useState("100");
+  const [quote, setQuote] = useState<QuoteState>(EMPTY_QUOTE);
+  const [spreadPct, setSpreadPct] = useState("");
+  const [cite, setCite] = useState<CitationState>(EMPTY_CITATION);
+  const s = useSubmit("/api/instruments/gsec", onSaved);
+  const errs = s.errs;
+
+  function submit(e: FormEvent) {
+    e.preventDefault();
+    const { body, problems } = commonBondFields({ issuer, isin, couponPct, issue, maturity, face, quote, spreadPct, cite });
+    const full = { ...body, kind, frequency: 2 } as unknown as GsecIn;
+    void s.send(full, problems, () => {
+      setIsin("");
+      setCouponPct("");
+      setIssue("");
+      setMaturity("");
+      setQuote(EMPTY_QUOTE);
+      setSpreadPct("");
+      setCite(EMPTY_CITATION);
+    });
+  }
+
+  return (
+    <form className="card bond-form" onSubmit={submit} noValidate aria-labelledby="gsec-form-title">
+      <h2 id="gsec-form-title">Add a G-sec or SDL</h2>
+      {BOND_SOURCE_NOTE}
+      <div className="field">
+        <label htmlFor="gs-kind">Type</label>
+        <select id="gs-kind" value={kind} onChange={(e) => {
+          const k = e.target.value as GsecIn["kind"];
+          setKind(k);
+          setIssuer(k === "gsec" ? "Government of India" : "");
+        }}>
+          <option value="gsec">Central Government security (G-sec)</option>
+          <option value="sdl">State Development Loan (SDL)</option>
+        </select>
+        <div className="hint">Semi-annual coupons, 30E/360 (RBI). SDLs are state credit: ranked as T2, never as sovereign.</div>
+      </div>
+      <TextField id="gs-issuer" label="Issuer" value={issuer} onChange={setIssuer} err={errs["issuer"]} wide
+        hint={kind === "sdl" ? "The state, e.g. as printed in the RBI auction notification." : undefined} />
+      <TextField id="gs-isin" label="ISIN" value={isin} onChange={setIsin} err={errs["isin"]} />
+      <TextField id="gs-coupon" label="Coupon (% a year)" value={couponPct} onChange={setCouponPct} err={errs["coupon_rate"]} wrap="pct" inputMode="decimal" />
+      <div className="row">
+        <TextField id="gs-issue" type="date" label="Issue date" value={issue} onChange={setIssue} err={errs["issue_date"]} />
+        <TextField id="gs-maturity" type="date" label="Maturity date" value={maturity} onChange={setMaturity} err={errs["maturity"]} />
+      </div>
+      <TextField id="gs-face" label="Face value of one unit (₹)" value={face} onChange={setFace} err={errs["face_value"]} wrap="money" inputMode="decimal"
+        hint="₹100 for G-secs and SDLs. Only whole units are bought; the remainder stays as cash." />
+      <QuoteFields prefix="gs" quote={quote} onChange={setQuote} errs={errs}
+        ytmNote="Semi-annual bond-equivalent yield, as RBI and CCIL quote G-secs." />
+      <TextField id="gs-spread" label="Transaction spread (% of the clean price) — optional" value={spreadPct} onChange={setSpreadPct}
+        err={errs["transaction_spread"]} wrap="pct" inputMode="decimal"
+        hint="Leave empty if unknown: it is then flagged TRANSACTION_COST_UNKNOWN, never silently assumed to be 0." />
+      <CitationFields prefix="gs" value={cite} onChange={setCite} errors={errs} />
+      <SubmitFeedback error={s.error} ok={s.ok} fieldErrors={s.server} />
+      <button type="submit" className="btn btn--primary" disabled={s.pending}>
+        {s.pending ? "Saving…" : "Save G-sec / SDL"}
+      </button>
+    </form>
+  );
+}
+
+function CorporateBondForm({ onSaved }: { onSaved: () => void }) {
+  const [issuer, setIssuer] = useState("");
+  const [isin, setIsin] = useState("");
+  const [couponPct, setCouponPct] = useState("");
+  const [frequency, setFrequency] = useState<CorporateBondIn["frequency"]>(1);
+  const [issue, setIssue] = useState("");
+  const [maturity, setMaturity] = useState("");
+  const [face, setFace] = useState("");
+  const [quote, setQuote] = useState<QuoteState>(EMPTY_QUOTE);
+  const [compounding, setCompounding] = useState<YieldCompounding | "">("");
+  const [spreadPct, setSpreadPct] = useState("");
+  const [rating, setRating] = useState<CorporateRating | "">("");
+  const [agency, setAgency] = useState<RatingAgency | "">("");
+  const [ratingDate, setRatingDate] = useState("");
+  const [ratingCite, setRatingCite] = useState<CitationState>(EMPTY_CITATION);
+  const [listed, setListed] = useState(true);
+  const [secured, setSecured] = useState<"" | "yes" | "no">("");
+  const [recordDays, setRecordDays] = useState("");
+  const [calls, setCalls] = useState<CallIn[]>([]);
+  const [cite, setCite] = useState<CitationState>(EMPTY_CITATION);
+  const s = useSubmit("/api/instruments/corp-bond", onSaved);
+  // Rating-citation errors arrive as "rating_citation.url" from the server and locally; CitationFields reads "citation.*".
+  const ratingCiteErrs = Object.fromEntries(
+    Object.entries(s.errs)
+      .filter(([k]) => k.startsWith("rating_citation."))
+      .map(([k, v]) => [k.replace("rating_citation.", "citation."), v]),
+  );
+  const errs = s.errs;
+
+  function submit(e: FormEvent) {
+    e.preventDefault();
+    const { body, problems } = commonBondFields({ issuer, isin, couponPct, issue, maturity, face, quote, spreadPct, cite });
+    for (const [k, v] of Object.entries(citationProblems(ratingCite))) problems[k.replace("citation.", "rating_citation.")] = v;
+    if (!rating) problems["rating"] = "Choose the rating from the agency's rationale.";
+    if (!agency) problems["rating_agency"] = "Choose the rating agency.";
+    if (!ISO_DATE.test(ratingDate)) problems["rating_date"] = "Enter the date of the rating action.";
+    if (secured === "") problems["secured"] = "State whether the bond is secured (term sheet).";
+    if (!/^\d+$/.test(recordDays.trim()) || Number(recordDays) > 30)
+      problems["record_date_days"] = "Enter the record-date gap in days (0 to 30) from the term sheet.";
+    if (quote.mode === "ytm" && !compounding) problems["ytm_compounding"] = "Choose how the quoted yield is compounded.";
+    calls.forEach((c, i) => {
+      if (!ISO_DATE.test(c.call_date)) problems[`call_schedule.${i}.call_date`] = "Enter the call date.";
+      if (!DECIMAL.test(c.call_price.trim())) problems[`call_schedule.${i}.call_price`] = "Enter the call price per ₹100.";
+    });
+    const full = {
+      ...body,
+      frequency,
+      ytm_compounding: quote.mode === "ytm" ? compounding || null : null,
+      rating,
+      rating_agency: agency,
+      rating_date: ratingDate,
+      rating_citation: citationBody(ratingCite),
+      listed,
+      secured: secured === "yes",
+      record_date_days: Number.parseInt(recordDays.trim() || "0", 10),
+      call_schedule: calls.map((c) => ({ call_date: c.call_date, call_price: c.call_price.trim() })),
+    } as unknown as CorporateBondIn;
+    void s.send(full, problems, () => {
+      setIsin("");
+      setCouponPct("");
+      setQuote(EMPTY_QUOTE);
+      setCalls([]);
+      setCite(EMPTY_CITATION);
+      setRatingCite(EMPTY_CITATION);
+    });
+  }
+
+  return (
+    <form className="card bond-form" onSubmit={submit} noValidate aria-labelledby="corp-form-title">
+      <h2 id="corp-form-title">Add a corporate bond</h2>
+      {BOND_SOURCE_NOTE}
+      <TextField id="cb-issuer" label="Issuer" value={issuer} onChange={setIssuer} err={errs["issuer"]} wide />
+      <TextField id="cb-isin" label="ISIN" value={isin} onChange={setIsin} err={errs["isin"]} />
+      <div className="row">
+        <TextField id="cb-coupon" label="Coupon (% a year)" value={couponPct} onChange={setCouponPct} err={errs["coupon_rate"]} wrap="pct" inputMode="decimal" />
+        <div className="field">
+          <label htmlFor="cb-frequency">Coupon frequency</label>
+          <select id="cb-frequency" value={frequency} onChange={(e) => setFrequency(Number(e.target.value) as CorporateBondIn["frequency"])}>
+            <option value={1}>Annual</option>
+            <option value={2}>Semi-annual</option>
+            <option value={4}>Quarterly</option>
+            <option value={12}>Monthly</option>
+          </select>
+          <div className="hint">Day count: SEBI Actual/Actual.</div>
+        </div>
+      </div>
+      <div className="row">
+        <TextField id="cb-issue" type="date" label="Issue date" value={issue} onChange={setIssue} err={errs["issue_date"]} />
+        <TextField id="cb-maturity" type="date" label="Maturity date" value={maturity} onChange={setMaturity} err={errs["maturity"]} />
+      </div>
+      <TextField id="cb-face" label="Face value of one bond (₹)" value={face} onChange={setFace} err={errs["face_value"]} wrap="money" inputMode="decimal"
+        hint="From the term sheet, e.g. ₹1,000, ₹10,000 or ₹1,00,000. Only whole bonds are bought." />
+      <QuoteFields prefix="cb" quote={quote} onChange={setQuote} errs={errs}
+        ytmNote="Corporate yields are quoted with different compounding conventions; choose the one the page states." />
+      {quote.mode === "ytm" ? (
+        <div className="field">
+          <label htmlFor="cb-comp">Yield compounding</label>
+          <select id="cb-comp" value={compounding} onChange={(e) => setCompounding(e.target.value as YieldCompounding | "")}
+            aria-invalid={Boolean(errs["ytm_compounding"])} aria-describedby="cb-comp-err">
+            <option value="">Choose…</option>
+            <option value="annual">Annual</option>
+            <option value="semiannual">Semi-annual</option>
+            <option value="quarterly">Quarterly</option>
+            <option value="monthly">Monthly</option>
+          </select>
+          <FieldError id="cb-comp-err" msg={errs["ytm_compounding"]} />
+        </div>
+      ) : null}
+      <TextField id="cb-spread" label="Transaction spread (% of the clean price) — optional" value={spreadPct} onChange={setSpreadPct}
+        err={errs["transaction_spread"]} wrap="pct" inputMode="decimal"
+        hint="Leave empty if unknown: it is then flagged TRANSACTION_COST_UNKNOWN, never silently assumed to be 0." />
+      <fieldset className="field bond-rating-fields">
+        <legend>Credit rating (required)</legend>
+        <div className="row">
+          <div className="field">
+            <label htmlFor="cb-rating">Rating</label>
+            <select id="cb-rating" value={rating} onChange={(e) => setRating(e.target.value as CorporateRating | "")}
+              aria-invalid={Boolean(errs["rating"])} aria-describedby="cb-rating-err">
+              <option value="">Choose…</option>
+              {CORPORATE_RATINGS.map((r) => (
+                <option key={r} value={r}>
+                  {r}
+                </option>
+              ))}
+            </select>
+            <FieldError id="cb-rating-err" msg={errs["rating"]} />
+          </div>
+          <div className="field">
+            <label htmlFor="cb-agency">Agency</label>
+            <select id="cb-agency" value={agency} onChange={(e) => setAgency(e.target.value as RatingAgency | "")}
+              aria-invalid={Boolean(errs["rating_agency"])} aria-describedby="cb-agency-err">
+              <option value="">Choose…</option>
+              {RATING_AGENCIES.map((a) => (
+                <option key={a} value={a}>
+                  {a}
+                </option>
+              ))}
+            </select>
+            <FieldError id="cb-agency-err" msg={errs["rating_agency"]} />
+          </div>
+          <TextField id="cb-rdate" type="date" label="Rating action date" value={ratingDate} onChange={setRatingDate} err={errs["rating_date"]}
+            hint={`Ratings older than ${RATING_STALE_DAYS} days are excluded as STALE_RATING.`} />
+        </div>
+        <CitationFields prefix="cb-rating-cite" value={ratingCite} onChange={setRatingCite} errors={ratingCiteErrs} />
+      </fieldset>
+      <div className="row">
+        <div className="field">
+          <label htmlFor="cb-listed">
+            <input id="cb-listed" type="checkbox" checked={listed} onChange={(e) => setListed(e.target.checked)} /> Listed on an exchange
+          </label>
+          <div className="hint">Unlisted bonds are only considered when held to maturity (no exchange exit).</div>
+        </div>
+        <div className="field">
+          <label htmlFor="cb-secured">Secured?</label>
+          <select id="cb-secured" value={secured} onChange={(e) => setSecured(e.target.value as "" | "yes" | "no")}
+            aria-invalid={Boolean(errs["secured"])} aria-describedby="cb-secured-err">
+            <option value="">Choose…</option>
+            <option value="yes">Secured</option>
+            <option value="no">Unsecured</option>
+          </select>
+          <FieldError id="cb-secured-err" msg={errs["secured"]} />
+        </div>
+        <TextField id="cb-record" label="Record date (days before each coupon)" value={recordDays} onChange={setRecordDays}
+          err={errs["record_date_days"]} inputMode="numeric" />
+      </div>
+      <fieldset className="field bond-calls">
+        <legend>Call schedule (optional)</legend>
+        {calls.length === 0 ? <p className="small subtle">No call option entered.</p> : null}
+        {calls.map((c, i) => (
+          <div className="row bond-call-row" key={i}>
+            <TextField id={`cb-call-${i}-date`} type="date" label={`Call ${i + 1} date`} value={c.call_date}
+              onChange={(v) => setCalls(calls.map((x, j) => (j === i ? { ...x, call_date: v } : x)))}
+              err={errs[`call_schedule.${i}.call_date`]} />
+            <TextField id={`cb-call-${i}-price`} label={`Call ${i + 1} price (per ₹100)`} value={c.call_price} inputMode="decimal"
+              onChange={(v) => setCalls(calls.map((x, j) => (j === i ? { ...x, call_price: v } : x)))}
+              err={errs[`call_schedule.${i}.call_price`]} />
+            <button type="button" className="btn btn--ghost" onClick={() => setCalls(calls.filter((_, j) => j !== i))}
+              aria-label={`Remove call ${i + 1}`}>
+              Remove
+            </button>
+          </div>
+        ))}
+        <button type="button" className="btn" onClick={() => setCalls([...calls, { call_date: "", call_price: "" }])}>
+          Add a call date
+        </button>
+        <div className="hint">A callable bond is evaluated on the worst of its maturity and call paths (the issuer decides).</div>
+      </fieldset>
+      <CitationFields prefix="cb" value={cite} onChange={setCite} errors={errs} />
+      <SubmitFeedback error={s.error} ok={s.ok} fieldErrors={s.server} />
+      <button type="submit" className="btn btn--primary" disabled={s.pending}>
+        {s.pending ? "Saving…" : "Save corporate bond"}
+      </button>
+    </form>
+  );
+}
+
+function BondsPanel() {
+  const list = useApi<BondList>("/api/bonds");
+  const [notice, setNotice] = useState<string | null>(null);
+  const onDeleted = (m: string) => {
+    setNotice(m);
+    list.reload();
+  };
+  const onSaved = () => {
+    setNotice(null);
+    list.reload();
+  };
+  let body: ReactNode;
+  if (list.loading) body = <Loading label="Loading bonds" />;
+  else if (list.error) body = <ErrorState error={list.error} retry={list.reload} />;
+  else if (!list.data || list.data.items.length === 0)
+    body = (
+      <Empty title="No G-secs, SDLs or corporate bonds stored yet">
+        <p>Nothing is fetched automatically for bonds. Add one below from an official page; Discovery will then consider it.</p>
+      </Empty>
+    );
+  else
+    body = (
+      <ListTable
+        kind="bonds"
+        caption="Stored G-secs, SDLs and corporate bonds"
+        head={["Bond", "Terms", "Price or yield", "Quote date", "Rating", "Citation", "Action"]}
+        rows={list.data.items.map((it) => (
+          <BondRow key={it.instrument_id} item={it} onDeleted={onDeleted} />
+        ))}
+      />
+    );
+  return (
+    <div className="bonds-panel">
+      {notice ? (
+        <p className="callout" role="status">
+          {notice}
+        </p>
+      ) : null}
+      {list.data?.items.some((i) => i.fixture) ? (
+        <p className="callout callout--warn fixture-zone" role="note">
+          <strong>FIXTURE data present.</strong> Rows marked FIXTURE are synthetic development data, not market data.
+        </p>
+      ) : null}
+      {body}
+      <p className="small subtle">
+        Held to maturity (maturity on or before your withdrawal date) a bond gives contractual proceeds: G-secs are tier T1,
+        SDLs and AAA corporates T2, lower ratings T3. A bond that matures after your withdrawal date must be sold early: its
+        outcome is a band of stress scenarios (yield +1 / 0 / −1 percentage point), tier T3, and it is never used for capital
+        preservation.
+      </p>
+      <div className="grid grid--2 bond-forms">
+        <GsecForm onSaved={onSaved} />
+        <CorporateBondForm onSaved={onSaved} />
+      </div>
+    </div>
+  );
+}
+
 // ------------------------------------------------------------------ page
 
 type Tab = "tbill" | "fd" | "bonds";
@@ -695,7 +1318,7 @@ export default function FixedIncome() {
         title="Fixed income"
         purpose={
           <>
-            T-bills and fixed deposits you have entered from official pages, listed by name. This list is not ranked for you; see{" "} <Link to="/discover">Discovery</Link> for an ordering under your constraints.
+            T-bills, fixed deposits, G-secs, SDLs and corporate bonds you have entered from official pages, listed by name. This list is not ranked for you; see{" "} <Link to="/discover">Discovery</Link> for an ordering under your constraints.
           </>
         }
       />
@@ -709,12 +1332,7 @@ export default function FixedIncome() {
       </div>
       <div role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`}>
         {tab === "bonds" ? (
-          <Empty title="Manual entry of G-secs, SDLs and corporate bonds is not yet supported">
-            <p>
-              No bond data is shown rather than an incomplete record. T-bills and fixed deposits can be entered on the other
-              tabs.
-            </p>
-          </Empty>
+          <BondsPanel />
         ) : (
           <KindList key={tab} kind={tab} />
         )}

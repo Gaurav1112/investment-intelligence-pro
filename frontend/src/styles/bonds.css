@@ -1,0 +1,18 @@
+/* G-secs, SDLs and corporate bonds (Fixed income page, "G-secs & bonds" tab). Tokens only; no new colours. */
+
+.bonds-panel > * + * { margin-top: var(--space-4); }
+
+.bond-forms { margin-top: var(--space-4); }
+.bond-form fieldset { border-top: 1px solid var(--border); padding-top: var(--space-3); }
+.bond-form fieldset > legend { font-weight: 600; padding-top: var(--space-2); }
+.bond-form .row { display: flex; flex-wrap: wrap; gap: var(--space-4); align-items: flex-start; }
+
+.bond-quote [role="radiogroup"] { margin-bottom: var(--space-3); }
+.bond-quote [role="radiogroup"] label { display: inline-flex; gap: var(--space-1); align-items: center; }
+
+.bond-call-row { align-items: flex-end; }
+.bond-call-row .btn { margin-bottom: var(--space-4); }
+
+.bond-rating { display: inline-flex; flex-direction: column; gap: var(--space-1); }
+
+.table[data-kind="bonds"] td { vertical-align: top; }

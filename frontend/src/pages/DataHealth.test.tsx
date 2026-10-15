@@ -1,0 +1,93 @@
+import { render, screen, within } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
+import type { DataHealthResponse } from "../lib/types";
+import DataHealth from "./DataHealth";
+
+const json = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { "Content-Type": "application/json" } });
+const stub = (body: unknown, status = 200) => vi.stubGlobal("fetch", vi.fn(async () => json(body, status)));
+afterEach(() => vi.unstubAllGlobals());
+
+const AMFI_NOTE = "AMFI ToU: personal, non-commercial use only; do not store a significant portion; no redistribution.";
+const HEALTH: DataHealthResponse = {
+  sources: [
+    {
+      source_id: "amfi.navall", name: "AMFI NAVAll.txt (latest NAV, all schemes)", owner: "AMFI", official: true, mode: "live",
+      licence: "PERSONAL_USE_ONLY", licence_note: AMFI_NOTE, terms_url: "https://www.amfiindia.com/terms-of-use",
+      freshness: "NAV for T by 23:00 IST on T; stale 2-3 business days", requires_configuration: true,
+      last_run: { status: "partial", finished_at: "2026-10-15T05:34:19+00:00", rows_ok: 1530, rows_rejected: 4, error: null },
+    },
+    {
+      source_id: "mfapi.in", name: "mfapi.in (UNOFFICIAL mirror of AMFI)", owner: "Independent operator", official: false, mode: "disabled",
+      licence: "UNKNOWN", licence_note: "No terms page found.", terms_url: null, freshness: "NAV SLO", requires_configuration: false, last_run: null,
+    },
+    {
+      source_id: "amfi.ter", name: "AMFI TER of MF schemes", owner: "AMFI", official: true, mode: "manual", licence: "PERSONAL_USE_ONLY",
+      licence_note: AMFI_NOTE, terms_url: "https://www.amfiindia.com/terms-of-use", freshness: "Current or previous month fresh",
+      requires_configuration: false, last_run: null,
+    },
+  ],
+  runs: [
+    { run_id: "run_2", source_id: "amfi.navall", started_at: "2026-10-15T05:33:00+00:00", finished_at: "2026-10-15T05:34:19+00:00", status: "partial", rows_ok: 1530, rows_rejected: 4, raw_sha256: "a".repeat(64), error: null },
+    { run_id: "run_1", source_id: "amfi.navhistory", started_at: "2026-10-14T05:33:00+00:00", finished_at: "2026-10-14T05:33:30+00:00", status: "failed", rows_ok: 0, rows_rejected: 0, raw_sha256: null, error: "FetchRefused: timeout" },
+  ],
+  observation_counts: { ok: 25000, fixture: 7300, manual: 2 },
+  tax_rules_loaded: true,
+  tax_rules_coverage_to: "2027-03-31",
+};
+
+const renderPage = () =>
+  render(
+    <MemoryRouter>
+      <DataHealth />
+    </MemoryRouter>,
+  );
+
+describe("DataHealth", () => {
+  it("renders per-source mode, licence, freshness and last run", async () => {
+    stub(HEALTH);
+    renderPage();
+    const row = (await screen.findByText("AMFI NAVAll.txt (latest NAV, all schemes)")).closest("tr")!;
+    expect(within(row).getByText("FETCHED")).toBeInTheDocument();
+    expect(within(row).getByText("Personal, non-commercial use only")).toBeInTheDocument();
+    expect(within(row).getByText(AMFI_NOTE)).toBeInTheDocument();
+    expect(within(row).getByText(/stale 2-3 business days/)).toBeInTheDocument();
+    expect(within(row).getByText(/PARTIAL/)).toBeInTheDocument();
+    expect(within(row).getByText("finished 15-Oct-2026 05:34 UTC")).toBeInTheDocument();
+    expect(within(row).getByText(/rows ok 1530 · rejected 4/)).toBeInTheDocument();
+
+    const disabled = screen.getByText("mfapi.in (UNOFFICIAL mirror of AMFI)").closest("tr")!;
+    expect(within(disabled).getByText("DISABLED")).toBeInTheDocument();
+    expect(within(disabled).getByText(/Never fetched and never used/)).toBeInTheDocument();
+    expect(within(disabled).getByText(/UNOFFICIAL — cross-check only/)).toBeInTheDocument();
+    expect(within(disabled).getByText("never run")).toBeInTheDocument();
+
+    const manual = screen.getByText("AMFI TER of MF schemes").closest("tr")!;
+    expect(within(manual).getByText("MANUAL ONLY")).toBeInTheDocument();
+    expect(within(manual).getByText(/Values exist only if you enter them/)).toBeInTheDocument();
+  });
+
+  it("renders runs, observation counts (fixture labelled) and tax coverage", async () => {
+    stub(HEALTH);
+    renderPage();
+    const runs = await screen.findByRole("table", { name: /Recent ingestion runs/ });
+    expect(within(runs).getByText("FetchRefused: timeout")).toBeInTheDocument();
+    expect(within(runs).getByText(/FAILED/)).toBeInTheDocument();
+    expect(screen.getByText("7300")).toBeInTheDocument();
+    expect(screen.getByText(/FIXTURE — synthetic, not market data/)).toBeInTheDocument();
+    expect(screen.getByText("31-Mar-2027")).toBeInTheDocument();
+  });
+
+  it("shows empty states when nothing has run or been stored, and flags missing tax rules", async () => {
+    stub({ ...HEALTH, runs: [], observation_counts: {}, tax_rules_loaded: false, tax_rules_coverage_to: null });
+    renderPage();
+    expect(await screen.findByText("No ingestion has run yet")).toBeInTheDocument();
+    expect(screen.getByText("No observations are stored yet")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("tax rule file failed to load");
+  });
+
+  it("shows an error state", async () => {
+    stub({ code: "INTERNAL_ERROR" }, 500);
+    renderPage();
+    expect(await screen.findByRole("alert")).toHaveTextContent("INTERNAL_ERROR");
+  });
+});

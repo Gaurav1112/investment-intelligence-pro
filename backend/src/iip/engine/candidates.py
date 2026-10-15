@@ -338,16 +338,29 @@ def mf_tax_class_from_category(category: str) -> MfTaxClass:
     return MfTaxClass.UNKNOWN
 
 
-def mf_lock_in_days(category: str) -> int:
-    """Statutory/regulatory lock-ins visible from the category (ELSS 3 years; solution-oriented 5 years)."""
+def mf_lock_in_days(category: str, name: str = "") -> int:
+    """Statutory/regulatory lock-ins (ELSS 3 years; solution-oriented 5 years).
+
+    Checks the scheme NAME too: live AMFI data (2026-10-15) files some ELSS index funds under
+    "Index Funds - Equity Funds", with "ELSS" / "Tax Saver" only in the name. A false positive merely excludes.
+    """
     c = category.lower()
-    if "elss" in c:
+    n = name.lower()
+    if "elss" in c or "elss" in n or "tax saver" in n or "tax saving" in n:
         return 3 * 365
     if any(k in c for k in ("solution oriented", "children", "retirement")):
         # SEBI: solution-oriented schemes lock in for 5 years (or until retirement / the child's majority).
         # AMFI's NAVAll labels these "Children's Fund" / "Retirement Fund" without the SEBI prefix.
         return 5 * 365
     return 0
+
+
+def is_close_ended(category: str, name: str = "") -> bool:
+    """Fixed Term Plans (FMPs) and interval schemes are close-ended / periodically redeemable (live AMFI categories)."""
+    text = f"{category} {name}".lower()
+    return any(
+        k in text for k in ("fixed term plan", "fixed maturity plan", "interval fund", "close ended", "close-ended")
+    )
 
 
 def mf_tier_from_category(category: str) -> Tier:
@@ -437,7 +450,9 @@ def mf_candidate(  # noqa: PLR0915 - one linear, auditable pipeline; splitting h
         reasons.append(f"STALE_DATA: latest NAV is dated {nav_dates[-1].isoformat()}")
     if nav_dates[-1] > as_of:
         reasons.append("LOOK_AHEAD: NAV dated after the analysis date")
-    lock_in = mf_lock_in_days(category)
+    lock_in = mf_lock_in_days(category, name)
+    if is_close_ended(category, name):
+        reasons.append("CLOSE_ENDED_OR_INTERVAL: units cannot be redeemed with the fund on demand before maturity")
     if lock_in > horizon_days:
         reasons.append(f"HORIZON_MISMATCH: {lock_in}-day lock-in exceeds your {horizon_days}-day horizon")
     load = exit_load if exit_load is not None else sebi_default_exit_load(category)

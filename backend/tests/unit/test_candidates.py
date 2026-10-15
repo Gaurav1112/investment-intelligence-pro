@@ -266,3 +266,55 @@ def test_end_to_end_preservation_ranking_excludes_volatile_fund() -> None:
     assert result.status is RankStatus.RANKED
     assert result.ranked[0].instrument_id == "tb"
     assert "mf:eq" in {e.instrument_id for e in result.excluded}
+
+
+# Real AMFI category labels observed in the live NAVAll file on 2026-10-15.
+@pytest.mark.parametrize(
+    ("category", "name", "expect_lock"),
+    [
+        ("Index Funds - Equity Funds", "360 ONE ELSS Tax Saver Nifty 50 Index Fund", True),
+        ("Equity Schemes - ELSS- Tax Saver Fund", "Any Fund", True),
+        ("ELSS", "Any Fund", True),
+        ("Index Funds - Equity Funds", "Some Nifty 50 Index Fund", False),
+        ("Solution Oriented Schemes ** - Retirement Fund", "Any Retirement Fund", True),
+    ],
+)
+def test_live_category_lock_ins(category: str, name: str, expect_lock: bool) -> None:
+    assert (cb.mf_lock_in_days(category, name) > 0) is expect_lock
+
+
+def test_fixed_term_plans_are_never_treated_as_redeemable() -> None:
+    b = _liquid(
+        category="Income/Debt Oriented Schemes - Fixed Term Plan", exit_load=cb.ExitLoadSpec(0, D("0"), "SID FIXTURE")
+    )
+    assert any(r.startswith("CLOSE_ENDED_OR_INTERVAL") for r in b.ineligible_reasons)
+
+
+@pytest.mark.parametrize(
+    ("category", "tier"),
+    [
+        ("Income/Debt Oriented Schemes - Liquid Fund", Tier.T3),
+        ("Debt Scheme - Overnight Fund", Tier.T3),
+        ("Income/Debt Oriented Schemes - Money Market Fund", Tier.T3),
+        ("Income/Debt Oriented Schemes - Ultra Short to Short Term Fund", Tier.T4),
+        ("Equity Scheme - Large Cap Fund", Tier.T4),
+    ],
+)
+def test_live_category_tiers(category: str, tier: Tier) -> None:
+    assert cb.mf_tier_from_category(category) is tier
+
+
+@pytest.mark.parametrize(
+    "category",
+    [
+        "Income",
+        "Growth",
+        "Gilt",
+        "Index Funds - Debt Funds",
+        "Life Cycle Funds - Life Cycle Fund with Maturity of 5 Years",
+        "Exchange Traded Funds (ETFs) - Gold ETF",
+        "Hybrid Schemes - Balanced Advantage Fund/ Dynamic Asset Allocation",
+    ],
+)
+def test_ambiguous_live_categories_are_unknown_for_tax(category: str) -> None:
+    assert cb.mf_tax_class_from_category(category) is cb.MfTaxClass.UNKNOWN

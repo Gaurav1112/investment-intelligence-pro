@@ -42,6 +42,26 @@ make open           # in a second terminal: opens the browser with the one-time 
 4. **Fixed income → add T-bills / FDs.** Enter the yield or rate from the official page (RBI auction press release, the bank's rate
    page) with its URL and date. The app never scrapes RBI, NSE, BSE, CCIL or FBIL (their terms prohibit it).
 
+## Importing a CAS statement (CAMS / KFintech PDF)
+
+Status: **IMPLEMENTED, NOT VERIFIED** with a real statement (tests use a synthetic PDF only).
+
+1. Request a **Detailed** Consolidated Account Statement (with transactions, from the beginning) from CAMS or KFintech. It arrives
+   as a password-protected PDF; the password is usually derived from your PAN and date of birth. Summary statements and
+   NSDL/CDSL depository statements are refused because they carry no transaction ledger.
+2. Make sure the schemes are in the local store first (**Data health → Fetch latest AMFI NAVs**). Matching is by the **exact ISIN**
+   printed on the statement, never by name; a scheme whose ISIN is not stored is shown as *unmatched* and none of its rows are
+   imported.
+3. **Overview → open a portfolio → Import CAS statement (PDF).** Choose the PDF, type the password, and press *Preview CAS
+   import*. The PDF and password are used in memory only for that request and are not stored or logged; the file is not written
+   to disk. Your name, PAN, email, address, phone and folio numbers are discarded. The PDF must fit within the 5 MiB request limit.
+4. Read the preview: rows that will be stored (purchases, SIPs and switch-ins as buys; redemptions and switch-outs as sells;
+   IDCW payouts as dividends), rejected and ignored rows with reasons (stamp duty/STT/TDS are ignored), and the **reconciliation**
+   of each scheme's closing units on the statement against the units this import would add. A mismatch must be ticked as
+   reviewed before applying; a statement that would sell more units than were bought is blocked (OVERSELL).
+5. *Confirm and store* applies exactly the previewed rows, confirmed by the file's SHA-256, after a pre-import backup
+   (`~/.iip/backups/*pre-import*.sqlite3`), in one database transaction. Re-importing the same file is refused.
+
 ## Development
 
 ```bash

@@ -301,11 +301,14 @@ _TYPE_ORDER = {"buy": 0, "sell": 1}
 
 
 def fifo_positions(txns: Iterable[Txn]) -> dict[str, Position]:
-    """FIFO lots per instrument. Same-date buys are applied before sells. Raises ``Oversell`` (never truncates)."""
+    """FIFO lots per instrument. Same-date buys are applied before sells. Raises ``Oversell`` (never truncates).
+    ``dividend`` rows (IDCW payouts, e.g. from a CAS import) carry no units and are skipped here."""
     books: dict[str, _Book] = {}
     ordered = sorted(txns, key=lambda t: (t.txn_date, _TYPE_ORDER.get(t.txn_type, 2), t.created_at, t.txn_id))
     with engine_context():
         for t in ordered:
+            if t.txn_type == "dividend":  # IDCW payout: a cash inflow (XIRR) that moves no units and no lots
+                continue
             if t.txn_type not in _TYPE_ORDER:
                 raise PortfolioError("UNSUPPORTED_TXN_TYPE", f"transaction type {t.txn_type!r} is not modelled", 409)
             if t.units <= 0:
@@ -570,6 +573,8 @@ def apply_holdings_import(
     if row is None:
         raise PortfolioError("NOT_FOUND", "import batch not found", 404)
     rec: dict[str, Any] = json.loads(row["value_json"])
+    if rec.get("kind") not in {"csv", "xlsx"}:  # e.g. a CAS batch: it carries sells and dividends, not only buys
+        raise PortfolioError("WRONG_APPLY_ENDPOINT", "this batch is not a CSV/XLSX import; use its own apply", 409)
     if rec["status"] != "previewed":
         raise PortfolioError("ALREADY_APPLIED", "this import batch has already been applied", 409)
     if sha256 != rec["file_sha256"]:

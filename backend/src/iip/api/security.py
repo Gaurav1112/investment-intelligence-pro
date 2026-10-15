@@ -45,7 +45,7 @@ SECURITY_HEADERS: tuple[tuple[bytes, bytes], ...] = (
 STATE_CHANGING = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 SESSION_COOKIE = "iip_session"
 PUBLIC_ROUTES = frozenset({("POST", "/api/session"), ("GET", "/api/health")})
-MULTIPART_ROUTES = frozenset({"/api/holdings/import"})
+MULTIPART_ROUTES = frozenset({"/api/holdings/import", "/api/holdings/import-cas"})
 IDLE_TIMEOUT_S = 8 * 3600
 ABSOLUTE_TIMEOUT_S = 24 * 3600
 

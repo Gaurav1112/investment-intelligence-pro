@@ -26,6 +26,7 @@ import type {
   TransactionRow,
 } from "../lib/types";
 import { useApi } from "../lib/useApi";
+import { CasImport } from "./CasImport";
 import { FieldError, navLabel, todayIst, validationErrors } from "./FixedIncome";
 import { apiCode, apiMessage, InstrumentSearch, safeFreshness } from "./Watchlist";
 
@@ -759,7 +760,7 @@ function Transactions({ portfolioId, tick, onChanged }: { portfolioId: string; t
                 <td>{t.instrument_name}</td>
                 <td className="num">{t.units ? unitsLabel(t.units) : "—"}</td>
                 <td className="num">{inr(t.amount)}</td>
-                <td className="small">{t.source === "csv_import" ? "CSV import" : "manual entry"}</td>
+                <td className="small">{t.source === "csv_import" ? "file import (CSV/XLSX/CAS)" : "manual entry"}</td>
                 <td>
                   <DeleteTxn portfolioId={portfolioId} t={t} onDone={onChanged} />
                 </td>
@@ -1056,6 +1057,7 @@ function PortfolioView({ p, tick, onChanged }: { p: PortfolioListItem; tick: num
       <div className="grid grid--2">
         <AddTransactionForm portfolioId={p.portfolio_id} onSaved={onChanged} />
         <ImportFlow portfolioId={p.portfolio_id} nature={p.nature} onApplied={onChanged} />
+        <CasImport portfolioId={p.portfolio_id} natureTag={<NatureTag nature={p.nature} />} onApplied={onChanged} />
       </div>
     </>
   );

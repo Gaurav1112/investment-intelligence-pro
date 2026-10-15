@@ -8,13 +8,17 @@ Data minimisation (AMFI ToU: personal use; do not store a "significant portion")
 
 from __future__ import annotations
 
+import contextlib
+import dataclasses
 import json
 import secrets
 import sqlite3
+import time
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from typing import cast
 
 from iip.data.fetch import Fetcher, FetchError, NoData
 from iip.data.models import DataError, Observation, ParseResult, SchemeRecord
@@ -31,9 +35,9 @@ from iip.data.registry import (
 )
 from iip.data.validators import run_all
 from iip.engine.freshness import nav_is_stale
-from iip.store.coordination import clear_job, load_job, save_job
+from iip.store.coordination import clear_job, clear_jobs, load_job, save_job
 from iip.store.db import write_tx
-from iip.store.observations import ObservationRow, upsert_observation
+from iip.store.observations import ObservationRow, upsert_observations_batch
 
 
 @dataclass(frozen=True)
@@ -168,59 +172,76 @@ def display_name(rec: SchemeRecord) -> str:
     )
 
 
+_SCHEME_INSERT = (
+    "INSERT INTO instruments(instrument_id, kind, name, isin, amfi_code, origin, created_at) VALUES {rows}"
+    " ON CONFLICT(instrument_id) DO UPDATE SET name=excluded.name, isin=COALESCE(excluded.isin, instruments.isin)"
+)
+_MF_INSERT = (
+    "INSERT INTO mf_schemes(instrument_id, amc, category_raw, sebi_category, plan, option_type) VALUES {rows}"
+    " ON CONFLICT(instrument_id) DO UPDATE SET amc=excluded.amc, category_raw=excluded.category_raw,"
+    " sebi_category=excluded.sebi_category, plan=excluded.plan, option_type=excluded.option_type"
+)
+_ROWS_PER_STATEMENT = 120  # ≤ 7 parameters per row → ≤ 840 parameters (under SQLite's historic 999 limit)
+
+
+def _scheme_params(rec: SchemeRecord, now: datetime) -> list[object]:
+    """One scheme as the 5 instruments + 6 mf_schemes parameters (JSON-serialisable: also the staged form)."""
+    plan = None
+    text = " ".join(x for x in (rec.plan, rec.scheme_name) if x).lower()
+    if "direct" in text:
+        plan = "direct"
+    elif "regular" in text:
+        plan = "regular"
+    iid = instrument_id(rec.scheme_code)
+    return [iid, display_name(rec), rec.isin_growth, str(rec.scheme_code), now.isoformat(),
+            rec.amc or "", rec.category or "", rec.category, plan, rec.option]  # fmt: skip
+
+
+def _store_scheme_params(conn: sqlite3.Connection, params: list[list[object]]) -> None:
+    """Multi-row upserts of scheme parameter lists (see :func:`_scheme_params`); call inside a transaction. Rows are
+    applied in order, so a repeated scheme ends as its last row — as the old one-statement-per-scheme loop did."""
+    for i in range(0, len(params), _ROWS_PER_STATEMENT):
+        part = params[i : i + _ROWS_PER_STATEMENT]
+        conn.execute(_SCHEME_INSERT.format(rows=",".join("(?, 'mf_scheme', ?, ?, ?, 'source', ?)" for _ in part)),
+                     [v for p in part for v in p[:5]])  # fmt: skip
+        conn.execute(_MF_INSERT.format(rows=",".join("(?,?,?,?,?,?)" for _ in part)),
+                     [v for p in part for v in (p[0], *p[5:])])  # fmt: skip
+
+
 def _store_schemes(conn: sqlite3.Connection, records: Iterable[SchemeRecord], now: datetime) -> None:
-    for rec in records:
-        iid = instrument_id(rec.scheme_code)
-        conn.execute(
-            "INSERT INTO instruments(instrument_id, kind, name, isin, amfi_code, origin, created_at)"
-            " VALUES (?, 'mf_scheme', ?, ?, ?, 'source', ?) ON CONFLICT(instrument_id) DO UPDATE SET"
-            " name=excluded.name, isin=COALESCE(excluded.isin, instruments.isin)",
-            (iid, display_name(rec), rec.isin_growth, str(rec.scheme_code), now.isoformat()),
-        )
-        plan = None
-        text = " ".join(x for x in (rec.plan, rec.scheme_name) if x).lower()
-        if "direct" in text:
-            plan = "direct"
-        elif "regular" in text:
-            plan = "regular"
-        conn.execute(
-            "INSERT INTO mf_schemes(instrument_id, amc, category_raw, sebi_category, plan, option_type)"
-            " VALUES (?,?,?,?,?,?) ON CONFLICT(instrument_id) DO UPDATE SET amc=excluded.amc,"
-            " category_raw=excluded.category_raw, sebi_category=excluded.sebi_category, plan=excluded.plan,"
-            " option_type=excluded.option_type",
-            (iid, rec.amc or "", rec.category or "", rec.category, plan, rec.option),
-        )
+    _store_scheme_params(conn, [_scheme_params(rec, now) for rec in records])
+
+
+def _obs_row(o: Observation, run_id: str | None) -> ObservationRow:
+    code = int(o.entity_key)
+    return ObservationRow(
+        series_id=series_id(code),
+        kind="nav",
+        value=format(o.value, "f"),
+        unit=o.unit,
+        currency=o.currency,
+        observation_date=o.observation_date.isoformat(),
+        retrieved_at=o.retrieved_at.isoformat(),
+        source_id=o.source_id,
+        source_url=o.source_url,
+        quality_status=o.quality_status.value,
+        raw_sha256=o.raw_sha256,
+        convention=o.convention,
+        publication_time=o.publication_time.isoformat() if o.publication_time else None,
+        ingestion_run_id=run_id,
+    )
 
 
 def _store_observations(
     conn: sqlite3.Connection, observations: Iterable[Observation], run_id: str, keep: Callable[[int], bool]
 ) -> int:
-    stored = 0
-    for o in observations:
-        code = int(o.entity_key)
-        if not keep(code):
-            continue
-        upsert_observation(
-            conn,
-            ObservationRow(
-                series_id=series_id(code),
-                kind="nav",
-                value=format(o.value, "f"),
-                unit=o.unit,
-                currency=o.currency,
-                observation_date=o.observation_date.isoformat(),
-                retrieved_at=o.retrieved_at.isoformat(),
-                source_id=o.source_id,
-                source_url=o.source_url,
-                quality_status=o.quality_status.value,
-                raw_sha256=o.raw_sha256,
-                convention=o.convention,
-                publication_time=o.publication_time.isoformat() if o.publication_time else None,
-                ingestion_run_id=run_id,
-            ),
-        )
-        stored += 1
-    return stored
+    """Store the kept observations in ONE transaction with the batched upsert: the same rows, ids and links as one
+    :func:`upsert_observation` per row (tests/store/test_observations_batch.py), in a few statements."""
+    rows = [_obs_row(o, run_id) for o in observations if keep(int(o.entity_key))]
+    if rows:
+        with write_tx(conn):
+            upsert_observations_batch(conn, rows)
+    return len(rows)
 
 
 def _validated(result: ParseResult) -> list[Observation]:
@@ -313,26 +334,21 @@ def prune_untracked_history(conn: sqlite3.Connection, tracked: set[int]) -> int:
         int(r["series_id"].split(":")[1])
         for r in conn.execute("SELECT DISTINCT series_id FROM observations WHERE source_id='amfi.navhistory'")
     }
-    keep = tracked | backfilled
-    candidates = conn.execute(
-        "SELECT o.series_id, MAX(o.observation_date) AS latest FROM observations o"
-        " WHERE o.source_id='amfi.navall' AND o.series_id LIKE 'nav:%' GROUP BY o.series_id"
-    ).fetchall()
-    removed = 0
+    keep = sorted(series_id(c) for c in tracked | backfilled)
+    # ONE statement for every untracked scheme (a remote database pays one round trip, not one per scheme): drop its
+    # NAVAll rows older than its latest NAVAll date. A correction pair (old row superseded_by new row) always shares
+    # one date, so both go together and the self-referencing FK holds at statement end. Never clear superseded_by
+    # first: that re-marked the old row current beside the new one (ux_obs_current breach, ECC PR-1/DB-1).
     with write_tx(conn):
-        for r in candidates:
-            if int(r["series_id"].split(":")[1]) in keep:
-                continue
-            # Drop older NAVAll rows for this scheme. A correction pair (old row superseded_by new row) always shares
-            # one date, so this single DELETE removes both and the self-referencing FK holds at statement end. Never
-            # clear superseded_by first: that re-marked the old row current beside the new one (ux_obs_current
-            # breach, ECC PR-1/DB-1) and the rollback made every later prune fail the same way.
-            cur = conn.execute(
-                "DELETE FROM observations WHERE series_id=? AND source_id='amfi.navall' AND observation_date < ?",
-                (r["series_id"], r["latest"]),
-            )
-            removed += cur.rowcount
-    return removed
+        cur = conn.execute(
+            "DELETE FROM observations WHERE source_id='amfi.navall' AND series_id LIKE 'nav:%'"
+            " AND series_id NOT IN (SELECT value FROM json_each(?))"
+            " AND observation_date < (SELECT MAX(o2.observation_date) FROM observations o2"
+            " WHERE o2.series_id = observations.series_id AND o2.source_id='amfi.navall')",
+            (json.dumps(keep),),
+        )
+        removed = cur.rowcount
+    return int(removed)
 
 
 # AMFI fund-house ids are unpublished. A full probe on 2026-10-15 found 54 fund houses with ids up to 89 (PPFAS = 64);
@@ -534,63 +550,150 @@ def backfill_resumable(
 
 
 NAVALL_JOB = "navall"
-NAVALL_CHUNK = 200  # schemes stored per transaction in hosted mode (each remote statement is a network round trip)
+NAVALL_STAGE = "navall:stage:"  # job_progress keys of the staged blocks: navall:stage:0000, navall:stage:0001, …
+NAVALL_CHUNK = 100  # schemes per block: one transaction of ~8 statements on a remote database (ADR-0013)
 
 
-def ingest_navall_resumable(
-    conn: sqlite3.Connection, fetcher: Fetcher, now: Callable[[], datetime], stop: Callable[[], bool],
-    chunk: int = NAVALL_CHUNK,
-) -> dict[str, object]:  # fmt: skip
-    """Hosted NAVAll ingestion in bounded steps: the same scope, validation and storage as :func:`ingest_navall`,
-    stored in scheme-code order, ``chunk`` schemes per transaction, progress saved after each chunk.
+def _stage_key(i: int) -> str:
+    return f"{NAVALL_STAGE}{i:04d}"
 
-    The file is fetched again on each continuation (it cannot be kept between calls without storing AMFI data beyond
-    the minimised scope). Storage is idempotent, so a scheme whose NAV changed between two fetches is simply
-    corrected; the run records the SHA-256 of the last file read."""
-    state = load_job(conn, NAVALL_JOB)
-    if state is None:
-        state = {"run_id": _start_run(conn, "amfi.navall", now()), "next_code": 0, "stored": 0}
-        save_job(conn, NAVALL_JOB, state, now().isoformat())
-    run_id = str(state["run_id"])
+
+def _clear_navall(conn: sqlite3.Connection) -> None:
+    with contextlib.suppress(sqlite3.Error):  # best effort on a failure path; the original error is what matters
+        if conn.in_transaction:
+            conn.rollback()
+        clear_jobs(conn, NAVALL_JOB, NAVALL_STAGE)
+
+
+def _stage_navall(
+    conn: sqlite3.Connection, fetcher: Fetcher, now: Callable[[], datetime], chunk: int
+) -> dict[str, object]:
+    """First call of a hosted run: fetch NAVAll ONCE, keep only the minimised scope (the same schemes and validated
+    observations :func:`ingest_navall` would store) and stage it in blocks of ``chunk`` schemes, with the progress
+    row, in one transaction. Continuations read the staged blocks and never fetch again. Returns the progress state,
+    or the final result if the fetch or parse failed."""
+    run_id = _start_run(conn, "amfi.navall", now())
     try:
         payload = fetcher.fetch(navall_request())
         result = parse_navall(payload)
     except (FetchError, DataError) as exc:
-        clear_job(conn, NAVALL_JOB)
         _finish_run(conn, run_id, now(), "failed", 0, 0, None, f"{type(exc).__name__}: {exc}")
         summary = RunSummary(run_id, "amfi.navall", "failed", 0, 0, 0, f"{type(exc).__name__}: {exc}")
         return {"done": True, "phase": "complete", "schemes_done": 0, "schemes_total": 0, **summary.__dict__}
     with _failing_run(conn, run_id, now):
         tracked = tracked_scheme_codes(conn)
-        scope = sorted({r.scheme_code for r in result.records if in_minimised_scope(r, tracked)})
-        by_code: dict[int, list[Observation]] = {}
+        records = {r.scheme_code: r for r in result.records if in_minimised_scope(r, tracked)}
+        scope = sorted(records)
+        rows: dict[int, list[list[object]]] = {}
         for o in _validated(result):
-            by_code.setdefault(int(o.entity_key), []).append(o)
-        records = {r.scheme_code: r for r in result.records}
-        first = True
-        while (todo := [c for c in scope if c > int(str(state["next_code"]))]) and (first or not stop()):
-            first = False
-            part = todo[:chunk]
-            with write_tx(conn):
-                _store_schemes(conn, (records[c] for c in part), payload.retrieved_at)
-            wanted = set(part)
-            obs = [o for c in part for o in by_code.get(c, [])]
-            stored = _store_observations(conn, obs, run_id, wanted.__contains__)
-            state.update(next_code=part[-1], stored=int(str(state["stored"])) + stored)
+            code = int(o.entity_key)
+            if code in records:
+                rows.setdefault(code, []).append(list(dataclasses.astuple(_obs_row(o, run_id))))
+        blocks = [scope[i : i + chunk] for i in range(0, len(scope), chunk)]
+        state: dict[str, object] = {
+            "run_id": run_id, "sha256": payload.sha256, "rows_ok": result.report.rows_ok,
+            "rows_rejected": result.report.rows_rejected, "block_sizes": [len(b) for b in blocks], "next_block": 0,
+            "schemes_done": 0, "stored": 0, "seconds_per_scheme": None,
+        }  # fmt: skip
+        with write_tx(conn):
+            for i, block in enumerate(blocks):
+                save_job(conn, _stage_key(i), {
+                    "schemes": [_scheme_params(records[c], payload.retrieved_at) for c in block],
+                    "obs": [r for c in block for r in rows.get(c, [])],
+                }, now().isoformat())  # fmt: skip
             save_job(conn, NAVALL_JOB, state, now().isoformat())
-        done_count = len([c for c in scope if c <= int(str(state["next_code"]))])
-        if done_count < len(scope):
-            return {"done": False, "phase": "storing", "schemes_done": done_count, "schemes_total": len(scope)}
-        pruned = prune_untracked_history(conn, tracked)
-    clear_job(conn, NAVALL_JOB)
-    rep = result.report
-    status = "ok" if rep.rows_rejected == 0 else "partial"
-    _finish_run(conn, run_id, now(), status, rep.rows_ok, rep.rows_rejected, payload.sha256, "")
-    detail = f"{len(scope)} schemes in the minimised scope; {pruned} older NAVs of untracked schemes pruned"
-    summary = RunSummary(run_id, "amfi.navall", status, rep.rows_ok, rep.rows_rejected, int(str(state["stored"])),
-                         detail)  # fmt: skip
-    return {"done": True, "phase": "complete", "schemes_done": len(scope), "schemes_total": len(scope),
-            **summary.__dict__}  # fmt: skip
+    return state
+
+
+def ingest_navall_resumable(
+    conn: sqlite3.Connection, fetcher: Fetcher, now: Callable[[], datetime], remaining: Callable[[], float],
+    monotonic: Callable[[], float] = time.monotonic, chunk: int = NAVALL_CHUNK,
+) -> dict[str, object]:  # fmt: skip
+    """Hosted NAVAll ingestion in bounded steps (ADR-0013): the same scope, validation and storage as
+    :func:`ingest_navall`, in blocks of ``chunk`` schemes.
+
+    * The first call fetches and stages the minimised scope (:func:`_stage_navall`); continuations make NO request.
+    * Before EVERY block, the first included, the step stops unless ``remaining()`` seconds cover the block at the
+      seconds-per-scheme measured so far (the first block, unmeasured, runs if any time is left).
+    * Each block is one transaction: schemes, observations (batched upsert), the progress row and the deletion of
+      the staged block commit together, so an interrupted step loses no work and repeats none.
+    * Any error after the run starts marks it failed and clears the staging.
+    """
+    state = load_job(conn, NAVALL_JOB)
+    if state is not None and "block_sizes" not in state:  # a job saved by an earlier version: start again cleanly
+        _finish_run(conn, str(state["run_id"]), now(), "failed", 0, 0, None, INTERRUPTED)
+        _clear_navall(conn)
+        state = None
+    if state is None:
+        state = _stage_navall(conn, fetcher, now, chunk)
+        if state.get("done"):
+            return state
+    run_id = str(state["run_id"])
+    total = sum(int(str(s)) for s in cast(list[object], state["block_sizes"]))
+    blocks = len(cast(list[object], state["block_sizes"]))
+    try:
+        with _failing_run(conn, run_id, now):
+            stored_this_call = False
+            while (i := int(str(state["next_block"]))) < blocks:
+                left = remaining()
+                if left <= 0:
+                    break
+                block = load_job(conn, _stage_key(i)) or {"schemes": [], "obs": []}
+                take = _schemes_that_fit(len(block["schemes"]), state["seconds_per_scheme"], left, stored_this_call)
+                if take == 0:
+                    break
+                t0 = monotonic()
+                part, rest = block["schemes"][:take], block["schemes"][take:]
+                codes = {str(p[0]).removeprefix("mf:") for p in part}
+                obs = [r for r in block["obs"] if str(r[0]).removeprefix("nav:") in codes]
+                with write_tx(conn):
+                    _store_scheme_params(conn, part)
+                    upsert_observations_batch(conn, [ObservationRow(*r) for r in obs])
+                    if rest:  # the rest of this block stays staged for the next call
+                        left_obs = [r for r in block["obs"] if str(r[0]).removeprefix("nav:") not in codes]
+                        save_job(conn, _stage_key(i), {"schemes": rest, "obs": left_obs}, now().isoformat())
+                    else:
+                        clear_job(conn, _stage_key(i))
+                    per = (monotonic() - t0) / len(part)
+                    state.update(
+                        next_block=i + (0 if rest else 1), schemes_done=_done(state) + len(part),
+                        stored=int(str(state["stored"])) + len(obs), seconds_per_scheme=f"{per:.4f}",
+                    )  # fmt: skip
+                    save_job(conn, NAVALL_JOB, state, now().isoformat())
+                stored_this_call = True
+            if int(str(state["next_block"])) < blocks:
+                return {"done": False, "phase": "storing", "schemes_done": _done(state), "schemes_total": total,
+                        "seconds_per_scheme": state["seconds_per_scheme"]}  # fmt: skip
+            pruned = prune_untracked_history(conn, tracked_scheme_codes(conn))
+    except BaseException:
+        _clear_navall(conn)
+        raise
+    _clear_navall(conn)
+    rows_ok, rows_rejected = int(str(state["rows_ok"])), int(str(state["rows_rejected"]))
+    status = "ok" if rows_rejected == 0 else "partial"
+    _finish_run(conn, run_id, now(), status, rows_ok, rows_rejected, str(state["sha256"]), "")
+    detail = f"{total} schemes in the minimised scope; {pruned} older NAVs of untracked schemes pruned"
+    summary = RunSummary(run_id, "amfi.navall", status, rows_ok, rows_rejected, int(str(state["stored"])), detail)
+    return {"done": True, "phase": "complete", "schemes_done": total, "schemes_total": total,
+            "seconds_per_scheme": state["seconds_per_scheme"], **summary.__dict__}  # fmt: skip
+
+
+NAVALL_SAFETY = 1.5  # a block is started only if 1.5 × its estimated time fits in the time left
+
+
+def _done(state: dict[str, object]) -> int:
+    return int(str(state.get("schemes_done") or 0))
+
+
+def _schemes_that_fit(block: int, seconds_per_scheme: object, left: float, stored_this_call: bool) -> int:
+    """How many schemes of the next staged block to store now. Unmeasured: the whole block. Measured: as many as fit
+    in ``left`` with the safety margin — but at least ONE per call, so a slow database can never stall the job."""
+    if seconds_per_scheme is None:
+        return block
+    fit = int(left / (float(str(seconds_per_scheme)) * NAVALL_SAFETY))
+    if fit < 1:
+        return 0 if stored_this_call else min(1, block)
+    return min(block, fit)
 
 
 def _progress(state: dict[str, object], phase: str) -> dict[str, object]:

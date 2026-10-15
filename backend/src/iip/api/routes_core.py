@@ -51,7 +51,9 @@ def _run_navall_hosted(st: Any) -> Any:
                 return _rate_limited(wait)
             ingestion.sync_sources(st.conn)
         deadline = st.monotonic() + st.job_budget_s
-        return ingestion.ingest_navall_resumable(st.conn, st.fetcher(), st.clock, lambda: st.monotonic() >= deadline)
+        return ingestion.ingest_navall_resumable(
+            st.conn, st.fetcher(), st.clock, lambda: deadline - st.monotonic(), monotonic=st.monotonic
+        )
     finally:
         st.navall_lock.release()
 

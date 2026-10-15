@@ -94,3 +94,9 @@ def save_job(conn: sqlite3.Connection, job_key: str, state: dict[str, Any], now_
 
 def clear_job(conn: sqlite3.Connection, job_key: str) -> None:
     conn.execute("DELETE FROM job_progress WHERE job_key=?", (job_key,))
+
+
+def clear_jobs(conn: sqlite3.Connection, job_key: str, prefix: str) -> None:
+    """Delete a job row and every row whose key starts with ``prefix`` (its staged parts) in one statement."""
+    escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    conn.execute("DELETE FROM job_progress WHERE job_key=? OR job_key LIKE ? ESCAPE '\\'", (job_key, escaped + "%"))

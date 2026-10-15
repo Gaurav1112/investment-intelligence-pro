@@ -111,9 +111,25 @@ instances cold-starting at once cannot both apply the same migration.
    … `COMMIT` over HTTP). In particular, how long a transaction may stay open and what a second concurrent writer sees.
    The import apply and erase use such transactions. Cross-instance claims do not.
 5. **Remote foreign keys:** whether `PRAGMA foreign_keys=ON` holds for every statement on a remote connection.
-6. **NAVAll timing:** NAVAll timing against Turso from `bom1`. The design assumes about 4 round trips per stored
-   observation; if a 200-scheme chunk takes longer than the budget, lower `NAVALL_CHUNK`.
-7. **AMFI from Vercel:** that AMFI answers requests from Vercel's IP ranges as it does from a home connection.
+6. **NAVAll timing:** the first real deploy (2026-10-15) **timed out**. The first call downloaded NAVAll in under a
+   second, then ran 305 s and hit the 300 s limit (504). Cause: the step stored one full 200-scheme chunk before
+   checking the clock, and storage cost about 6 round trips per scheme (2 scheme upserts plus BEGIN, SELECT, INSERT
+   and COMMIT per NAV). That came to about 1,200 remote statements per chunk, and about 12,500 for the ~1,780
+   schemes in scope. Every continuation also downloaded NAVAll again.
+   **Fixed:**
+   - **Batched storage:** `store.observations.upsert_observations_batch`, one transaction per block. It gives the
+     same rows, ids and superseded links as the per-row path (a differential property test runs on both drivers).
+     A 100-scheme block went from 602 statements to 8, about 12 per step with the progress row.
+   - **Single-statement prune.**
+   - **Clock check before every block,** the first included. A block runs only if 1.5 × its measured
+     seconds-per-scheme fits in the time left. When it doesn't fit, a partial block is stored (at least one scheme
+     per call), so the job never stalls.
+   - **One download per run:** the first call stages only the minimised scope, about 1 MiB in 18 rows of about
+     58 KiB for 1,780 schemes. Continuations read that and never fetch.
+   Timing against Turso after the fix: **NOT VERIFIED** until the next deploy. The response reports
+   `seconds_per_scheme`.
+7. **AMFI from Vercel: VERIFIED (2026-10-15).** From `bom1`, `www.amfiindia.com` answered 302 to
+   `portal.amfiindia.com/spages/NAVAll.txt`, which answered 200 in under a second.
 8. **Hermetic tests:** the hermetic test guard blocks Python sockets only. libSQL's Rust client would bypass it, so the
    hosted tests use only local files and never a `libsql://` URL.
 

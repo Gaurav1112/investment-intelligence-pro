@@ -3,6 +3,7 @@ SAME stored data as the local single-call versions, and the refusals and substit
 
 from __future__ import annotations
 
+import itertools
 import threading
 from datetime import date, timedelta
 from pathlib import Path
@@ -84,29 +85,157 @@ def test_lease_is_exclusive_lapses_and_is_released_only_by_its_holder(tmp_path: 
 # ----------------------------------------------------------------------------- resumable jobs: parity with local
 
 
-def test_resumable_navall_stores_exactly_what_the_local_ingest_stores(tmp_path: Path) -> None:
+class _Metered:
+    """A connection whose every statement advances a fake clock by ``cost`` units: a stand-in for a remote database
+    where time is spent in round trips (ADR-0013). Everything else is delegated."""
+
+    def __init__(self, conn: Any, cost: float = 1.0) -> None:
+        self._conn, self.cost, self.clock = conn, cost, 0.0
+
+    def execute(self, sql: str, params: Any = ()) -> Any:
+        self.clock += self.cost
+        return self._conn.execute(sql, params)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
+
+
+def _counting(handler: Any) -> tuple[Any, list[str]]:
+    seen: list[str] = []
+
+    def wrapped(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return handler(request)  # type: ignore[no-any-return]
+
+    return wrapped, seen
+
+
+def _run_steps(conn: _Metered, budget: float, chunk: int = 2) -> tuple[list[dict[str, object]], list[float], list[str]]:
+    """Call the hosted NAVAll step until done; each call gets ``budget`` units. Returns the progress of each call,
+    the units each call actually used, and every URL fetched."""
+    handler, urls = _counting(amfi)
+    steps: list[dict[str, object]] = []
+    used: list[float] = []
+    while True:
+        start = conn.clock
+        out = ing.ingest_navall_resumable(conn, fetcher(handler), lambda: NOW, lambda s=start: s + budget - conn.clock,
+                                          monotonic=lambda: conn.clock, chunk=chunk)  # type: ignore[misc]  # fmt: skip
+        steps.append(out)
+        used.append(conn.clock - start)
+        if out["done"]:
+            return steps, used, urls
+        assert len(steps) < 500
+
+
+def _local(tmp_path: Path) -> Any:
     local = connect(tmp_path / "local.db")
     migrate(local, NOW.isoformat())
     ing.sync_sources(local)
     ing.ingest_navall(local, fetcher(amfi), lambda: NOW)
+    return local
 
-    hosted = _hosted_conn(tmp_path / "hosted.db")
+
+def _table(c: Any, sql: str) -> list[tuple[Any, ...]]:
+    return [tuple(r) for r in c.execute(sql)]
+
+
+def test_resumable_navall_stores_exactly_what_the_local_ingest_stores(tmp_path: Path) -> None:
+    local = _local(tmp_path)
+    hosted = _Metered(_hosted_conn(tmp_path / "hosted.db"))
     ing.sync_sources(hosted)
-    steps: list[dict[str, object]] = []
-    while True:  # one chunk of 2 schemes per call: the budget is always exhausted after the first unit
-        out = ing.ingest_navall_resumable(hosted, fetcher(amfi), lambda: NOW, lambda: True, chunk=2)
-        steps.append(out)
-        if out["done"]:
-            break
-        assert len(steps) < 100
+    steps, _used, _urls = _run_steps(hosted, budget=15)
     assert len(steps) > 2 and all(not s["done"] for s in steps[:-1])
     assert [s["schemes_done"] for s in steps] == sorted(s["schemes_done"] for s in steps)  # monotone progress
     assert _observations(hosted) == _observations(local)
-    instruments = "SELECT instrument_id, name, isin, amfi_code FROM instruments ORDER BY instrument_id"
-    assert [tuple(r) for r in hosted.execute(instruments)] == [tuple(r) for r in local.execute(instruments)]
-    run = hosted.execute("SELECT status FROM ingestion_runs WHERE source_id='amfi.navall'").fetchall()
-    assert [r["status"] for r in run] == ["ok"]  # ONE run across all the calls
-    assert coordination.load_job(hosted, ing.NAVALL_JOB) is None
+    for sql in ("SELECT instrument_id, name, isin, amfi_code FROM instruments ORDER BY instrument_id",
+                "SELECT * FROM mf_schemes ORDER BY instrument_id",
+                "SELECT series_id, observation_date, value, quality_status, source_id, superseded_by IS NULL"
+                " FROM observations ORDER BY series_id, observation_date, source_id, obs_id"):  # fmt: skip
+        assert _table(hosted, sql) == _table(local, sql)
+    runs = _table(hosted, "SELECT status, raw_sha256 FROM ingestion_runs WHERE source_id='amfi.navall'")
+    assert runs == _table(local, "SELECT status, raw_sha256 FROM ingestion_runs WHERE source_id='amfi.navall'")
+    assert [r[0] for r in runs] == ["ok"]  # ONE run across all the calls, recording the one file read
+    assert hosted.execute("SELECT COUNT(*) FROM job_progress").fetchone()[0] == 0  # staging cleared
+
+
+def test_continuations_never_fetch_again(tmp_path: Path) -> None:
+    """The first call fetches NAVAll once and stages the minimised scope; every later call reads the staging."""
+    hosted = _Metered(_hosted_conn(tmp_path / "hosted.db"))
+    ing.sync_sources(hosted)
+    steps, _used, urls = _run_steps(hosted, budget=15)
+    assert len(steps) > 2
+    assert [u for u in urls if u.endswith("NAVAll.txt")] == [  # the 302 and its target: ONE logical fetch
+        "https://www.amfiindia.com/spages/NAVAll.txt", "https://portal.amfiindia.com/spages/NAVAll.txt",
+    ]  # fmt: skip
+
+
+def test_a_step_never_starts_work_past_its_budget(tmp_path: Path) -> None:
+    """Old behaviour: a full chunk was forced before the clock was checked (the 504 on the first deploy). Now no
+    block starts once the budget is spent, and none starts unless its measured cost fits: a call overshoots its
+    budget by at most one block's statements (a first, unmeasured block)."""
+    hosted = _Metered(_hosted_conn(tmp_path / "hosted.db"))
+    ing.sync_sources(hosted)
+    steps, used, _urls = _run_steps(hosted, budget=30)
+    block_statements = 12  # load + BEGIN + 2 scheme upserts + 2 reads + ≤ 2 writes + clear + save + COMMIT
+    staging_statements = 40  # first call only: run start, sources, scope reads, staged rows
+    assert used[0] <= 30 + staging_statements + block_statements
+    assert all(u <= 30 + block_statements for u in used[1:-1]), used
+    assert [s["schemes_done"] for s in steps][-1] == steps[-1]["schemes_total"]
+
+
+def test_a_slow_database_still_progresses_one_scheme_per_call(tmp_path: Path) -> None:
+    """Even when a single scheme costs more than the whole budget, every call stores at least one (a partial block,
+    the rest staying staged), so the job can never stall; the result is still identical to the local ingest."""
+    local = _local(tmp_path)
+    hosted = _Metered(_hosted_conn(tmp_path / "hosted.db"), cost=4.0)
+    ing.sync_sources(hosted)
+    # A 3-scheme block costs ~12 statements x 4 = ~48 units against a 30-unit budget: it can never fit whole.
+    steps, _used, _urls = _run_steps(hosted, budget=30, chunk=3)
+    progress = [int(str(s["schemes_done"])) for s in steps]
+    assert all(b > a for a, b in itertools.pairwise(progress[1:])), progress  # forward on every call after staging
+    assert len(steps) > len(set(progress)) - 1 >= 3  # partial blocks: more calls than whole blocks
+    assert _observations(hosted) == _observations(local)
+
+
+def test_a_failure_marks_the_run_failed_and_clears_the_staging(tmp_path: Path, monkeypatch: Any) -> None:
+    hosted = _Metered(_hosted_conn(tmp_path / "hosted.db"))
+    ing.sync_sources(hosted)
+    calls = {"n": 0}
+    real = ing.upsert_observations_batch
+
+    def flaky(*a: Any, **k: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("boom")
+        return real(*a, **k)
+
+    monkeypatch.setattr(ing, "upsert_observations_batch", flaky)
+    try:
+        _run_steps(hosted, budget=1000, chunk=2)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("the injected failure must surface")
+    assert _table(hosted, "SELECT status, error FROM ingestion_runs WHERE source_id='amfi.navall'") == [
+        ("failed", "RuntimeError")
+    ]
+    assert hosted.execute("SELECT COUNT(*) FROM job_progress").fetchone()[0] == 0
+    monkeypatch.setattr(ing, "upsert_observations_batch", real)
+    steps, _used, _urls = _run_steps(hosted, budget=1000)  # a fresh run starts and completes
+    assert steps[-1]["status"] == "ok"
+
+
+def test_a_job_saved_by_the_previous_version_is_restarted_cleanly(tmp_path: Path) -> None:
+    """The first deploy left a pre-staging job row (and its 'running' run) in the hosted database."""
+    hosted = _Metered(_hosted_conn(tmp_path / "hosted.db"))
+    ing.sync_sources(hosted)
+    hosted.execute("INSERT INTO ingestion_runs(run_id, source_id, started_at, status) VALUES"
+                   " ('run_old', 'amfi.navall', ?, 'running')", (NOW.isoformat(),))  # fmt: skip
+    coordination.save_job(hosted, ing.NAVALL_JOB, {"run_id": "run_old", "next_code": 0, "stored": 0}, NOW.isoformat())
+    steps, _used, _urls = _run_steps(hosted, budget=1000)
+    assert steps[-1]["status"] == "ok"
+    old = hosted.execute("SELECT status, error FROM ingestion_runs WHERE run_id='run_old'").fetchone()
+    assert tuple(old) == ("failed", ing.INTERRUPTED)
 
 
 def _history_scheme() -> tuple[int, str]:

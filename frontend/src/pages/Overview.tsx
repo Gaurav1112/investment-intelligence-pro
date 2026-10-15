@@ -790,6 +790,7 @@ const REJECT_TEXT: Record<string, string> = {
   BAD_DATE: "date format not accepted (use 2025-01-10, 10-01-2025 or 10-Jan-2025)",
   UNKNOWN_AMFI_CODE: "no stored instrument has this AMFI code",
   UNKNOWN_ISIN: "no stored instrument has this ISIN",
+  ISIN_LOOKUP_FAILED: "the AMFI scheme lookup failed, so this ISIN could not be checked — try again later",
   AMBIGUOUS_ISIN: "more than one stored instrument has this ISIN",
   CONFLICTING_IDENTIFIERS: "the AMFI code and ISIN point to different instruments",
   UNIDENTIFIED: "no AMFI code or ISIN to match on (names are never matched)",

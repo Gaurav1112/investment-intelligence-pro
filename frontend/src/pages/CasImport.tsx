@@ -14,6 +14,7 @@ export const CAS_PRIVACY_TEXT =
 
 const CAS_REASON_TEXT: Record<string, string> = {
   UNKNOWN_ISIN: "unmatched: no stored instrument has this ISIN (names are never matched)",
+  ISIN_LOOKUP_FAILED: "not checked: the AMFI scheme lookup failed — try the preview again later",
   AMBIGUOUS_ISIN: "more than one stored instrument has this ISIN",
   NO_ISIN: "the statement prints no ISIN for this scheme",
   ISIN_BAD_FORMAT: "the ISIN on the statement is malformed",

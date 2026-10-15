@@ -113,7 +113,7 @@ class Layout:
     name_is_nav_name: bool
 
 
-def parse_semicolon_file(payload: RawPayload, layout: Layout, quality: QualityStatus) -> ParseResult:
+def parse_semicolon_file(payload: RawPayload, layout: Layout, quality: QualityStatus) -> ParseResult:  # noqa: PLR0915
     if payload.source_id != layout.source_id:
         raise ValueError(f"payload is for {payload.source_id!r}; this parser handles {layout.source_id!r}")
     lines = decode_lines(payload.content)
@@ -123,6 +123,7 @@ def parse_semicolon_file(payload: RawPayload, layout: Layout, quality: QualitySt
     scheme_type: str | None = None
     category: str | None = None
     amc: str | None = None
+    carried_amc: str | None = None  # AMC of the previous section (see the carry-forward rule below)
     records: list[SchemeRecord] = []
     observations: list[Observation] = []
     rejections: list[RowRejection] = []
@@ -136,6 +137,16 @@ def parse_semicolon_file(payload: RawPayload, layout: Layout, quality: QualitySt
             fields = [f.strip() for f in line.split(";")]
             if len(fields) != N_FIELDS:
                 raise SchemaChanged(f"line {line_no}: expected {N_FIELDS} fields, found {len(fields)}")
+            if category is not None and amc is None and carried_amc is not None:
+                # Real NAVAll (probed 2026-10-15) has 4 sections where a category heading is followed directly by rows
+                # of the PREVIOUS fund house (Franklin, ICICI Prudential, UTI x2). Carry it forward ONLY when the
+                # scheme name begins with that fund house's brand; anything else still fails closed.
+                if _same_brand(fields[layout.name], carried_amc):
+                    amc = carried_amc
+                    warnings.append(f"line {line_no}: AMC_CARRIED_FORWARD")
+                else:
+                    raise SchemaChanged(f"line {line_no}: data row without an AMC line, and the scheme name does not "
+                                        "match the previous fund house")  # fmt: skip
             if category is None or amc is None:
                 raise SchemaChanged(f"line {line_no}: data row before category/AMC context")
             rows_seen += 1
@@ -165,6 +176,7 @@ def parse_semicolon_file(payload: RawPayload, layout: Layout, quality: QualitySt
         cat = parse_category(line)
         if cat is not None:
             scheme_type, category = cat
+            carried_amc = amc if amc is not None else carried_amc
             amc = None
             continue
         if _DATAISH_RE.search(line) or len(line) > MAX_CONTEXT_LINE:
@@ -185,6 +197,16 @@ def parse_semicolon_file(payload: RawPayload, layout: Layout, quality: QualitySt
         warnings=tuple(warnings),
     )
     return ParseResult(tuple(records), tuple(observations), report)
+
+
+_BRAND_STOP = frozenset({"mutual", "fund", "asset", "management", "company", "limited", "ltd", "the"})
+
+
+def _same_brand(scheme_name: str, amc: str) -> bool:
+    """True when the scheme name starts with the fund house's first distinctive word (e.g. 'UTI', 'Franklin')."""
+    brand = next((w for w in amc.lower().split() if w not in _BRAND_STOP), None)
+    first = scheme_name.strip().lower().split()[0] if scheme_name.strip() else ""
+    return brand is not None and first == brand
 
 
 def _reject(line_no: int, line: str, reason: str, detail: str) -> RowRejection:

@@ -1,0 +1,54 @@
+# SEBI mutual-fund category renames and expense-ratio regime — ADR-0009.
+# Source: docs/research/indian-instruments-and-tax.md §1.1-§1.3 (Agent B, snapshot 2026-10-15).
+# Only categories whose name changed are listed; unchanged names (Overnight, Liquid, Money Market, Corporate
+# Bond, Credit Risk, Gilt) map to themselves.  "Sectoral (debt) Fund" is new and has no legacy name.
+
+schema_version: 1
+
+rename:
+  rule_id: MF-CAT-2026
+  circular: HO/24/13/15(2)2026-IMD-RAC4/I/5764/2026
+  effective_from: 2026-02-26
+  compliance_window_months: 6
+  source_url: https://www.sebi.gov.in/sebi_data/attachdocs/feb-2026/1772079826878.pdf
+  verification_status: P
+  notes: >-
+    Replaces the 2017 categorisation (SEBI/HO/IMD/DF3/CIR/P/2017/114, 6-Oct-2017). Existing schemes had 6 months
+    from the circular date to comply (about 26-Aug-2026), so AMFI files may carry either label around that
+    window and historical NAV files keep the old labels. Consolidated as clause 3.7 of the MF Master Circular
+    (VERIFIED-SECONDARY). Solution-oriented schemes were discontinued on 26-Feb-2026 (no successor mapping).
+  mappings:
+    # Legacy names verbatim from the research table (§1.3).  Matching ignores case, spacing and a trailing
+    # "Fund", so "Low Duration" and AMFI's "Low Duration Fund" both resolve.
+    - {legacy: Ultra Short Duration, current: Ultra Short Term Fund}
+    - {legacy: Low Duration, current: Ultra Short to Short Term Fund}
+    - {legacy: Short Duration, current: Short Term Fund}
+    - {legacy: Medium Duration, current: Medium Term Fund}
+    - {legacy: Medium to Long Duration, current: Medium to Long Term Fund}
+    - {legacy: Long Duration, current: Long Term Fund}
+    - {legacy: Dynamic Bond, current: Dynamic Term Fund}
+    - {legacy: Banking and PSU Fund, current: Banking and PSU Debt Fund}
+    - {legacy: Gilt with 10y constant duration, current: 10-year Constant Maturity Gilt Fund}
+    - {legacy: Floater Fund, current: Floating Interest Rates Fund}
+
+expense_regimes:
+  - rule_id: EXP-TER
+    kind: TER
+    effective_from: null
+    effective_to: 2026-03-31
+    regulation: SEBI (Mutual Funds) Regulations, 1996 — Total Expense Ratio
+    source_url: https://www.sebi.gov.in/sebi_data/attachdocs/jul-2026/1783933012694.pdf
+    verification_status: P
+    notes: >-
+      Start date not recorded (regime predates every dataset here). Ends when the 2026 Regulations replaced the
+      1996 Regulations. Historical TER included statutory levies; not comparable like-for-like with BER.
+  - rule_id: EXP-BER
+    kind: BER
+    effective_from: 2026-04-01
+    effective_to: null
+    regulation: SEBI (Mutual Funds) Regulations, 2026, reg. 66(7) — Base Expense Ratio
+    source_url: https://www.sebi.gov.in/sebi_data/attachdocs/jul-2026/1783933012694.pdf
+    verification_status: P
+    notes: >-
+      BER excludes statutory levies (GST, STT, stamp duty) and transaction costs, which are charged separately.
+      Forward models use BER + estimated levies/brokerage, labelled as an estimate (methodology §2.8).

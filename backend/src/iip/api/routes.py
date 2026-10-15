@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from iip.api import routes_profile
+
 
 def all_routers() -> list[APIRouter]:
-    return []
+    return [routes_profile.router()]

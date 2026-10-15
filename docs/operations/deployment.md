@@ -132,6 +132,15 @@ Status: **IMPLEMENTED, NOT VERIFIED on Vercel.** Design, research and limits are
 
 ### 1. Create the database (Turso, free tier)
 
+**Simplest (verified 2026-10-15):** in the Vercel dashboard open the project → **Storage** → **Create Database** →
+**Turso**, accept the terms, choose the free plan, and connect it to **Production**. The integration injects
+`TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` as *sensitive* variables (they cannot be read back or copied); the app reads
+those names directly, so skip the two `IIP_DB_*` lines in step 3. (`vercel integration add turso` from the CLI needs
+the marketplace terms accepted first and kept reporting `action_required` here, so the dashboard route is the one to
+use.)
+
+**Or manually:**
+
 1. Create a Turso account and a database in an Indian region (Mumbai) from the Turso dashboard or the `turso` CLI.
 2. Copy the database URL (`libsql://<db>-<org>.turso.io`).
 3. Create an auth token for that database only.
@@ -160,8 +169,8 @@ vercel env add IIP_ENV production             # prod
 | `IIP_ENV` | yes | `prod`. Any other value except `test` refuses startup when hosted |
 | `IIP_PUBLIC_ORIGIN` | yes | The exact https origin users type. Every other Host is refused (so preview and deployment URLs return 400) |
 | `IIP_ACCESS_TOKEN` | yes | At least 32 characters; refused otherwise |
-| `IIP_DB_URL` | yes | `libsql://…` or `https://…` |
-| `IIP_DB_AUTH_TOKEN` | yes | Turso database token |
+| `IIP_DB_URL` | yes, unless `TURSO_DATABASE_URL` is set | `libsql://…` or `https://…`. Falls back to `TURSO_DATABASE_URL` (Vercel's Turso integration) |
+| `IIP_DB_AUTH_TOKEN` | yes, unless `TURSO_AUTH_TOKEN` is set | Turso database token. Falls back to `TURSO_AUTH_TOKEN` |
 | `IIP_LLM` | no | `off` (default) or `cloud`; `local` is refused when hosted |
 
 Set these for **Production only**. Previews would otherwise run against the same database on a Host the app refuses

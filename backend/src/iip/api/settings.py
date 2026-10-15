@@ -155,8 +155,9 @@ def from_env(environ: dict[str, str] | None = None) -> Settings:
             llm=llm_from_env(env),
             deploy=env.get("IIP_DEPLOY", "local"),
             public_origin=env.get("IIP_PUBLIC_ORIGIN", ""),
-            db_url=env.get("IIP_DB_URL", ""),
-            db_auth_token=env.get("IIP_DB_AUTH_TOKEN", ""),
+            # The Vercel Turso integration injects TURSO_* (marked sensitive, so they cannot be copied); accept them.
+            db_url=env.get("IIP_DB_URL") or env.get("TURSO_DATABASE_URL", ""),
+            db_auth_token=env.get("IIP_DB_AUTH_TOKEN") or env.get("TURSO_AUTH_TOKEN", ""),
             access_token=env.get("IIP_ACCESS_TOKEN", ""),
         )
     )

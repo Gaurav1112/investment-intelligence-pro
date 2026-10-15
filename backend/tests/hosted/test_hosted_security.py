@@ -62,6 +62,17 @@ def test_from_env_reads_the_hosted_variables(tmp_path: Path) -> None:
     assert isinstance(s, Settings)
 
 
+def test_from_env_accepts_the_turso_integration_names() -> None:
+    """Vercel's Turso integration injects TURSO_DATABASE_URL / TURSO_AUTH_TOKEN as sensitive values that cannot be
+    copied; IIP_DB_* still wins when both are set."""
+    base = {"IIP_DEPLOY": "vercel", "IIP_ENV": "prod", "IIP_PUBLIC_ORIGIN": ORIGIN, "IIP_ACCESS_TOKEN": TOKEN}
+    s = from_env({**base, "TURSO_DATABASE_URL": "libsql://x.turso.io", "TURSO_AUTH_TOKEN": "turso-token"})
+    assert s.db_url == "libsql://x.turso.io" and s.db_auth_token == "turso-token"
+    s = from_env({**base, "TURSO_DATABASE_URL": "libsql://x.turso.io", "TURSO_AUTH_TOKEN": "turso-token",
+                  "IIP_DB_URL": "libsql://a.turso.io", "IIP_DB_AUTH_TOKEN": "iip-token"})  # fmt: skip
+    assert s.db_url == "libsql://a.turso.io" and s.db_auth_token == "iip-token"
+
+
 def test_login_sets_a_secure_strict_cookie_and_hsts(db: Path) -> None:
     with make_client(db) as c:
         r = c.post("/api/session", json={"token": TOKEN}, headers={"Origin": ORIGIN})

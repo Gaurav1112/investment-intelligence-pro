@@ -81,7 +81,7 @@ def test_rt17_pre_2023_debt_mf_keeps_its_acquisition_date() -> None:
     """A debt MF bought 1-Mar-2023 (before the 1-Apr-2023 cut) and sold after coverage: actual acquisition date is
     used for the condition (pre-2023 regime) and for the 24-month test (LTCG 12.5 %, no exemption): ₹13,000."""
     total, report, _ = _tax("MUTUAL_FUND", date(2023, 3, 1), date(2027, 6, 1), "100000",
-                            equity_share=D("0"), debt_share=D("1"))  # fmt: skip
+                            equity_share=D("0"), debt_share=D("1"), listed=False)  # fmt: skip
     assert report.classifications[0].rule_id == "MF-DEBT-PRE2023-LT/ITA2025"
     assert total == D("13000.00")
 
@@ -104,7 +104,8 @@ def test_rt17_rates_as_of_validation() -> None:
 CASES = [
     ("LISTED_EQUITY_SHARE", {"listed": True}),
     ("MUTUAL_FUND", {"equity_share": D("0.65"), "debt_share": D("0")}),
-    ("MUTUAL_FUND", {"equity_share": D("0"), "debt_share": D("1")}),
+    # An open-ended (unlisted) debt fund: table r2 needs ``listed`` for the pre-2023 debt rules.
+    ("MUTUAL_FUND", {"equity_share": D("0"), "debt_share": D("1"), "listed": False}),
     ("TBILL", {}),
     ("INTEREST", {}),
 ]

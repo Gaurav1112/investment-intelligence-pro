@@ -109,9 +109,10 @@ def test_gsec_multi_coupon_hold_receives_every_coupon_at_zero_percent() -> None:
     with engine_context():
         idle = Decimal(_inputs(b)["cash_left_idle"])
         assert b.evidence.gross_end_value == idle + Decimal(units) * (D("3.55") * 3 + D("100"))
-    # Held > 12 months, but tax rates after 31-Mar-2027 are not legislated: the transfer date is clamped to the rule
-    # coverage end, which can only shorten the holding period (STCG at slab — never understates tax), and is flagged.
-    assert "GSEC-CG-ST/ITA2025" in b.evidence.tax_rule_ids
+    # Held > 12 months. Rates after 31-Mar-2027 are not legislated, so they are taken as of the coverage end and the
+    # result is flagged; the holding period uses the ACTUAL dates (RT-17), so the exit is long-term.
+    assert "GSEC-CG-LT/ITA2025" in b.evidence.tax_rule_ids
+    assert "GSEC-CG-ST/ITA2025" not in b.evidence.tax_rule_ids
     assert "TAX_RULES_ASSUMED_UNCHANGED_AFTER_2027-03-31" in b.candidate.flags
 
 

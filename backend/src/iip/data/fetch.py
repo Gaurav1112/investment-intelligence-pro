@@ -11,7 +11,9 @@ Controls, applied on every request and on every redirect hop:
   compression bomb cannot expand past the cap; other encodings are refused;
 * timeouts (connect 5 s, read 30 s, total 90 s per attempt), retries with exponential backoff and full jitter from an
   injectable seed, and a per-source circuit breaker;
-* no cookies, no Authorization header, a fixed generic User-Agent, no proxy/netrc from the environment.
+* no cookies, a fixed generic User-Agent, no proxy/netrc from the environment, and no Authorization header — except a
+  bearer token on a request to a source that REQUIRES CONFIGURATION (``SourceRequest.authenticated``, MoSPI only).
+  Authenticated requests never follow a redirect, so neither the token nor a credential body can leave the host.
 
 The public API takes a ``registry.SourceRequest`` (built only by typed builders), never a URL string.
 """
@@ -438,6 +440,11 @@ class Fetcher:
         allowed = hosts_for(spec)
         url = request.url
         started = self._monotonic()
+        extra: dict[str, str] = {}
+        if request.bearer_token is not None:
+            extra["Authorization"] = f"Bearer {request.bearer_token}"
+        if request.body is not None:
+            extra["Content-Type"] = "application/json"
         with httpx.Client(
             transport=self._transport,
             follow_redirects=False,
@@ -450,8 +457,10 @@ class Fetcher:
                 vet_host(host, allowed, self._resolver)
                 client.cookies.clear()
                 try:
-                    with client.stream("GET", url) as resp:
+                    with client.stream(request.method, url, content=request.body, headers=extra) as resp:
                         if resp.status_code in _REDIRECT_STATUSES:
+                            if request.authenticated:
+                                raise FetchRefused("redirect on an authenticated request refused")
                             location = resp.headers.get("location")
                             if not location:
                                 raise FetchFailed("redirect without Location", code="BAD_REDIRECT", retryable=False)

@@ -1,0 +1,9 @@
+/* Track 1 data-input sections (factsheet facts, macro inputs). Kept out of app.css on purpose. */
+.inputs-section { margin-top: var(--space-6, 2rem); }
+.inputs-card { margin-top: var(--space-4, 1rem); }
+.inputs-card > h3 { margin-top: 0; }
+.inputs-form { margin-top: var(--space-4, 1rem); max-width: 860px; }
+.inputs-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 0 var(--space-4, 1rem); }
+.inputs-check { display: flex; gap: var(--space-2, 0.5rem); align-items: center; }
+.inputs-check > input { width: auto; }
+.facts__head { display: flex; flex-wrap: wrap; gap: var(--space-2, 0.5rem); align-items: center; }

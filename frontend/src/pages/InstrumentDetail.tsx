@@ -4,6 +4,7 @@ import { CartesianGrid, Line, LineChart, Tooltip, XAxis, YAxis } from "recharts"
 import { compareDecimal } from "../components/DataTable";
 import { Disclosure } from "../components/Disclosures";
 import { FreshnessBadge } from "../components/FreshnessBadge";
+import { FundFactsPanel } from "../components/FundFactsPanel";
 import { Empty, ErrorState, Loading } from "../components/States";
 import { ApiError } from "../lib/api";
 import { dateLabel, inr, utcStamp } from "../lib/format";
@@ -344,6 +345,7 @@ export default function InstrumentDetail() {
       ) : null}
       <h2>Terms</h2>
       <Terms d={d} />
+      {i.kind === "mf_scheme" ? <FundFactsPanel instrumentId={i.instrument_id} /> : null}
       {d.deposit_terms && !d.series.points.length ? (
         <p className="small subtle">Fixed-deposit rates are stored as terms, not as a dated series; there is no history to chart.</p>
       ) : (

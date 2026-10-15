@@ -20,10 +20,12 @@ from iip.engine.determinism import content_hash
 from iip.engine.errors import InvalidInput
 from iip.engine.money import D, engine_context, money
 
-POLICY_VERSION = "ranking_policy@1.1.0"
+POLICY_VERSION = "ranking_policy@1.2.0"
 # User decisions 2026-10-15 (red-team RT-19 / RT-20):
 MIN_PRESERVATION_INDEPENDENT_WINDOWS = 20  # market-linked options need ≥ 20 independent windows for objectives A/B/C
 MIN_GROWTH_HORIZON_DAYS = 365  # growth objectives D/E require a withdrawal date at least 12 months away
+# ranking_policy@1.2.0 (red-team RT-23): a debt-holding fund whose portfolio credit quality is unknown fails any credit
+# floor the user sets (CREDIT_QUALITY_UNKNOWN) — unknown is never assumed safe.
 NO_CANDIDATE_MESSAGE = "No suitable candidate found under the current constraints."
 
 # Higher index = stronger credit. None (not applicable, e.g. a fund) is handled separately.
@@ -97,6 +99,9 @@ class Candidate:
     min_investment: Decimal | None = None
     flags: tuple[str, ...] = ()
     independent_windows: int | None = None  # evidence behind loss_frequency (None = not applicable / unknown)
+    # True when the instrument carries credit risk whose quality is not established (e.g. a debt fund with no current
+    # factsheet "lowest rating held"). Checked only when the user sets a credit floor.
+    credit_quality_unknown: bool = False
 
 
 @dataclass(frozen=True)
@@ -188,7 +193,15 @@ def _eligibility(request: RankingRequest, c: Candidate) -> list[tuple[str, str]]
             failures.append(("EXIT_COST_TOO_HIGH", "Exit cost exceeds your maximum."))
         if c.min_investment is not None and c.min_investment > request.amount:
             failures.append(("BELOW_MINIMUM_TICKET", "Amount is below the instrument's minimum investment."))
-        if request.credit_floor is not None and c.credit_rating is not None:
+        if request.credit_floor is not None and c.credit_quality_unknown:
+            failures.append(
+                (
+                    "CREDIT_QUALITY_UNKNOWN",
+                    "Portfolio credit quality is not known from a current factsheet, so your credit floor cannot be "
+                    "checked; it is not assumed safe.",
+                )
+            )
+        elif request.credit_floor is not None and c.credit_rating is not None:
             if CREDIT_SCALE.index(c.credit_rating) < CREDIT_SCALE.index(request.credit_floor):
                 failures.append(("BELOW_CREDIT_FLOOR", f"Rating {c.credit_rating} is below your floor."))
 

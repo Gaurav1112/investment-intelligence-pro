@@ -3,7 +3,18 @@ from pathlib import Path
 
 import pytest
 
-from iip.store.db import backup, connect, current_version, integrity_ok, migrate, restore, write_tx
+from iip.store.db import (
+    _SCHEMA_VERSION_DDL,
+    _migration_files,
+    _split_sql,
+    backup,
+    connect,
+    current_version,
+    integrity_ok,
+    migrate,
+    restore,
+    write_tx,
+)
 from iip.store.observations import ObservationRow, UpsertOutcome, current_series, upsert_observation
 
 T0 = "2026-10-15T00:00:00+00:00"
@@ -40,9 +51,9 @@ def _obs(conn: sqlite3.Connection, value: str, superseded_by: int | None = None)
 
 def test_migrations_apply_once_and_are_idempotent(tmp_path: Path) -> None:
     conn = connect(tmp_path / "x.db")
-    assert migrate(conn, T0) == ["0001_initial.sql"]
+    assert migrate(conn, T0) == ["0001_initial.sql", "0002_inputs.sql"]
     assert migrate(conn, T0) == []
-    assert current_version(conn) == 1
+    assert current_version(conn) == 2
 
 
 def test_pragmas(db: sqlite3.Connection) -> None:
@@ -127,7 +138,7 @@ def test_backup_restore_drill(db: sqlite3.Connection, tmp_path: Path) -> None:
     conn2 = connect(restored)
     assert integrity_ok(conn2)
     assert conn2.execute("SELECT value FROM observations").fetchone()[0] == "25.9504"
-    assert current_version(conn2) == 1
+    assert current_version(conn2) == 2
 
 
 def test_restore_refuses_corrupt_backup(tmp_path: Path) -> None:
@@ -135,3 +146,67 @@ def test_restore_refuses_corrupt_backup(tmp_path: Path) -> None:
     bad.write_bytes(b"SQLite format 3\x00" + b"\x00" * 200)
     with pytest.raises((RuntimeError, sqlite3.DatabaseError)):
         restore(bad, tmp_path / "out.db")
+
+
+# ----------------------------------------------------------------------------------------- 0002_inputs
+
+
+def test_migration_0002_upgrades_a_version_1_database(tmp_path: Path) -> None:
+    """A store created at version 1 gains the input tables without losing data."""
+    conn = connect(tmp_path / "v1.db")
+    conn.execute(_SCHEMA_VERSION_DDL)
+    v1 = next(m for m in _migration_files() if m[0] == 1)
+    for stmt in _split_sql(v1[2]):
+        conn.execute(stmt)
+    conn.execute("INSERT INTO schema_version VALUES (1, '0001_initial.sql', ?)", (T0,))
+    _obs(conn, "25.9504")
+    assert current_version(conn) == 1
+    assert migrate(conn, T0) == ["0002_inputs.sql"]
+    assert current_version(conn) == 2
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert {"fund_facts", "fd_card_rate_tables", "fd_card_rate_buckets"} <= tables
+    assert conn.execute("SELECT value FROM observations").fetchone()[0] == "25.9504"
+
+
+def test_fund_facts_constraints(db: sqlite3.Connection) -> None:
+    db.execute(
+        "INSERT INTO instruments(instrument_id, kind, name, origin, created_at)"
+        " VALUES ('mf:1', 'mf_scheme', 'X', 'manual', ?)",
+        (T0,),
+    )
+    ok = ("mf:1", "2026-09", "2026-09-30", "0.0035", "TER", "https://example.test/f", "2026-10-10", T0)
+    sql = (
+        "INSERT INTO fund_facts(instrument_id, as_of_month, as_of_date, expense_ratio, expense_ratio_kind,"
+        " citation_url, verified_on, entered_at) VALUES (?,?,?,?,?,?,?,?)"
+    )
+    db.execute(sql, ok)
+    db.execute(sql, ok)  # history: a second row for the same month is allowed (append; the latest is used)
+    for bad in (
+        ("mf:1", "2026-9", *ok[2:]),  # month format
+        (*ok[:5], "http://example.test/f", *ok[6:]),  # https only
+        (*ok[:4], None, *ok[5:]),  # an expense ratio needs its kind (TER/BER)
+        (*ok[:6], "2026-09-29", T0),  # read before the portfolio date
+        ("mf:missing", *ok[1:]),  # foreign key
+    ):
+        with pytest.raises(sqlite3.IntegrityError):
+            db.execute(sql, bad)
+    db.execute("DELETE FROM instruments WHERE instrument_id='mf:1'")
+    assert db.execute("SELECT COUNT(*) FROM fund_facts").fetchone()[0] == 0  # cascades with the scheme
+
+
+def test_card_rate_tables_constraints(db: sqlite3.Connection) -> None:
+    table_sql = (
+        "INSERT INTO fd_card_rate_tables(institution_key, institution, as_of, premature_rate_basis, citation_url,"
+        " entered_at) VALUES ('b', 'B', '2026-10-10', ?, 'https://example.test/r', ?)"
+    )
+    db.execute(table_sql, ("period_card", T0))
+    tid = db.execute("SELECT table_id FROM fd_card_rate_tables").fetchone()[0]
+    db.execute("INSERT INTO fd_card_rate_buckets VALUES (?, 7, 45, '0.03')", (tid,))
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute("INSERT INTO fd_card_rate_buckets VALUES (?, 7, 90, '0.04')", (tid,))  # duplicate bucket start
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute("INSERT INTO fd_card_rate_buckets VALUES (?, 50, 40, '0.04')", (tid,))  # max < min
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute(table_sql, ("booked", T0))  # unknown premature-rate basis
+    db.execute("DELETE FROM fd_card_rate_tables")
+    assert db.execute("SELECT COUNT(*) FROM fd_card_rate_buckets").fetchone()[0] == 0

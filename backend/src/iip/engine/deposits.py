@@ -19,9 +19,10 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from enum import StrEnum
+from itertools import pairwise
 
 from iip.engine.dates import add_months, days_between
-from iip.engine.errors import InvalidInput, RuleNotFound
+from iip.engine.errors import InvalidInput, MissingData, RuleNotFound
 from iip.engine.money import ONE, ZERO, engine_context, money
 
 DEFAULT_SHORT_TENURE_CUTOFF_MONTHS = 6
@@ -261,6 +262,40 @@ def fd_premature_withdrawal(
         ),
         warnings=tuple(dict.fromkeys(warnings)),
     )
+
+
+@dataclass(frozen=True)
+class CardRateBucket:
+    """One row of a bank's published card-rate table: deposits of ``min_days``–``max_days`` earn ``rate``."""
+
+    min_days: int
+    max_days: int
+    rate: Decimal
+
+
+def validate_card_rate_table(buckets: Sequence[CardRateBucket]) -> tuple[CardRateBucket, ...]:
+    """Sorted, non-overlapping tenure buckets with non-negative finite rates (a malformed table is refused)."""
+    if not buckets:
+        raise InvalidInput("a card-rate table needs at least one tenure bucket")
+    ordered = tuple(sorted(buckets, key=lambda b: b.min_days))
+    for b in ordered:
+        if b.min_days < 1 or b.max_days < b.min_days:
+            raise InvalidInput(f"invalid tenure bucket {b.min_days}–{b.max_days} days")
+        if not isinstance(b.rate, Decimal) or not b.rate.is_finite() or b.rate < 0:
+            raise InvalidInput(f"invalid card rate {b.rate!r}")
+    for a, b in pairwise(ordered):
+        if b.min_days <= a.max_days:
+            raise InvalidInput(f"tenure buckets overlap: {a.min_days}–{a.max_days} and {b.min_days}–{b.max_days} days")
+    return ordered
+
+
+def card_rate_for_tenure(buckets: Sequence[CardRateBucket], days_run: int) -> CardRateBucket:
+    """calc §3.3: the card rate for the tenure the deposit actually ran. No bucket covers it → ``MissingData``
+    (the rate is never taken from a neighbouring bucket)."""
+    for b in validate_card_rate_table(buckets):
+        if b.min_days <= days_run <= b.max_days:
+            return b
+    raise MissingData(f"the card-rate table has no bucket covering a {days_run}-day tenure")
 
 
 class InstitutionType(StrEnum):

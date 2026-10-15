@@ -10,6 +10,7 @@ const LABELS: Record<string, string> = {
   EXIT_COST_TOO_HIGH: "Exit cost above your limit",
   BELOW_MINIMUM_TICKET: "Amount below the minimum investment",
   BELOW_CREDIT_FLOOR: "Credit rating below your floor",
+  CREDIT_QUALITY_UNKNOWN: "Portfolio credit quality unknown (enter its factsheet)",
   UNINSURED_CREDIT_EXPOSURE: "Part of the amount is not deposit-insured",
   INSUFFICIENT_LOSS_EVIDENCE: "Too little history to show a low loss rate",
   MISSING_LOSS_EVIDENCE: "No reliable loss history",

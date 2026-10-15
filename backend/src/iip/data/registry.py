@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from enum import StrEnum
 from types import MappingProxyType
@@ -312,6 +312,19 @@ _SOURCES: tuple[SourceSpec, ...] = (
         unit="percent_pa",
     ),
     SourceSpec(
+        id="amc.factsheet",
+        name="AMC monthly factsheet (user-entered)",
+        owner="Each AMC",
+        official=True,
+        mode=SourceMode.MANUAL,
+        allowed_hosts=frozenset(),
+        terms_url=None,
+        licence_class=LicenceClass.UNKNOWN,
+        licence_note="User enters duration, YTM, expense ratio and credit profile from the scheme's own factsheet, "
+        "with its URL. Factsheets are never scraped.",
+        freshness=FreshnessSLO(FreshnessBasis.OBSERVATION_CALENDAR_DAYS, fresh_max=45, stale_max=45),
+    ),
+    SourceSpec(
         id="mof.smallsavings",
         name="Small-savings rates (DEA OM / DoP SB Order)",
         owner="MoF DEA",
@@ -408,15 +421,35 @@ def check_url(url: str, allowed_hosts: frozenset[str]) -> str:
 
 @dataclass(frozen=True, slots=True)
 class SourceRequest:
-    """A validated request for one registered source. Build it with the typed builders below."""
+    """A validated request for one registered source. Build it with the typed builders below.
+
+    ``method``/``body``/``bearer_token`` exist only for sources that REQUIRE CONFIGURATION (user credentials, e.g.
+    MoSPI): every other source is a plain anonymous GET. Credentials are never part of ``repr``.
+    """
 
     source: SourceSpec
     url: str
+    method: str = "GET"
+    body: bytes | None = field(default=None, repr=False)
+    bearer_token: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if self.source.mode is not SourceMode.LIVE:
             raise FetchRefused(f"source {self.source.id!r} is {self.source.mode.value}; it is never fetched")
         check_url(self.url, hosts_for(self.source))
+        if self.method not in ("GET", "POST"):
+            raise FetchRefused(f"method {self.method!r} refused")
+        authenticated = self.method != "GET" or self.body is not None or self.bearer_token is not None
+        if authenticated and not self.source.requires_configuration:
+            raise FetchRefused(f"source {self.source.id!r} takes anonymous GET requests only")
+        if self.bearer_token is not None and (
+            not self.bearer_token or any(c.isspace() or ord(c) < 0x21 or ord(c) > 0x7E for c in self.bearer_token)
+        ):
+            raise FetchRefused("bearer token contains characters that cannot appear in a header")
+
+    @property
+    def authenticated(self) -> bool:
+        return self.method != "GET" or self.body is not None or self.bearer_token is not None
 
 
 def _amfi_date(d: date) -> str:
@@ -458,3 +491,27 @@ def navhistory_request(*, mf_id: int, tp: int, from_date: date, to_date: date) -
         f"?mf={mf_id}&tp={tp}&frmdt={_amfi_date(from_date)}&todt={_amfi_date(to_date)}"
     )
     return SourceRequest(get_source("amfi.navhistory"), url)
+
+
+MOSPI_BASE_URL = "https://api.mospi.gov.in"
+
+
+def mospi_login_request(body: bytes) -> SourceRequest:
+    """POST /api/login with the user's MoSPI credentials (JSON body built by ``iip.data.mospi``)."""
+    return SourceRequest(get_source("mospi.cpi"), f"{MOSPI_BASE_URL}/api/login", method="POST", body=body)
+
+
+def mospi_cpi_request(*, base_year: int, year: int, month: int, bearer_token: str | None) -> SourceRequest:
+    """All-India CPI index records for one reference month (source-registry §2.12 Swagger parameters)."""
+    base_year = _strict_int("base_year", base_year)
+    year = _strict_int("year", year)
+    month = _strict_int("month", month)
+    if base_year not in (2012, 2024):
+        raise ValueError("base_year must be 2012 or 2024")
+    if not 2013 <= year <= 2100 or not 1 <= month <= 12:
+        raise ValueError("year/month out of range")
+    url = (
+        f"{MOSPI_BASE_URL}/api/cpi/getCPIIndex?base_year={base_year}&series=Current&year={year}"
+        f"&month_code={month}&state_code=99&Format=JSON&limit=100"
+    )
+    return SourceRequest(get_source("mospi.cpi"), url, bearer_token=bearer_token)

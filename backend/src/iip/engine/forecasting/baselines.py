@@ -429,9 +429,10 @@ def yield_carry_scenarios(
     ytm: Decimal,
     expense_ratio: Decimal,
     modified_duration: Decimal,
-    horizon_months: int,
+    horizon_months: int | None = None,
     as_of: date,
     factsheet_published: date,
+    horizon_days: int | None = None,
     convexity: Decimal | None = None,
     dy_grid_bp: Sequence[int] = DEFAULT_DY_GRID_BP,
     stress_bp: Sequence[int] = STRESS_DY_BP,
@@ -439,15 +440,20 @@ def yield_carry_scenarios(
 ) -> YieldCarryScenarios:
     """B4: R_H ≈ (YTM − ER) × H/12 − D_mod × Δy + ½ C Δy² (Δy as a fraction; grid given in bp).
 
-    Factsheet inputs older than 45 days (by *publication* date) → StaleData.
+    Factsheet inputs older than 45 days (by *publication* date) → StaleData. Give exactly one of ``horizon_months``
+    (H/12 years) or ``horizon_days`` (days/365 years, for horizons that are not whole months).
     """
     for name, v in (("ytm", ytm), ("expense_ratio", expense_ratio), ("modified_duration", modified_duration)):
         if not isinstance(v, Decimal) or not v.is_finite():
             raise InvalidInput(f"{name} must be a finite Decimal")
     if expense_ratio < 0 or modified_duration < 0:
         raise InvalidInput("expense ratio and duration must be ≥ 0")
-    if horizon_months < 1:
+    if (horizon_months is None) == (horizon_days is None):
+        raise InvalidInput("give exactly one of horizon_months and horizon_days")
+    if horizon_months is not None and horizon_months < 1:
         raise InvalidInput("horizon_months must be ≥ 1")
+    if horizon_days is not None and horizon_days < 1:
+        raise InvalidInput("horizon_days must be ≥ 1")
     if factsheet_published > as_of:
         raise InvalidInput("factsheet published after as_of (look-ahead)")
     age = (as_of - factsheet_published).days
@@ -455,7 +461,9 @@ def yield_carry_scenarios(
         raise StaleData(f"factsheet is {age} days old (> {FACTSHEET_MAX_AGE_DAYS})")
     c = Decimal(0) if convexity is None else convexity
     with engine_context():
-        h_years = Decimal(horizon_months) / Decimal(12)
+        h_years = (
+            Decimal(horizon_months) / Decimal(12) if horizon_months is not None else Decimal(horizon_days or 0) / 365
+        )
         carry = (ytm - expense_ratio) * h_years
 
         def scen(bp: int) -> Decimal:
@@ -468,8 +476,8 @@ def yield_carry_scenarios(
         label=SCENARIO_LABEL,
         model_id="B4_YIELD_CARRY",
         model_version=model_version,
-        horizon=horizon_months,
-        horizon_unit="months",
+        horizon=horizon_months if horizon_months is not None else horizon_days or 0,
+        horizon_unit="months" if horizon_months is not None else "days",
         data_cutoff=factsheet_published,
         baseline_comparator="B3_RISK_FREE_CARRY",
         assumptions=(

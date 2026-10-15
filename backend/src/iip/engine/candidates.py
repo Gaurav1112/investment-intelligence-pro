@@ -21,13 +21,14 @@ from iip.engine.feasibility import percentile_type7
 from iip.engine.fixed_income import tbill_days, tbill_price
 from iip.engine.freshness import nav_is_stale
 from iip.engine.money import ONE, ZERO, D, engine_context
-from iip.engine.ranking import Candidate, OutcomeBand, Tier
+from iip.engine.ranking import CREDIT_SCALE, Candidate, OutcomeBand, Tier
 
 ENGINE_VERSION = "candidates@1.0.0"
 MIN_INDEPENDENT_WINDOWS = 10  # validation-methodology §8: below this the empirical distribution is refused
 FULL_BAND_INDEPENDENT_WINDOWS = 20  # q05/q95 need ≥ 20 independent windows; otherwise worst observed window
 MAX_NAV_STALENESS_DAYS = 7  # calculation-methodology §0: last price on or before t within 7 calendar days
 MIN_HISTORY_DAYS = 365  # validation-methodology §8: newly launched (< 1 year of history) → suppressed
+FACTSHEET_MAX_AGE_DAYS = 45  # risk-methodology §8: factsheet / holdings snapshot ≤ 45 days old
 
 
 class TaxBasis(StrEnum):
@@ -373,6 +374,52 @@ def is_close_ended(category: str, name: str = "") -> bool:
     )
 
 
+@dataclass(frozen=True)
+class FundCreditFacts:
+    """Credit facts from the scheme's latest factsheet (user-entered with a citation)."""
+
+    lowest_rating: str | None  # lowest rating held, as published (long-term scale, SOVEREIGN, or a short-term rating)
+    as_of: date  # the factsheet's portfolio date
+
+
+def fund_has_credit_exposure(category: str) -> bool:
+    """Debt-holding schemes (debt, liquid, money-market, overnight, gilt, and every hybrid) carry portfolio credit risk
+    that a credit floor must check (red-team RT-23). Equity schemes do not."""
+    c = category.lower()
+    if c.startswith("equity scheme") or "elss" in c:
+        return False
+    return mf_tax_class_from_category(category) is MfTaxClass.SPECIFIED_DEBT or c.startswith("hybrid scheme")
+
+
+def fund_credit_status(
+    category: str, facts: FundCreditFacts | None, as_of: date
+) -> tuple[str | None, bool, str | None]:
+    """(credit_rating for the ranking policy, credit_quality_unknown, why unknown).
+
+    ranking_policy@1.2.0 (RT-23): a debt-holding fund is checked against the user's credit floor by the LOWEST rating
+    it holds, from a factsheet no more than 45 days old. With no such factsheet — or a lowest rating that is not on the
+    long-term scale (short-term ratings such as A1+ have no agreed long-term equivalent here) — its credit quality is
+    unknown and it fails any floor (never assumed safe). Equity schemes are unaffected.
+    """
+    if not fund_has_credit_exposure(category):
+        return None, False, None
+    why: str
+    if facts is None or facts.lowest_rating is None:
+        why = "no factsheet with the lowest rating held has been entered"
+    elif facts.as_of > as_of:
+        why = f"the factsheet is dated {facts.as_of}, after the analysis date"
+    elif (as_of - facts.as_of).days > FACTSHEET_MAX_AGE_DAYS:
+        why = f"the factsheet ({facts.as_of}) is more than {FACTSHEET_MAX_AGE_DAYS} days old"
+    elif facts.lowest_rating not in CREDIT_SCALE:
+        why = f"the lowest rating held ({facts.lowest_rating}) is not on the long-term rating scale"
+    else:
+        return facts.lowest_rating, False, None
+    if "credit risk" in category.lower():
+        # SEBI: a Credit Risk Fund must hold ≥ 65 % in instruments rated AA and below — it fails any floor as UNRATED.
+        return "UNRATED", False, None
+    return None, True, why
+
+
 def mf_tier_from_category(category: str) -> Tier:
     c = category.lower()
     if any(k in c for k in ("overnight", "liquid", "money market")):
@@ -462,6 +509,7 @@ def mf_candidate(  # noqa: PLR0915 - one linear, auditable pipeline; splitting h
     ruleset: tx.TaxRuleSet,
     profile: tx.TaxProfile | None,
     settlement_days: int,
+    credit_facts: FundCreditFacts | None = None,
 ) -> BuiltCandidate:
     """Empirical horizon distribution of NAV returns, scaled to the amount, after stamp duty, exit load and tax."""
     tier = mf_tier_from_category(category)
@@ -609,6 +657,7 @@ def mf_candidate(  # noqa: PLR0915 - one linear, auditable pipeline; splitting h
             "Scheme survivorship: merged or wound-up schemes are not in the comparison set",
         ),
     )
+    credit_rating, credit_unknown, _ = fund_credit_status(category, credit_facts, as_of)
     cand = Candidate(
         instrument_id=instrument_id,
         name=name,
@@ -619,9 +668,10 @@ def mf_candidate(  # noqa: PLR0915 - one linear, auditable pipeline; splitting h
         days_to_cash=settlement_days,
         exit_cost=load_rate,
         horizon_fit=True,
-        # A fund has no single rating (None = n/a), except where SEBI's category mandates mostly sub-AA paper: a Credit
-        # Risk Fund must invest ≥ 65 % in instruments rated AA and below, so it fails any credit floor the user sets.
-        credit_rating="UNRATED" if "credit risk" in category.lower() else None,
+        # Equity schemes: no credit rating applies (None). Debt-holding schemes: the lowest rating held from a current
+        # factsheet, otherwise credit quality is unknown and any credit floor fails (fund_credit_status, RT-23).
+        credit_rating=credit_rating,
+        credit_quality_unknown=credit_unknown,
         data_ok=True,
         flags=tuple(flags),
     )

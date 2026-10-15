@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -657,6 +657,7 @@ def discover(  # noqa: PLR0915 - one auditable orchestration sequence
     as_of: date,
     ruleset: tx.TaxRuleSet | None,
     allow_fixtures: bool = False,
+    llm_rephrase: Callable[[str], str] | None = None,
 ) -> dict[str, Any]:
     p = status.profile
     personalised = status.mode == "PERSONALISED"
@@ -781,6 +782,7 @@ def discover(  # noqa: PLR0915 - one auditable orchestration sequence
         payload={"service": SERVICE_VERSION},
         disclosure_keys=disclosure_keys,
         engine_versions={"ranking": POLICY_VERSION, "candidates": cb.ENGINE_VERSION},
+        llm_rephrase=llm_rephrase,
     )
 
     def row(b: cb.BuiltCandidate, rank_no: int | None, reasons: Sequence[str], codes: Sequence[str]) -> dict[str, Any]:

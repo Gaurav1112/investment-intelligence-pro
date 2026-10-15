@@ -263,7 +263,7 @@ days. Tests must use XIRR semantics.
 
 ### 2.7 Total return with distributions (IDCW)
 
-AMFI publishes Growth and IDCW option NAVs separately; see `docs/data/probes/amfi_navall_*`. An
+AMFI publishes Growth and IDCW option NAVs separately; see `docs/data/probes/README.md` and the synthetic `backend/tests/fixtures/data/amfi_navall_excerpt.txt`. An
 IDCW NAV **drops** by the distribution on the ex-date.
 * Growth option: the price return is the total return.
 * IDCW option: reinvest the distribution at the ex-date NAV:

@@ -1,7 +1,8 @@
 """MoSPI CPI adapter (REQUIRES CONFIGURATION). No real network: httpx.MockTransport + a stubbed resolver.
 
-The 10-record payload is the real unauthenticated probe from docs/data/probes. The "authenticated" payloads are
-hand-made TEST bodies in the documented record shape (values are test numbers, not CPI data).
+The 10-record payload is SYNTHETIC: it copies the shape of the real unauthenticated probe of 2026-10-15 (10 records,
+``meta_data.totalRecords`` 84, last record with null index; see docs/data/probes/README.md) with fictional index
+values. The "authenticated" payloads are hand-made TEST bodies in the documented record shape (not CPI data).
 """
 
 from __future__ import annotations
@@ -20,10 +21,7 @@ from iip.data.models import FetchRefused, RawPayload, SchemaChanged
 from iip.data.registry import SourceRequest, get_source, mospi_cpi_request, navall_request
 
 NOW = datetime(2026, 10, 15, 6, 0, tzinfo=UTC)
-PROBE = (
-    Path(__file__).resolve().parents[3]
-    / "docs/data/probes/mospi_cpi_getCPIIndex_base2012_2025-12_unauth10_20261015T053723Z.json"
-)
+PROBE = Path(__file__).resolve().parents[1] / "fixtures/data/mospi_cpi_unauth10_synthetic.json"
 GENERAL = {"baseyear": "2024", "year": 2026, "month": "September", "state": "All India", "sector": "Combined",
            "group": "General", "subgroup": "General", "index": "123.4", "inflation": "1.11", "status": "P"}  # fmt: skip
 
@@ -69,7 +67,7 @@ def test_configured_status_never_reveals_credentials() -> None:
 # ----------------------------------------------------------------------------------------- parsing
 
 
-def test_unauthenticated_ten_record_cap_is_refused_using_the_real_probe() -> None:
+def test_unauthenticated_ten_record_cap_is_refused_using_the_probe_shape() -> None:
     body = json.loads(PROBE.read_text())
     assert len(body["data"]) == 10
     with pytest.raises(mospi.MospiError) as e:

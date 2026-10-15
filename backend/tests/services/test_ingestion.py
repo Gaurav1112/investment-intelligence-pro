@@ -1,4 +1,4 @@
-"""Ingestion pipeline over the real AMFI probe bytes (served by MockTransport — no network)."""
+"""Ingestion pipeline over synthetic AMFI-format bytes (served by MockTransport — no network)."""
 
 from collections.abc import Iterator
 from datetime import UTC, date, datetime
@@ -57,7 +57,7 @@ def test_navall_ingests_only_the_minimised_scope_with_provenance(conn) -> None: 
     assert summary.status in {"ok", "partial"} and summary.stored > 0
     names = [r["name"] for r in conn.execute("SELECT name FROM instruments")]
     assert names and all("direct" in n.lower() and "growth" in n.lower() and "(AMFI " in n for n in names)
-    # AMFI reuses "Axis Children's Fund" for two Direct-Growth codes: names must stay distinguishable.
+    # AMFI reuses "Asteria Children's Fund" for two Direct-Growth codes: names must stay distinguishable.
     assert len(set(names)) == len(names)
     obs = conn.execute("SELECT * FROM observations").fetchall()
     assert obs and all(o["source_id"] == "amfi.navall" and o["raw_sha256"] and o["retrieved_at"] for o in obs)
@@ -95,7 +95,7 @@ def test_history_backfill_keeps_only_the_requested_scheme(conn) -> None:  # type
     summary = ing.backfill_history(
         conn,
         fetcher(amfi),
-        scheme_code=119018,
+        scheme_code=928470,
         mf_id=9,
         start=date(2026, 10, 13),
         end=date(2026, 10, 14),
@@ -103,9 +103,9 @@ def test_history_backfill_keeps_only_the_requested_scheme(conn) -> None:  # type
     )
     assert summary.stored == 2
     series = {r["series_id"] for r in conn.execute("SELECT series_id FROM observations")}
-    assert series == {"nav:119018"}
+    assert series == {"nav:928470"}
     values = [r["value"] for r in conn.execute("SELECT value FROM observations ORDER BY observation_date")]
-    assert values == ["1393.087", "1385.402"]  # verbatim from the probe (HDFC Large Cap Direct Growth)
+    assert values == ["1393.087", "1385.402"]  # verbatim from the fixture (fictional)
     statuses = {r["quality_status"] for r in conn.execute("SELECT quality_status FROM observations")}
     assert statuses == {"ok"}
 
@@ -126,10 +126,10 @@ def test_untracked_schemes_keep_only_the_latest_nav(conn) -> None:  # type: igno
 
 
 def test_backfilled_schemes_keep_their_history(conn) -> None:  # type: ignore[no-untyped-def]
-    ing.backfill_history(conn, fetcher(amfi), scheme_code=119018, mf_id=9, start=date(2026, 10, 13),
+    ing.backfill_history(conn, fetcher(amfi), scheme_code=928470, mf_id=9, start=date(2026, 10, 13),
                          end=date(2026, 10, 14), now=lambda: NOW)  # fmt: skip
     ing.ingest_navall(conn, fetcher(amfi), lambda: NOW)
-    assert conn.execute("SELECT COUNT(*) FROM observations WHERE series_id='nav:119018'").fetchone()[0] >= 2
+    assert conn.execute("SELECT COUNT(*) FROM observations WHERE series_id='nav:928470'").fetchone()[0] >= 2
 
 
 def test_register_held_schemes_by_exact_isin_including_reinvestment_alias(conn) -> None:  # type: ignore[no-untyped-def]
@@ -208,7 +208,7 @@ def test_backfill_failure_after_start_marks_the_run_failed(conn, monkeypatch) ->
 
     monkeypatch.setattr(ing, "_store_observations", boom)
     with pytest.raises(RuntimeError):
-        ing.backfill_history(conn, fetcher(amfi), scheme_code=119018, mf_id=9, start=date(2026, 10, 13),
+        ing.backfill_history(conn, fetcher(amfi), scheme_code=928470, mf_id=9, start=date(2026, 10, 13),
                              end=date(2026, 10, 14), now=lambda: NOW)  # fmt: skip
     assert tuple(conn.execute("SELECT status, error FROM ingestion_runs").fetchone()) == ("failed", "RuntimeError")
 

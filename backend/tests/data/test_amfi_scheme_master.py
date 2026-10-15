@@ -1,4 +1,4 @@
-"""Scheme master CSV parser. Fixture: docs/data/probes/amfi_schemedata_mf0_head_20261015T054336Z.csv.
+"""Scheme master CSV parser. Fixture: synthetic CSV in the layout of AMFI's scheme master (fictional schemes).
 
 Quirk (source-registry §2.3): the two ISIN columns are glued together with no delimiter.
 """
@@ -20,8 +20,8 @@ def _parse(content: bytes):
 
 
 ROW = (
-    b"Aditya Birla Sun Life AMC Limited,100034,Aditya Birla Sun Life Large & Mid Cap Fund,Open Ended,"
-    b"Equity Scheme - Large & Mid Cap Fund,Aditya Birla Sun Life Large & Mid Cap Fund -Regular - IDCW,5000,"
+    b"Aurora Bay AMC Limited,902834,Aurora Bay Large & Mid Cap Fund,Open Ended,"
+    b"Equity Scheme - Large & Mid Cap Fund,Aurora Bay Large & Mid Cap Fund -Regular - IDCW,5000,"
     b"24-Feb-1995,24-Feb-1995,INFZ17K01156INFZ17K01CE4"
 )
 
@@ -39,20 +39,20 @@ def test_fixture_parses(schemedata_bytes: bytes) -> None:
 
 def test_glued_isins_split(schemedata_bytes: bytes) -> None:
     recs = {r.scheme_code: r for r in _parse(schemedata_bytes).records}
-    r = recs[100034]
+    r = recs[902834]
     assert r.isin_growth == "INFZ17K01156"
     assert r.isin_reinvest == "INFZ17K01CE4"
-    assert r.amc == "Aditya Birla Sun Life AMC Limited"
+    assert r.amc == "Aurora Bay AMC Limited"
     assert r.scheme_type == "Open Ended"
     assert r.category == "Equity Scheme - Large & Mid Cap Fund"
-    assert r.nav_name == "Aditya Birla Sun Life Large & Mid Cap Fund -Regular - IDCW"
+    assert r.nav_name == "Aurora Bay Large & Mid Cap Fund -Regular - IDCW"
     assert r.min_amount_text == "5000"
     assert r.launch_date == date(1995, 2, 24)
     assert r.closure_date == date(1995, 2, 24)  # leading-space header column handled
     assert r.flags == ()
-    single = recs[100033]
+    single = recs[932448]
     assert single.isin_growth == "INFZ17K01164" and single.isin_reinvest is None
-    empty = recs[100039]
+    empty = recs[971781]
     assert empty.isin_growth is None and empty.isin_reinvest is None
     assert "ISIN_MISSING" in empty.flags
 
@@ -65,8 +65,8 @@ def test_glued_isins_split(schemedata_bytes: bytes) -> None:
         ("INFZ17K01156INFZ17K01CE4", ("INFZ17K01156", "INFZ17K01CE4", ())),
         ("INFZ17K01164X", (None, None, ("ISIN_MALFORMED",))),  # 13 chars
         ("INFZ17K01164INF209K0", (None, None, ("ISIN_MALFORMED",))),  # 20 chars
-        ("INF209K01166", (None, None, ("ISIN_BAD_CHECKSUM",))),
-        ("INFZ17K01156INF209K01CE6", ("INFZ17K01156", None, ("ISIN_BAD_CHECKSUM",))),
+        ("INFZ17K01165", (None, None, ("ISIN_BAD_CHECKSUM",))),
+        ("INFZ17K01156INFZ17K01CE5", ("INFZ17K01156", None, ("ISIN_BAD_CHECKSUM",))),
     ],
 )
 def test_split_glued_isins(glued: str, expected: tuple[str | None, str | None, tuple[str, ...]]) -> None:
@@ -78,15 +78,15 @@ def test_malformed_isin_keeps_code_name_mapping() -> None:
     result = _parse(_mini(bad))
     assert result.report.rows_ok == 1
     rec = result.records[0]
-    assert rec.scheme_code == 100034
-    assert rec.scheme_name == "Aditya Birla Sun Life Large & Mid Cap Fund"
+    assert rec.scheme_code == 902834
+    assert rec.scheme_name == "Aurora Bay Large & Mid Cap Fund"
     assert rec.isin_growth is None
     assert "ISIN_MALFORMED" in rec.flags
     assert any("ISIN_MALFORMED" in w for w in result.report.warnings)
 
 
 def test_quoted_comma_in_name() -> None:
-    row = ROW.replace(b"Aditya Birla Sun Life Large & Mid Cap Fund -Regular - IDCW", b'"Fund, with comma - IDCW"')
+    row = ROW.replace(b"Aurora Bay Large & Mid Cap Fund -Regular - IDCW", b'"Fund, with comma - IDCW"')
     rec = _parse(_mini(row)).records[0]
     assert rec.nav_name == "Fund, with comma - IDCW"
 
@@ -103,7 +103,7 @@ def test_wrong_column_count_fails_closed() -> None:
 
 
 def test_bad_code_rejected_with_reason() -> None:
-    result = _parse(_mini(ROW.replace(b",100034,", b",10OO34,")))
+    result = _parse(_mini(ROW.replace(b",902834,", b",10OO34,")))
     assert result.report.rows_rejected == 1
     assert result.report.rejections[0].reason == "BAD_SCHEME_CODE"
 

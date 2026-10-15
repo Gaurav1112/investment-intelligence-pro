@@ -1,0 +1,12 @@
+# SYNTHETIC SHAPE SAMPLE - not an India Post document. Layout of the pdftotext -layout output of a quarterly
+# "SB Order" (small-savings interest rates) as probed on 2026-10-15; order numbers, dates and wording are fictional.
+# The real PDF is scanned with OCR noise (garbled numbers and dates), which is why rates are entered manually.
+                                                                                         SB Order No. 99 / 2099
+                                        Government of India
+                                     Ministry of Communications
+                                        Department of Posts
+                                                                                                Dated: 01.01.2099
+Subject:           Revision of interest rates for Small Savings Schemes w.e.f. 01.01.2099
+
+           ... the rates of interest on various Small Savings Schemes for the quarter ... shall remain
+unchanged from those notified for the previous quarter ...

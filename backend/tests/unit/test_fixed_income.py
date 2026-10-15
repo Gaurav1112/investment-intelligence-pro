@@ -104,7 +104,7 @@ def test_tb1_effective_yield_and_rupee_outcome() -> None:
     [("98.5920", 91, "5.7281"), ("96.9592", 182, "6.2896"), ("93.9220", 364, "6.4891")],
 )
 def test_tbill_yield_reproduces_rbi_auction_cutoffs(price: str, days: int, rbi_yield_pct: str) -> None:
-    # docs/data/probes/rbi_pressrelease_tbill_cutoff_prid63803_20261015T054005Z.html (auction of 14-Oct-2026).
+    # RBI press release of 14-Oct-2026 (cut-off), rbi.org.in/Scripts/BS_PressReleaseDisplay.aspx?prid=63803.
     assert pct4(tbill_yield(Decimal(price), days).money_market_yield.value) == Decimal(rbi_yield_pct)
 
 

@@ -25,11 +25,11 @@ const LIST: InstrumentList = {
   truncated: false,
   items: [
     {
-      instrument_id: "mf:119551",
+      instrument_id: "mf:900551",
       kind: "mf_scheme",
       name: "Example Liquid Fund — Direct Plan · Growth (AMFI 900551)",
       origin: "source",
-      amfi_code: "119551",
+      amfi_code: "900551",
       category_raw: "Debt Scheme - Liquid Fund",
       plan: "direct",
       last_nav_date: "2026-10-14",
@@ -147,12 +147,12 @@ describe("MfExplorer", () => {
     };
     const calls = stubFetch((url, method) => (method === "POST" ? json(partial) : json(LIST)));
     renderPage();
-    await userEvent.click(await screen.findByRole("button", { name: /Backfill history for Aditya/ }));
+    await userEvent.click(await screen.findByRole("button", { name: /Backfill history for Example Liquid/ }));
     const msg = await screen.findByText(/status PARTIAL/);
     expect(msg).toHaveTextContent("rows ok 900 · rows rejected 3 · stored 897 · window 2019-01 failed: timeout");
     expect(msg).toHaveTextContent("did not complete cleanly");
     const post = calls.find((c) => c.method === "POST")!;
-    expect(post.url).toBe("/api/ingestion/backfill/119551");
+    expect(post.url).toBe("/api/ingestion/backfill/900551");
   });
 
   it("submits the exit load with the rate as an exact decimal STRING fraction", async () => {

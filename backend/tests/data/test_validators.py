@@ -1,5 +1,5 @@
-"""Validator tests. Values are taken from the probe fixtures (NAV history for HDFC Large Cap 119018, NAVAll and the
-mfapi.in mirror for HDFC Banking & PSU 128629); variants are explicit mutations of those values."""
+"""Validator tests. Values are taken from the SYNTHETIC fixtures (NAV history for the fictional Halcyon Large Cap
+928470, NAVAll and the mfapi.in-shaped mirror for Halcyon Banking & PSU 934256); variants are explicit mutations."""
 
 from __future__ import annotations
 
@@ -71,10 +71,10 @@ def test_valid_isins(isin: str) -> None:
 @pytest.mark.parametrize(
     ("isin", "reason"),
     [
-        ("INF846K01WO2", "ISIN_BAD_CHECKSUM"),
+        ("INFZ11K01WO5", "ISIN_BAD_CHECKSUM"),
         ("US0378331006", "ISIN_BAD_CHECKSUM"),
-        ("INF846K01WO", "ISIN_BAD_FORMAT"),
-        ("INF846K01WOA", "ISIN_BAD_FORMAT"),  # check digit must be numeric
+        ("INFZ11K01WO", "ISIN_BAD_FORMAT"),
+        ("INFZ11K01WOA", "ISIN_BAD_FORMAT"),  # check digit must be numeric
         ("1NF846K01WO1", "ISIN_BAD_FORMAT"),
         ("INFZ11K01W O4", "ISIN_BAD_FORMAT"),
         ("ＩNF846K01WO1", "ISIN_BAD_FORMAT"),  # full-width I
@@ -88,7 +88,7 @@ def test_invalid_isins(isin: str, reason: str) -> None:
 
 
 def test_duplicate_identical_collapses_with_finding() -> None:
-    a = obs("119018", D14, "1385.402")
+    a = obs("928470", D14, "1385.402")
     result = check_duplicates([a, a])
     assert result.observations == (a,)
     assert [f.code for f in result.findings] == ["DUPLICATE_IDENTICAL"]
@@ -96,13 +96,13 @@ def test_duplicate_identical_collapses_with_finding() -> None:
 
 def test_duplicate_numerically_equal_is_identical() -> None:
     """mfapi 5-dp padding: 25.95040 and 25.9504 are the same NAV, not a conflict."""
-    result = check_duplicates([obs("128629", D14, "25.9504"), obs("128629", D14, "25.95040")])
+    result = check_duplicates([obs("934256", D14, "25.9504"), obs("934256", D14, "25.95040")])
     assert len(result.observations) == 1
     assert result.observations[0].quality_status is QualityStatus.OK
 
 
 def test_duplicate_conflict_marks_all_suspect() -> None:
-    result = check_duplicates([obs("119018", D14, "1385.402"), obs("119018", D14, "1393.087")])
+    result = check_duplicates([obs("928470", D14, "1385.402"), obs("928470", D14, "1393.087")])
     assert len(result.observations) == 2
     assert all(o.quality_status is QualityStatus.SUSPECT for o in result.observations)
     assert all("DUPLICATE_CONFLICT" in o.notes for o in result.observations)
@@ -110,7 +110,7 @@ def test_duplicate_conflict_marks_all_suspect() -> None:
 
 
 def test_duplicates_on_other_keys_untouched() -> None:
-    items = [obs("119018", D13, "1393.087"), obs("119018", D14, "1385.402"), obs("102000", D14, "865.499")]
+    items = [obs("928470", D13, "1393.087"), obs("928470", D14, "1385.402"), obs("972505", D14, "865.499")]
     result = check_duplicates(items)
     assert result.observations == tuple(items)
     assert result.findings == ()
@@ -120,7 +120,7 @@ def test_duplicates_on_other_keys_untouched() -> None:
 
 
 def test_out_of_order_flagged_suspect() -> None:
-    items = [obs("119018", D14, "1385.402"), obs("119018", D13, "1393.087")]
+    items = [obs("928470", D14, "1385.402"), obs("928470", D13, "1393.087")]
     result = check_order(items)
     assert result.observations[0].quality_status is QualityStatus.OK
     assert result.observations[1].quality_status is QualityStatus.SUSPECT
@@ -128,13 +128,13 @@ def test_out_of_order_flagged_suspect() -> None:
 
 
 def test_descending_order_accepted_when_declared() -> None:
-    items = [obs("128629", D14, "25.95040"), obs("128629", D13, "25.98250")]
+    items = [obs("934256", D14, "25.95040"), obs("934256", D13, "25.98250")]
     result = check_order(items, descending=True)
     assert result.findings == ()
 
 
 def test_order_is_per_entity() -> None:
-    items = [obs("119018", D14, "1385.402"), obs("102000", D13, "870.312")]
+    items = [obs("928470", D14, "1385.402"), obs("972505", D13, "870.312")]
     assert check_order(items).findings == ()
 
 
@@ -143,7 +143,7 @@ def test_order_is_per_entity() -> None:
 
 @pytest.mark.parametrize("value", ["0", "0.0000", "-1.5"])
 def test_non_positive_rejected(value: str) -> None:
-    result = check_non_positive([obs("119018", D14, value)])
+    result = check_non_positive([obs("928470", D14, value)])
     assert result.observations[0].quality_status is QualityStatus.REJECTED
     assert result.findings[0].code == "NON_POSITIVE"
 
@@ -152,13 +152,13 @@ def test_non_positive_rejected(value: str) -> None:
 
 
 def test_small_move_is_ok() -> None:
-    result = check_jumps([obs("119018", D13, "1393.087"), obs("119018", D14, "1385.402")])
+    result = check_jumps([obs("928470", D13, "1393.087"), obs("928470", D14, "1385.402")])
     assert result.findings == ()
 
 
 def test_jump_above_threshold_is_suspect_not_dropped() -> None:
     # 1393.087 → 1393.087 × 10 (a decimal-shift error) on the next day.
-    items = [obs("119018", D13, "1393.087"), obs("119018", D14, "13930.87")]
+    items = [obs("928470", D13, "1393.087"), obs("928470", D14, "13930.87")]
     result = check_jumps(items, threshold=Decimal("0.20"))
     assert len(result.observations) == 2  # never silently dropped
     assert result.observations[0].quality_status is QualityStatus.OK
@@ -172,14 +172,14 @@ def test_jump_exactly_at_threshold_is_ok() -> None:
 
 
 def test_jump_against_last_published() -> None:
-    last = {"119018": obs("119018", D13, "1393.087")}
-    result = check_jumps([obs("119018", D14, "500")], last_published=last)
+    last = {"928470": obs("928470", D13, "1393.087")}
+    result = check_jumps([obs("928470", D14, "500")], last_published=last)
     assert result.observations[0].quality_status is QualityStatus.SUSPECT
 
 
 def test_jump_with_known_event_is_ok() -> None:
-    items = [obs("119018", D13, "1393.087"), obs("119018", D14, "13930.87")]
-    result = check_jumps(items, known_events=frozenset({("119018", D14)}))
+    items = [obs("928470", D13, "1393.087"), obs("928470", D14, "13930.87")]
+    result = check_jumps(items, known_events=frozenset({("928470", D14)}))
     assert result.findings == ()
 
 
@@ -211,7 +211,7 @@ def test_business_days_with_holiday() -> None:
 
 def test_nav_from_previous_business_day_is_fresh() -> None:
     spec = get_source("amfi.navall")
-    result = classify_freshness(obs("128629", D14, "25.9504"), spec.freshness, as_of=_as_of(2026, 10, 15))
+    result = classify_freshness(obs("934256", D14, "25.9504"), spec.freshness, as_of=_as_of(2026, 10, 15))
     assert result.freshness is Freshness.FRESH
     assert result.observation.quality_status is QualityStatus.OK
     assert "CALENDAR_UNVERIFIED" in result.observation.notes  # no curated calendar passed
@@ -220,7 +220,7 @@ def test_nav_from_previous_business_day_is_fresh() -> None:
 def test_nav_three_business_days_old_is_stale() -> None:
     spec = get_source("amfi.navall")
     result = classify_freshness(
-        obs("128629", date(2026, 10, 9), "26.0175"), spec.freshness, as_of=_as_of(2026, 10, 14), holidays=frozenset()
+        obs("934256", date(2026, 10, 9), "26.0175"), spec.freshness, as_of=_as_of(2026, 10, 14), holidays=frozenset()
     )
     assert result.freshness is Freshness.STALE
     assert result.observation.quality_status is QualityStatus.STALE
@@ -229,7 +229,7 @@ def test_nav_three_business_days_old_is_stale() -> None:
 def test_nav_older_than_slo_is_expired_and_stale() -> None:
     spec = get_source("amfi.navall")
     result = classify_freshness(
-        obs("128629", date(2026, 10, 6), "26.0302"), spec.freshness, as_of=_as_of(2026, 10, 14), holidays=frozenset()
+        obs("934256", date(2026, 10, 6), "26.0302"), spec.freshness, as_of=_as_of(2026, 10, 14), holidays=frozenset()
     )
     assert result.freshness is Freshness.EXPIRED
     assert result.observation.quality_status is QualityStatus.STALE
@@ -238,7 +238,7 @@ def test_nav_older_than_slo_is_expired_and_stale() -> None:
 
 def test_ancient_navall_date_is_dormant() -> None:
     spec = get_source("amfi.navall")
-    result = classify_freshness(obs("123689", date(2017, 9, 15), "11.9827"), spec.freshness, as_of=_as_of(2026, 10, 15))
+    result = classify_freshness(obs("989190", date(2017, 9, 15), "11.9827"), spec.freshness, as_of=_as_of(2026, 10, 15))
     assert result.freshness is Freshness.EXPIRED
     assert "DORMANT" in result.observation.notes
 
@@ -246,7 +246,7 @@ def test_ancient_navall_date_is_dormant() -> None:
 def test_future_dated_observation_is_suspect() -> None:
     spec = get_source("amfi.navall")
     result = classify_freshness(
-        obs("128629", date(2026, 10, 16), "25.9504"), spec.freshness, as_of=_as_of(2026, 10, 15)
+        obs("934256", date(2026, 10, 16), "25.9504"), spec.freshness, as_of=_as_of(2026, 10, 15)
     )
     assert result.observation.quality_status is QualityStatus.SUSPECT
     assert "FUTURE_DATE" in result.observation.notes
@@ -312,13 +312,13 @@ def test_unit_currency_mismatch_rejected(unit: str, currency: str | None, code: 
 
 
 def test_regression_mfapi_padding_is_not_a_conflict() -> None:
-    payload = json.loads(load_fixture("mfapi_128629_latest.json"))
+    payload = json.loads(load_fixture("mfapi_latest.json"))
     point = payload["data"][0]
     assert point["nav"] == "25.95040"  # mirror pads to 5 dp
     mirror = replace(
-        obs("128629", D14, point["nav"], source_id="mfapi.in"), source_url="https://api.mfapi.in/mf/128629/latest"
+        obs("934256", D14, point["nav"], source_id="mfapi.in"), source_url="https://api.mfapi.in/mf/934256/latest"
     )
-    official = obs("128629", D14, "25.9504", source_id="amfi.navall")
+    official = obs("934256", D14, "25.9504", source_id="amfi.navall")
     checked = cross_check_mirror(official, mirror)
     assert checked.quality_status is QualityStatus.OK
     assert "UNOFFICIAL_MIRROR" in checked.notes
@@ -327,8 +327,8 @@ def test_regression_mfapi_padding_is_not_a_conflict() -> None:
 
 
 def test_mirror_disagreement_is_conflict() -> None:
-    mirror = obs("128629", D14, "25.95060", source_id="mfapi.in")
-    official = obs("128629", D14, "25.9504", source_id="amfi.navall")
+    mirror = obs("934256", D14, "25.95060", source_id="mfapi.in")
+    official = obs("934256", D14, "25.9504", source_id="amfi.navall")
     checked = cross_check_mirror(official, mirror)
     assert checked.quality_status is QualityStatus.SUSPECT
     assert "CONFLICT" in checked.notes
@@ -336,7 +336,7 @@ def test_mirror_disagreement_is_conflict() -> None:
 
 def test_cross_check_requires_same_key() -> None:
     with pytest.raises(ValueError):
-        cross_check_mirror(obs("128629", D14, "1"), obs("128629", D13, "1", source_id="mfapi.in"))
+        cross_check_mirror(obs("934256", D14, "1"), obs("934256", D13, "1", source_id="mfapi.in"))
 
 
 # --- Observation contract -----------------------------------------------------------------------------

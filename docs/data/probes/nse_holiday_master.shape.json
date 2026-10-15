@@ -1,0 +1,23 @@
+{
+"_note": "SYNTHETIC SHAPE SAMPLE - not NSE data. Keys and value formats follow the response probed on 2026-10-15; dates and descriptions are fictional.",
+"CM": [
+{
+"tradingDate": "01-Jan-2099",
+"weekDay": "Thursday",
+"description": "Example Holiday One",
+"morning_session": null,
+"evening_session": null,
+"Sr_no": 1
+},
+{
+"tradingDate": "02-Feb-2099",
+"weekDay": "Monday",
+"description": "Example Holiday Two",
+"morning_session": null,
+"evening_session": null,
+"Sr_no": 2
+}
+],
+"MF": [],
+"IRD": []
+}

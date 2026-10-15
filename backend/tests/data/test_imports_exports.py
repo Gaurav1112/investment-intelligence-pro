@@ -1,7 +1,7 @@
 """Holdings import hardening (threat-model C-07, SEC-30..41) and CSV export escaping (SEC-40).
 
-Instrument names and ISINs below come from the AMFI probe fixtures; units and amounts are illustrative inputs, not
-market data."""
+Instrument names and ISINs below come from the synthetic AMFI-format fixtures (fictional); units and amounts are
+illustrative inputs, not market data."""
 
 from __future__ import annotations
 
@@ -27,7 +27,9 @@ from iip.data.imports import (
 )
 
 HEADER = "instrument_name,isin,amfi_code,units,cost_basis_inr,purchase_date"
-GOOD_ROW = "HDFC Banking and PSU Debt Fund - Direct Plan - Growth Option,INFZ12KA1IZ1,128629,100.500,2500.00,2026-01-15"
+GOOD_ROW = (
+    "Halcyon Banking and PSU Debt Fund - Direct Plan - Growth Option,INFZ12KA1IZ1,934256,100.500,2500.00,2026-01-15"
+)
 
 
 def csv_bytes(*rows: str, header: str = HEADER) -> bytes:
@@ -42,9 +44,9 @@ def test_csv_preview_parses_decimal_rows() -> None:
     assert preview.kind == "csv"
     assert len(preview.rows) == 1
     row = preview.rows[0]
-    assert row.instrument_name.startswith("HDFC Banking")
+    assert row.instrument_name.startswith("Halcyon Banking")
     assert row.isin == "INFZ12KA1IZ1"
-    assert row.amfi_code == 128629
+    assert row.amfi_code == 934256
     assert row.units == Decimal("100.500") and type(row.units) is Decimal
     assert row.cost_basis_inr == Decimal("2500.00")
     assert row.purchase_date == date(2026, 1, 15)
@@ -92,7 +94,7 @@ def test_twenty_thousand_rows_is_allowed() -> None:
 
 def test_cell_too_long() -> None:
     with pytest.raises(ImportRejected) as exc:
-        preview_import(csv_bytes(GOOD_ROW.replace("HDFC", "H" * 513, 1)), "h.csv")
+        preview_import(csv_bytes(GOOD_ROW.replace("Halcyon", "H" * 513, 1)), "h.csv")
     assert exc.value.code == "CELL_TOO_LONG" and "row 2" in exc.value.message
 
 
@@ -147,7 +149,7 @@ def test_utf16_with_explicit_choice() -> None:
 
 
 def test_cp1252_rejected_unless_chosen() -> None:
-    data = csv_bytes(GOOD_ROW.replace("HDFC", "HDFC \u2019")).replace("\u2019".encode(), b"\x92")
+    data = csv_bytes(GOOD_ROW.replace("Halcyon", "Halcyon \u2019")).replace("\u2019".encode(), b"\x92")
     with pytest.raises(ImportRejected):
         preview_import(data, "h.csv")
     preview = preview_import(data, "h.csv", encoding="cp1252")
@@ -163,15 +165,15 @@ def test_unknown_encoding_refused() -> None:
 
 
 def test_control_and_bidi_characters_stripped() -> None:
-    name = "Axis\u202e Children's\u0007 Fund\u2066"
-    row = GOOD_ROW.replace("HDFC Banking and PSU Debt Fund - Direct Plan - Growth Option", name)
+    name = "Asteria\u202e Children's\u0007 Fund\u2066"
+    row = GOOD_ROW.replace("Halcyon Banking and PSU Debt Fund - Direct Plan - Growth Option", name)
     preview = preview_import(csv_bytes(row), "h.csv")
-    assert preview.rows[0].instrument_name == "Axis Children's Fund"
+    assert preview.rows[0].instrument_name == "Asteria Children's Fund"
 
 
 def test_nfc_normalisation() -> None:
     decomposed = "Cafe\u0301 Fund"
-    row = GOOD_ROW.replace("HDFC Banking and PSU Debt Fund - Direct Plan - Growth Option", decomposed)
+    row = GOOD_ROW.replace("Halcyon Banking and PSU Debt Fund - Direct Plan - Growth Option", decomposed)
     assert preview_import(csv_bytes(row), "h.csv").rows[0].instrument_name == "Caf\u00e9 Fund"
 
 
@@ -247,12 +249,12 @@ def test_dates(date_text: str, ok: bool) -> None:
 
 
 def test_bad_isin_row_rejected() -> None:
-    preview = preview_import(csv_bytes(GOOD_ROW.replace("INFZ12KA1IZ1", "INF179KA1IZ8")), "h.csv")
+    preview = preview_import(csv_bytes(GOOD_ROW.replace("INFZ12KA1IZ1", "INFZ12KA1IZ2")), "h.csv")
     assert preview.rejected[0].reason == "ISIN_BAD_CHECKSUM"
 
 
 def test_unidentified_row_is_flagged_not_rejected() -> None:
-    preview = preview_import(csv_bytes(GOOD_ROW.replace("INFZ12KA1IZ1,128629", ",")), "h.csv")
+    preview = preview_import(csv_bytes(GOOD_ROW.replace("INFZ12KA1IZ1,934256", ",")), "h.csv")
     assert len(preview.rows) == 1
     assert "UNIDENTIFIED" in preview.rows[0].flags
 
@@ -262,7 +264,7 @@ def test_unidentified_row_is_flagged_not_rejected() -> None:
 
 def test_csv_formula_text_is_kept_literal() -> None:
     row = GOOD_ROW.replace(
-        "HDFC Banking and PSU Debt Fund - Direct Plan - Growth Option", '"=HYPERLINK(""http://x"",""y"")"'
+        "Halcyon Banking and PSU Debt Fund - Direct Plan - Growth Option", '"=HYPERLINK(""http://x"",""y"")"'
     )
     preview = preview_import(csv_bytes(row), "h.csv")
     assert preview.rows[0].instrument_name == '=HYPERLINK("http://x","y")'
@@ -309,9 +311,9 @@ def _add_member(xlsx: bytes, name: str, data: bytes, compress: int = zipfile.ZIP
 XLSX_ROWS: list[list[object]] = [
     HEADER.split(","),
     [
-        "HDFC Banking and PSU Debt Fund - Direct Plan - Growth Option",
+        "Halcyon Banking and PSU Debt Fund - Direct Plan - Growth Option",
         "INFZ12KA1IZ1",
-        "128629",
+        "934256",
         "100.500",
         "2500.00",
         "2026-01-15",
@@ -326,15 +328,15 @@ def test_xlsx_happy_path() -> None:
 
 
 def test_xlsx_numeric_cells_parsed_without_float_noise() -> None:
-    rows = [HEADER.split(","), ["Fund", "", 128629, 0.1, 2500, "2026-01-15"]]
+    rows = [HEADER.split(","), ["Fund", "", 934256, 0.1, 2500, "2026-01-15"]]
     preview = preview_import(_xlsx_bytes(rows), "h.xlsx")
     assert preview.rows[0].units == Decimal("0.1")
-    assert preview.rows[0].amfi_code == 128629
+    assert preview.rows[0].amfi_code == 934256
 
 
 def test_xlsx_formula_without_cached_value_is_empty_with_warning() -> None:
     """SEC-35: '=1+1' must never become 2."""
-    rows = [HEADER.split(","), ["Fund", "INFZ12KA1IZ1", "128629", "100", "=1+1", "2026-01-15"]]
+    rows = [HEADER.split(","), ["Fund", "INFZ12KA1IZ1", "934256", "100", "=1+1", "2026-01-15"]]
     preview = preview_import(_xlsx_bytes(rows), "h.xlsx")
     assert preview.rows[0].cost_basis_inr is None
     assert any("FORMULA" in w for w in preview.warnings)
@@ -443,7 +445,7 @@ def test_property_no_exported_text_cell_starts_with_trigger(text: str) -> None:
 
 def test_import_export_reimport_round_trip() -> None:
     first = preview_import(
-        csv_bytes(GOOD_ROW.replace("HDFC Banking and PSU Debt Fund - Direct Plan - Growth Option", "-2+3 Fund")),
+        csv_bytes(GOOD_ROW.replace("Halcyon Banking and PSU Debt Fund - Direct Plan - Growth Option", "-2+3 Fund")),
         "h.csv",
     )
     exported = export_holdings_csv(

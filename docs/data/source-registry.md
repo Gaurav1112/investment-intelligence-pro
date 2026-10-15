@@ -9,7 +9,7 @@ Ground rules for this document:
 - Every URL listed was either probed live (marked **PROBED** with the UTC time) or read through a web fetch or search (marked **READ**). Anything I could not confirm is marked **NOT VERIFIED**.
 - All fetched content was treated as untrusted data.
 - None of this is legal advice. Where licensing is unclear or restrictive, the recommendation is the same throughout: **fetch on the user's own machine, for personal use only, never redistribute, and keep the raw data only as long as the app needs it.**
-- Raw probe samples, used as parser fixtures, are in [`probes/`](./probes/). Each filename carries the UTC probe timestamp.
+- What each live probe proved is in [`probes/README.md`](./probes/README.md). The raw responses are **not** published (AMFI, NSE and RBI terms); the parser fixtures are synthetic files with the same layout and fictional values.
 
 ---
 
@@ -56,11 +56,11 @@ Ground rules for this document:
   ```
   Scheme Code;ISIN Div Payout/ ISIN Growth;ISIN Div Reinvestment;Scheme Name;Plan;Option;Net Asset Value;Date
   ```
-- **Sample rows (verbatim):**
+- **Sample rows (SYNTHETIC, same layout as the probe; fictional schemes, codes, ISINs and NAVs):**
   ```
-  135762;INFZ11K01WO4;-;Axis Children's Fund;Direct Plan;Growth Option;20.2971;14-Oct-2026
-  128629;INFZ12KA1IZ1;-;HDFC Banking and PSU Debt Fund;Direct Plan;Growth Option;25.9504;14-Oct-2026
-  123689;INFZ15K01KI2;INFZ15K01KJ0;Kotak Banking and PSU Debt Fund;Direct Plan;Annual Dividend;11.9827;15-Sep-2017
+  954298;INFZ11K01WO4;-;Asteria Children's Fund;Direct Plan;Growth Option;20.2971;14-Oct-2026
+  934256;INFZ12KA1IZ1;-;Halcyon Banking and PSU Debt Fund;Direct Plan;Growth Option;25.9504;14-Oct-2026
+  989190;INFZ15K01KI2;INFZ15K01KJ0;Kestrel Banking and PSU Debt Fund;Direct Plan;Annual Dividend;11.9827;15-Sep-2017
   ```
 - **Structure:** the file is not a flat CSV. Data rows sit under nested group-header lines:
   - a scheme-type and category line such as `Open Ended Schemes(Debt Scheme - Banking and PSU Fund)`;
@@ -90,7 +90,7 @@ Ground rules for this document:
   - Keep only the rows for schemes the user holds or watches. Do not archive the whole daily file indefinitely.
   - Treat any hosted or commercial deployment as **REQUIRES LICENCE / WRITTEN PERMISSION**.
 - **Reliability:** single host; the format has changed before; the host redirects; there are no checksums.
-- **Fixture:** `probes/amfi_navall_head_20261015T053419Z.txt` (first ~8 KB, CRLF preserved).
+- **Fixture:** synthetic `backend/tests/fixtures/data/amfi_navall_excerpt.txt` (same layout, CRLF; fictional values).
 
 ### 2.2 AMFI — NAV history report (`amfi.navhistory`)
 
@@ -103,20 +103,20 @@ Ground rules for this document:
   ```
   Scheme Code;NAV Name;Plan;Option;ISIN Div Payout/ISIN Growth;ISIN Div Reinvestment;Net Asset Value;Date
   ```
-- **Sample rows:**
+- **Sample rows (SYNTHETIC, same layout; fictional values):**
   ```
-  119018;HDFC Large Cap Fund - Growth Option - Direct Plan;Direct Plan;Growth Option;INFZ12K01YV3;;1393.087;13-Oct-2026
-  119018;HDFC Large Cap Fund - Growth Option - Direct Plan;Direct Plan;Growth Option;INFZ12K01YV3;;1385.402;14-Oct-2026
+  928470;Halcyon Large Cap Fund - Growth Option - Direct Plan;Direct Plan;Growth Option;INFZ12K01YV3;;1393.087;13-Oct-2026
+  928470;Halcyon Large Cap Fund - Growth Option - Direct Plan;Direct Plan;Growth Option;INFZ12K01YV3;;1385.402;14-Oct-2026
   ```
 - **Differences from NAVAll:**
   - An empty ISIN is an empty field here, not `-`.
   - Blank separator lines are truly empty.
   - Group headers have spaces inside the brackets: `Open Ended Schemes ( Equity Scheme - Multi Cap Fund )`.
-  - The NAV value matched NAVAll for 119018 on 14-Oct-2026 (1385.402).
+  - The NAV value matched NAVAll for the same scheme and date (14-Oct-2026).
   - **Separate parsers are needed**, each keyed on its exact header.
 - **Historical coverage:** multi-year. The earliest available date and the maximum date range per request are NOT VERIFIED. Keep requests to a small window (≤ 90 days) and only for fund houses the user holds.
 - **Licensing:** same AMFI ToU. Backfill only what the user needs.
-- **Fixture:** `probes/amfi_navhistory_mf9_tp1_13to14Oct2026_20261015T053448Z.txt`.
+- **Fixture:** synthetic `backend/tests/fixtures/data/amfi_navhistory_excerpt.txt`.
 
 ### 2.3 AMFI — Scheme master (`amfi.schememaster`)
 
@@ -131,7 +131,7 @@ Ground rules for this document:
   - `Scheme Minimum Amount` is free text in 9,462 of 16,452 rows (e.g. "Rs 5000 and in multiples of Re. 1 thereafter").
   - Legacy categories such as `Income` and `Growth` appear for old schemes alongside SEBI-2017-style categories.
 - **Use:** join on `Code` = AMFI scheme code, to get scheme type, category, plan and ISIN mapping. Refresh weekly.
-- **Fixture:** `probes/amfi_schemedata_mf0_head_20261015T054336Z.csv`.
+- **Fixture:** synthetic `backend/tests/fixtures/data/amfi_schemedata_excerpt.csv`.
 
 ### 2.4 AMFI — TER, riskometer, portfolio and AAUM disclosures
 
@@ -151,9 +151,9 @@ Ground rules for this document:
 ### 2.5 mfapi.in (`mfapi.in`) — UNOFFICIAL
 
 - **Endpoints** (READ from `https://www.mfapi.in/docs/`): `/mf/search?q=`, `/mf?limit=&offset=`, `/mf/{code}`, `/mf/{code}?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD`, `/mf/{code}/latest`.
-- **PROBED 2026-10-15T05:34:35Z** `https://api.mfapi.in/mf/128629`: `HTTP/2 200`, `application/json`, 118,525 bytes, 3,031 data points (latest 14-10-2026, earliest 26-03-2014). Response shape:
+- **PROBED 2026-10-15T05:34:35Z** `https://api.mfapi.in/mf/<code>` for one Direct-Growth debt scheme: `HTTP/2 200`, `application/json`, 118,525 bytes, 3,031 data points (latest 14-10-2026, earliest 26-03-2014). Response shape (SYNTHETIC values, fictional scheme):
   ```json
-  {"meta":{"fund_house":"HDFC Mutual Fund","scheme_type":"Open Ended Schemes","scheme_category":"Debt Scheme - Banking and PSU Fund","scheme_code":128629,"scheme_name":"HDFC Banking and PSU Debt Fund - Direct Plan - Growth Option","isin_growth":"INFZ12KA1IZ1","isin_div_reinvestment":null},
+  {"meta":{"fund_house":"Halcyon Mutual Fund","scheme_type":"Open Ended Schemes","scheme_category":"Debt Scheme - Banking and PSU Fund","scheme_code":934256,"scheme_name":"Halcyon Banking and PSU Debt Fund - Direct Plan - Growth Option","isin_growth":"INFZ12KA1IZ1","isin_div_reinvestment":null},
    "data":[{"date":"14-10-2026","nav":"25.95040"}, ...],"status":"SUCCESS"}
   ```
 - **Differences from AMFI:**
@@ -166,7 +166,7 @@ Ground rules for this document:
 - **Terms:** the footer mentions "Terms of Service" but no link was found. `api.mfapi.in/robots.txt` returned 404. Terms are **NOT VERIFIED**. The data originates from AMFI, so AMFI's ToU limits still apply downstream.
 - **Fragility:** a single independent operator with no SLA. The response header `x-served-by-header: hl` hints at hosting details that are not documented.
 - **Recommendation:** optional fallback and cross-check source, disabled by default. Every observation from it is tagged `quality_status=UNOFFICIAL_MIRROR`. It is never the sole source for a decision-critical value.
-- **Fixtures:** `probes/mfapi_mf_128629_trimmed_20261015T053435Z.json` (trimmed; the note is inside the file), `probes/mfapi_mf_128629_latest_20261015T053435Z.json`.
+- **Fixture:** synthetic `backend/tests/fixtures/data/mfapi_latest.json` (the `/latest` shape; fictional scheme).
 
 ### 2.6 captn3m0/historical-mf-data — UNOFFICIAL
 
@@ -197,14 +197,14 @@ These are READ via sebi.gov.in search results; I fetched the listing pages but d
   - G-sec yields "as on October 13, 2026".
   - FX reference rates "(As at 1.00pm of October 14, 2026) (Source : FBIL)".
   - **Note:** one secondary news source found during research claimed the repo rate was 5.25%. The official RBI page says 5.50%. This is exactly why v1 must use only official sources for policy values.
-  - Fixture: `probes/rbi_homepage_current_rates_text_20261015T054220Z.txt`.
+  - Shape sample (synthetic): `probes/rbi_current_rates.shape.txt`.
 - **T-bill auction press releases** (PROBED 2026-10-15T05:40:05Z):
   - Listing: `https://www.rbi.org.in/Scripts/BS_PressReleaseDisplay.aspx`. Titles are stable: "91-Day, 182-Day and 364-Day T-Bill Auction Result: Cut-off" (prid 63803) and "Treasury Bills: Full Auction Result" (prid 63804), both dated Oct 14, 2026.
   - Cut-off release (Press Release 2026-2027/1325): notified amount ₹8,000/8,000/7,000 crore; cut-off price and implied yield `98.5920 (YTM: 5.7281%)`, `96.9592 (YTM: 6.2896%)`, `93.9220 (YTM: 6.4891%)`.
   - Full release (2026-2027/1326): competitive bids (number and amount), weighted average price and yield (`WAY: 5.6964%` etc.), partial allotment %, and non-competitive bids.
   - Units: ₹ crore; prices per ₹100 face value. Yield convention: RBI labels the cut-off yield "YTM" and the weighted average "WAY". **The exact day-count / compounding convention is NOT VERIFIED.** Store the value with `convention="RBI_TBILL_IMPLICIT_YIELD_AS_PUBLISHED"` and do not recompute it.
   - Timing: auctions are on Wednesdays and results are released the same day (publication time NOT VERIFIED; capture `retrieved_at`).
-  - Fixtures: `probes/rbi_pressrelease_tbill_{cutoff,full}_prid*_20261015T054005Z.html` (body-table excerpts).
+  - Shape sample (synthetic): `probes/rbi_tbill_cutoff.shape.html`.
 - **Lending and deposit rates (WADTDR):** monthly press release "Lending and Deposit Rates of Scheduled Commercial Banks", usually on the last working day, covering the previous month. Per the release of 30-Sep-2026 (READ via search, not probed), WADTDR on fresh deposits was 5.67% for Aug-2026. Use as a manual reference series.
 - **DBIE:** `https://data.rbi.org.in/DBIE/` (PROBED 200). It is an Angular SPA with no documented public API; downloads (Excel/CSV/PDF) are manual. The unofficial mirror `dbie.rbihub.in` (third-party scrape) is **not to be used**.
 - **RBI disclaimer** (READ `https://www.rbi.org.in/Scripts/Disclaimer.aspx`): "Except as set forth below, caching and links to, and the framing of this Web Site or any of the contents are prohibited." Content is "as is". RBI "reserves all right to deny or restrict access … or to block access from a particular Internet address".
@@ -267,7 +267,7 @@ These are READ via sebi.gov.in search results; I fetched the listing pages but d
 - **Release calendar:** CPI is released on the 12th of each month at **16:00 IST**, or the next working day if the 12th is a holiday. The time moved from 17:30 in Nov-2024. The value is for the previous month; the latest month is provisional and is revised the following month.
 - **Series break:** 2012=100 and 2024=100 are not comparable without a linking factor. **Store `base_year` on every observation and never splice series silently.**
 - **Licence:** no data licence text found on the API site (NOT VERIFIED). The GitHub code is MIT-licensed, which covers code, not data. Treat as government open data for personal use, with citation.
-- **Fixture:** `probes/mospi_cpi_getCPIIndex_base2012_2025-12_unauth10_20261015T053723Z.json`.
+- **Fixture:** synthetic `backend/tests/fixtures/data/mospi_cpi_unauth10_synthetic.json` (the 10-record unauthenticated shape).
 
 ### 2.13 Credit rating agencies (`cra.*`)
 
@@ -301,7 +301,7 @@ These are READ via sebi.gov.in search results; I fetched the listing pages but d
   - **These values are NOT VERIFIED against the primary OM in this session.** Before shipping, a curator must confirm them from the original DEA OM (dea.gov.in) or from the India Post / NSI page.
 - The PDF is scanned with OCR noise (e.g. "11412019-NS", "3S.0S,*CI28"), so it is **not machine-parseable reliably → manual curation only.**
 - Publication time: the last working day of the preceding quarter, typically the evening.
-- **Fixture:** `probes/dop_sborder_12-2026_smallsavings_q3fy27_20261015T054305Z.txt`.
+- **Shape sample (synthetic):** `probes/dop_sb_order.shape.txt`.
 
 ### 2.17 Income-tax (`itd.tax`)
 
@@ -411,9 +411,9 @@ The app must always show data age and `quality_status` next to any number used i
 
 These run on the user's machine, are personal-use only, and have no redistribution or export of raw data.
 
-1. **`amfi.navall`** — daily, run at 23:30 IST and 10:30 IST; conditional GET; exact-header parser; keep only watched schemes. Fixture: `amfi_navall_head_*.txt`.
-2. **`amfi.schememaster`** — weekly; ISIN-split logic. Fixture: `amfi_schemedata_mf0_head_*.csv`.
-3. **`amfi.navhistory`** — on demand, for a new holding's backfill only; ≤ 90-day windows; throttled to 1 request every few seconds. Fixture: `amfi_navhistory_*.txt`.
+1. **`amfi.navall`** — daily, run at 23:30 IST and 10:30 IST; conditional GET; exact-header parser; keep only watched schemes. Fixture: `amfi_navall_excerpt.txt` (synthetic).
+2. **`amfi.schememaster`** — weekly; ISIN-split logic. Fixture: `amfi_schemedata_excerpt.csv` (synthetic).
+3. **`amfi.navhistory`** — on demand, for a new holding's backfill only; ≤ 90-day windows; throttled to 1 request every few seconds. Fixture: `amfi_navhistory_excerpt.txt` (synthetic).
 4. **`mospi.cpi`** — **REQUIRES CONFIGURATION**: the user signs up and supplies credentials stored in the OS keychain. Monthly, after the 12th at 16:00 IST. Base-2024 retrieval must be verified with an authenticated call before this adapter is marked production-ready. Fixture: `mospi_cpi_*.json`.
 
 ### 6.2 SEMI-LIVE (user-triggered single fetch, else manual)

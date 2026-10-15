@@ -23,7 +23,7 @@
    files. If you need a dependency, report it instead of adding it. Do **not** run `git commit`.
 10. **Commands** (run from `backend/`): `.venv/bin/pytest -q tests/<yours>`, `.venv/bin/ruff check src tests`,
     `.venv/bin/ruff format src/<yours> tests/<yours>`, `.venv/bin/mypy`.
-11. **No fabricated data.** Test fixtures are hand-computed from the spec or derived from `docs/data/probes/`. Never invent
+11. **No fabricated data.** Test fixtures are hand-computed from the spec, or synthetic files that copy the layout recorded in `docs/data/probes/README.md` (no real third-party data is committed). Never invent
     market values and present them as real.
 12. **Report.** Finish with: files created, test counts (pass/fail, from an actual run), oracle agreement tolerances, spec issues
     found, and anything left unimplemented, labelled `IMPLEMENTED, NOT VERIFIED` or `BLOCKED`.

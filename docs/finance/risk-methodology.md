@@ -14,7 +14,7 @@ returns `InsufficientData(metric, required, available)`. It never returns a numb
 | Rule | Specification |
 |---|---|
 | Source | Growth-option NAV. IDCW options are converted to total-return series first (calc §2.7). Index benchmarks are **TRI** (total-return index), never price index. SEBI mandated TRI benchmarking for MFs from Feb 2018; that circular was not re-fetched here, so the date is **NOT VERIFIED in this session**. |
-| Calendar | MF NAVs are published on **business days only** (see the AMFI probes in `docs/data/probes/`). There are no weekend rows. Do **not** forward-fill weekends or holidays into the return series. |
+| Calendar | MF NAVs are published on **business days only** (see the AMFI probe findings in `docs/data/probes/README.md`). There are no weekend rows. Do **not** forward-fill weekends or holidays into the return series. |
 | Simple return | `r_t = P_t / P_{t−1} − 1` between **consecutive published observations** |
 | Log return | `ℓ_t = ln(P_t / P_{t−1})` |
 | Which to use | **Log** returns for volatility, correlation, beta and time-aggregation, because they are additive over time. **Simple** returns for VaR/CVaR in ₹, downside deviation, drawdown (from levels) and any cross-sectional (portfolio-weighted) aggregation, because they are additive across assets. |
@@ -387,5 +387,5 @@ Oracle: numpy 2.x / scipy 1.17. Computation script reproduced in the tests; tole
 * Dimson, E. (1979). "Risk measurement when shares are subject to infrequent trading." *JFE* 7(2).
 * Ljung, G. M., Box, G. E. P. (1978). *Biometrika* 65(2).
 * RBI FAQ on G-Secs (T-bill yield convention, used for r_f). https://www.rbi.org.in/Scripts/FAQView.aspx?Id=79
-* AMFI NAV probes in `docs/data/probes/` (business-day publication, Growth/IDCW split).
+* AMFI NAV probe findings in `docs/data/probes/README.md` (business-day publication, Growth/IDCW split).
 * Agent B, `docs/research/indian-instruments-and-tax.md` (liquidity, DICGC, scheme events).

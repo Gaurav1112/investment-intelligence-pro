@@ -1,0 +1,7 @@
+# SYNTHETIC FIXTURE - not AMFI data. Byte layout, delimiters, CRLF line endings, section/AMC structure and
+# edge cases follow the mfapi.in /mf/<code>/latest JSON (UNOFFICIAL mirror) captured on 2026-10-15 (see docs/data/probes/README.md); every AMC name,
+# scheme name, scheme code, ISIN and NAV is FICTIONAL. Real responses are not redistributed (AMFI terms).
+# Format source: https://api.mfapi.in/mf/<code>/latest
+# Test loaders strip everything up to and including the '# ---' line.
+# ---
+{"meta":{"fund_house":"Halcyon Mutual Fund","scheme_type":"Open Ended Schemes","scheme_category":"Debt Scheme - Banking and PSU Fund","scheme_code":934256,"scheme_name":"Halcyon Banking and PSU Debt Fund - Direct Plan - Growth Option","isin_growth":"INFZ12KA1IZ1","isin_div_reinvestment":null},"data":[{"date":"14-10-2026","nav":"25.95040"}],"status":"SUCCESS"}

@@ -138,7 +138,7 @@ backtest reads "as known at T" by default.
 ### 3.4 Survivorship bias — documented limitation
 
 **AMFI `NAVAll.txt` lists only schemes that currently publish a NAV.** The probe
-`docs/data/probes/amfi_navall_head_20261015T053419Z.txt` is a live-scheme snapshot. Merged,
+The NAVAll probe of 2026-10-15 (`docs/data/probes/README.md`) is a live-scheme snapshot. Merged,
 wound-up and matured schemes **vanish** from it. Examples include FMPs at maturity, mergers after
 the 2017–18 SEBI categorisation, and the six debt schemes wound up in April 2020.
 Consequences:
@@ -405,7 +405,7 @@ recalibration factor) when:
 * Hyndman, R. J., Athanasopoulos, G. *Forecasting: Principles and Practice* (3e), §5.10 time-series
   cross-validation.
 * Siddiqi, N. (2006). *Credit Risk Scorecards* (PSI rule-of-thumb thresholds).
-* AMFI NAV probes, `docs/data/probes/` (live-scheme-only NAVAll; NAV history by date).
+* AMFI NAV probe findings, `docs/data/probes/README.md` (live-scheme-only NAVAll; NAV history by date).
 
 Fixture oracle: numpy 2.4 / scipy 1.17 (`stats.binomtest`, `stats.chi2`, `stats.t`, `stats.norm`).
 All fixtures above were reproduced to ≥ 4 significant figures.

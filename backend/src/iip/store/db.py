@@ -67,13 +67,18 @@ def connect_libsql(database: str, auth_token: str | None = None, *, hosted: bool
     import libsql  # noqa: PLC0415 - optional at import time; only hosted mode and its tests need it
 
     remote = is_remote_url(database)
-    if remote:
-        raw = libsql.connect(database, auth_token=auth_token or "", isolation_level=None)
-    else:
-        raw = libsql.connect(database, isolation_level=None)
-    conn = LibsqlConnection(raw, remote=remote or hosted)
-    for pragma in ("PRAGMA foreign_keys=ON",) if remote else PRAGMAS:
-        conn.execute(pragma)
+    pragmas = ("PRAGMA foreign_keys=ON",) if remote else PRAGMAS
+
+    def open_raw() -> Any:
+        if remote:
+            raw = libsql.connect(database, auth_token=auth_token or "", isolation_level=None)
+        else:
+            raw = libsql.connect(database, isolation_level=None)
+        for pragma in pragmas:
+            raw.execute(pragma)
+        return raw
+
+    conn = LibsqlConnection(open_raw(), remote=remote or hosted, reopen=open_raw)
     return cast(sqlite3.Connection, conn)
 
 
@@ -172,6 +177,13 @@ class _Cursor:
 BUSY_RETRY_S = 10.0  # like sqlite3's busy_timeout: libSQL does not wait on a locked database, so we do
 
 
+def _dropped(exc: Exception) -> bool:
+    """The remote stream is gone (Turso closes idle Hrana streams; a warm serverless instance reuses its connection
+    after a pause). Seen live 2026-10-15: "Hrana: `http error: `connection closed before message completed``"."""
+    msg = str(exc).lower()
+    return any(m in msg for m in ("connection closed", "stream not found", "stream expired", "hrana: `http error"))
+
+
 def _busy(exc: Exception) -> bool:
     msg = str(exc).lower()
     return "database is locked" in msg or "busy" in msg
@@ -180,18 +192,24 @@ def _busy(exc: Exception) -> bool:
 class LibsqlConnection:
     """The subset of ``sqlite3.Connection`` this codebase uses, over a libSQL connection (see module doc)."""
 
-    def __init__(self, raw: Any, *, remote: bool) -> None:
+    def __init__(self, raw: Any, *, remote: bool, reopen: Callable[[], Any] | None = None) -> None:
         self._raw = raw
         self.is_remote = remote
+        self._reopen = reopen
+        self._in_tx = False  # our own view: after a dropped stream the driver's flag cannot be trusted
 
-    def _run(self, call: Callable[[], Any]) -> _Cursor:
+    def _run(self, call: Callable[[Any], Any]) -> _Cursor:
         """Run one statement; a busy/locked database is retried with backoff for up to ``BUSY_RETRY_S`` (the
-        sqlite3 driver gets the same behaviour from ``PRAGMA busy_timeout``). Other errors surface at once."""
+        sqlite3 driver gets the same behaviour from ``PRAGMA busy_timeout``). A dropped remote stream is reopened:
+        outside a transaction the statement is retried ONCE on the new connection; inside one the transaction is
+        already lost on the server, so the error is raised (never half-applied) and the next statement starts clean.
+        Other errors surface at once."""
         deadline = time.monotonic() + BUSY_RETRY_S
         delay = 0.005
+        reopened = False
         while True:
             try:
-                return _Cursor(call())
+                return _Cursor(call(self._raw))
             except Exception as exc:
                 if isinstance(exc, sqlite3.Error):
                     raise
@@ -199,15 +217,28 @@ class LibsqlConnection:
                     time.sleep(delay)
                     delay = min(delay * 2, 0.2)
                     continue
+                if _dropped(exc) and self._reopen is not None and not reopened:
+                    was_in_tx = self._in_tx
+                    self._raw = self._reopen()
+                    self._in_tx = False
+                    reopened = True
+                    if not was_in_tx:
+                        continue
                 raise _translate(exc) from exc
 
     def execute(self, sql: str, params: Sequence[Any] | dict[str, Any] = ()) -> _Cursor:
         args = tuple(params) if isinstance(params, list) else params
-        return self._run(lambda: self._raw.execute(sql, args))
+        cur = self._run(lambda raw: raw.execute(sql, args))
+        head = sql.lstrip()[:8].upper()
+        if head.startswith("BEGIN"):
+            self._in_tx = True
+        elif head.startswith(("COMMIT", "ROLLBACK", "END")):
+            self._in_tx = False
+        return cur
 
     def executemany(self, sql: str, seq: Iterable[Sequence[Any]]) -> _Cursor:
         rows = [tuple(p) for p in seq]
-        return self._run(lambda: self._raw.executemany(sql, rows))
+        return self._run(lambda raw: raw.executemany(sql, rows))
 
     def __enter__(self) -> LibsqlConnection:
         return self

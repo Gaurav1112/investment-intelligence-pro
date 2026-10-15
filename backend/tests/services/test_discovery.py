@@ -83,7 +83,7 @@ def test_report_cites_only_engine_facts_and_passes_compliance(conn) -> None:  # 
     rules = compliance.load_rules()
     for key in ("footer", "ranking", "projection", "past_performance"):
         assert rules.required[key] in report["disclosures"]
-    assert out["criteria"] and out["policy"]["version"] == "ranking_policy@1.0.0"
+    assert out["criteria"] and out["policy"]["version"] == "ranking_policy@1.1.0"
 
 
 def test_disagreement_between_ranking_and_skeptic_is_surfaced(conn) -> None:  # type: ignore[no-untyped-def]

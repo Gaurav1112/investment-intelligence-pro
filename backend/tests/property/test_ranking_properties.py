@@ -30,6 +30,7 @@ def candidates(draw: st.DrawFn, idx: int) -> Candidate:
         horizon_fit=draw(st.booleans()),
         credit_rating=draw(st.sampled_from([None, "SOVEREIGN", "AAA", "AA", "A", "UNRATED"])),
         data_ok=draw(st.booleans()),
+        independent_windows=draw(st.one_of(st.none(), st.integers(0, 60))),
     )
 
 
@@ -43,10 +44,11 @@ objectives = st.sampled_from(list(Objective))
 
 
 def _request(obj: Objective) -> RankingRequest:
+    growth = obj in (Objective.GROWTH, Objective.AGGRESSIVE_GROWTH)  # growth needs ≥ 12 months (RT-20 decision)
     return RankingRequest(
         objective=obj,
         amount=AMOUNT,
-        horizon_days=90,
+        horizon_days=400 if growth else 90,
         max_days_to_cash=7,
         loss_budget=D("0.10") if obj in (Objective.GROWTH, Objective.AGGRESSIVE_GROWTH) else None,
     )

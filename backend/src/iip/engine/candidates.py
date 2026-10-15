@@ -615,6 +615,7 @@ def mf_candidate(  # noqa: PLR0915 - one linear, auditable pipeline; splitting h
         tier=tier,
         outcome=band,
         loss_frequency=loss_freq,
+        independent_windows=n_ind,
         days_to_cash=settlement_days,
         exit_cost=load_rate,
         horizon_fit=True,

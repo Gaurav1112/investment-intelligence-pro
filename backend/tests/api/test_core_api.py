@@ -91,5 +91,5 @@ def test_data_health_and_methodology(dev: tuple[TestClient, dict[str, str]]) -> 
     ids = {s["source_id"] for s in health["sources"]}
     assert "amfi.navall" in ids and health["tax_rules_loaded"] is True
     meth = c.get("/api/methodology").json()
-    assert meth["versions"]["ranking_policy"] == "ranking_policy@1.0.0"
+    assert meth["versions"]["ranking_policy"] == "ranking_policy@1.1.0"
     assert any(r["verification"] == "NV" for r in meth["tax"]["rules"])

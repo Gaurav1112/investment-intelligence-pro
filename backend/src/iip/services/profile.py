@@ -109,6 +109,9 @@ def evaluate(profile: Profile, as_of: date) -> ProfileStatus:
             horizon = None
     if profile.loss_acceptable and profile.max_loss_fraction is None:
         missing.append("Maximum acceptable loss (needed when loss is acceptable)")
+    growth = profile.objective in (Objective.GROWTH, Objective.AGGRESSIVE_GROWTH)
+    if growth and horizon is not None and horizon < 365:
+        missing.append("Growth objectives need a withdrawal date at least 12 months away (choose A, B or C instead)")
     if profile.objective in (Objective.GROWTH, Objective.AGGRESSIVE_GROWTH) and profile.max_loss_fraction is None:
         missing.append("Explicit loss budget (required for growth objectives)")
     if profile.return_aspiration is not None and horizon is not None:

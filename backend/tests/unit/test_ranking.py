@@ -60,6 +60,7 @@ def liquid() -> Candidate:
         tier=Tier.T3,
         outcome=OutcomeBand(q05=D("100480"), q50=D("100520"), q95=D("100560")),
         loss_frequency=D("0.000"),
+        independent_windows=25,
         days_to_cash=1,
         exit_cost=D("0"),
         horizon_fit=True,
@@ -203,3 +204,23 @@ def test_every_ranked_item_explains_itself() -> None:
         assert item.reasons and all(isinstance(r, str) for r in item.reasons)
     assert result.policy["epsilon_loss_frequency"] == "0.01"
     assert Decimal(result.policy["preservation_floor"]) == 0
+
+
+def test_thin_evidence_market_option_is_excluded_for_preservation() -> None:
+    """User decision 2026-10-15 (RT-19): zero losses in < 20 independent windows cannot establish a low loss rate."""
+    thin = replace(liquid(), independent_windows=12)
+    result = rank(req(), [thin])
+    assert result.status is RankStatus.NO_SUITABLE_CANDIDATE
+    assert "INSUFFICIENT_LOSS_EVIDENCE" in result.excluded[0].reason_codes
+    assert (
+        "INSUFFICIENT_LOSS_EVIDENCE"
+        in rank(req(), [replace(liquid(), independent_windows=None)]).excluded[0].reason_codes
+    )
+    assert rank(req(), [replace(liquid(), independent_windows=20)]).status is RankStatus.RANKED
+
+
+def test_growth_objectives_are_refused_under_twelve_months() -> None:
+    """User decision 2026-10-15 (RT-20)."""
+    with pytest.raises(InvalidInput):
+        rank(req(Objective.GROWTH, horizon_days=364, loss_budget=D("0.2")), [equity()])
+    assert rank(req(Objective.GROWTH, horizon_days=365, loss_budget=D("0.2")), [equity()]).policy_version

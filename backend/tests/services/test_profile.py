@@ -70,3 +70,11 @@ def test_floats_rejected_and_bounds_enforced() -> None:
     with pytest.raises(ValidationError):
         Profile.model_validate({"unexpected": 1})
     assert Profile.model_validate({"amount": "1000000000000"}).amount == Decimal("1000000000000")
+
+
+def test_growth_under_twelve_months_is_not_personalised() -> None:
+    p = Profile.model_validate(
+        {**FULL, "objective": Objective.GROWTH, "loss_acceptable": True, "max_loss_fraction": "0.2"}
+    )  # 182-day horizon
+    st = evaluate(p, AS_OF)
+    assert st.mode == "EXPLORATION" and any("12 months" in m for m in st.missing)

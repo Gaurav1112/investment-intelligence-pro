@@ -25,10 +25,10 @@ export const OBJECTIVES: Record<string, { code: string; title: string; blurb: st
   },
   B_income: { code: "B", title: "Predictable proceeds", blurb: "Know in advance, as closely as possible, what you will receive." },
   C_liquidity: { code: "C", title: "Liquidity / emergency", blurb: "Be able to take the money out quickly and cheaply." },
-  D_growth: { code: "D", title: "Risk-adjusted growth", blurb: "Grow the money while keeping losses within a budget you set." },
+  D_growth: { code: "D", title: "Risk-adjusted growth", blurb: "Grow the money while keeping losses within a budget you set. Needs at least 12 months." },
   E_aggressive_growth: {
     code: "E",
     title: "Aggressive growth",
-    blurb: "Seek higher growth and accept large temporary losses, up to a budget you state explicitly.",
+    blurb: "Seek higher growth and accept large temporary losses, up to a budget you state explicitly. Needs at least 12 months.",
   },
 };

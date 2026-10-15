@@ -21,6 +21,7 @@ from iip.engine import tax as tx
 from iip.engine.determinism import canonical_json, content_hash
 from iip.engine.money import D, format_inr, money, pct, quantize
 from iip.engine.ranking import (
+    MIN_PRESERVATION_INDEPENDENT_WINDOWS,
     POLICY_VERSION,
     Objective,
     RankingRequest,
@@ -922,6 +923,9 @@ def _criteria(req: RankingRequest) -> list[str]:
     if req.objective in (Objective.CAPITAL_PRESERVATION, Objective.INCOME, Objective.LIQUIDITY):
         out.append(f"Historical frequency of loss at this horizon ≤ {pct(req.epsilon_loss_frequency)}")
         out.append("Low-end outcome must not fall below the amount invested")
+        out.append(
+            f"Market-linked options need at least {MIN_PRESERVATION_INDEPENDENT_WINDOWS} independent historical windows"
+        )
     if req.loss_budget is not None:
         out.append(f"Low-end outcome within your loss budget of {pct(req.loss_budget)}")
     if req.max_days_to_cash is not None:

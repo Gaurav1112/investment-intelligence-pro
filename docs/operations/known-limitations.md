@@ -56,8 +56,8 @@ Living document, last updated 2026-10-15.
 |---|---|---|
 | RT-17 | Accepted (conservative) | The tax-coverage clamp also shortens the holding period, so equity sold after 31-Mar-2027 is taxed as STCG. That overstates tax (about 4.3× in one probe) and biases growth comparisons against equity. Overstating is the safe direction; it resolves when the FY2027-28 rates are added. |
 | RT-18 | Flagged | Each option assumes the ₹1.25 lakh LTCG exemption is unused. Results that rely on it carry `LTCG_EXEMPTION_ASSUMED_UNUSED`. |
-| RT-19 | Spec-defined, open | "Loss frequency ≤ 1 %" can pass with 10–19 independent windows and zero losses; by the rule of three, that evidence only bounds the true rate at about 15–30 %. Such results carry `LOW_EVIDENCE`. Tightening the gate is a product decision. |
-| RT-20 | Design decision | Growth objectives under 12 months are allowed, but only with an explicit loss budget and a constraint-conflict warning (risk-methodology says H ≥ 12 months). |
+| RT-19 | **Resolved by user decision** (policy 1.1.0) | Preservation objectives require ≥ 20 independent windows. Original issue: | "Loss frequency ≤ 1 %" can pass with 10–19 independent windows and zero losses; by the rule of three, that evidence only bounds the true rate at about 15–30 %. Such results carry `LOW_EVIDENCE`. Tightening the gate is a product decision. |
+| RT-20 | **Resolved by user decision** (policy 1.1.0) | Growth objectives are refused for horizons under 12 months. |
 | RT-21 | Fixed by final reviewer | Untracked schemes keep only their latest NAV; held, watched and backfilled schemes keep history. |
 | RT-22 | Open | Fund windows ignore the settlement lag (slightly optimistic for very short horizons). T-bills have no minimum ticket or lot size. |
 | RT-23 | Open | A credit floor applies to rated instruments and Credit Risk Funds only. Other debt funds' portfolio credit quality is not known, so it is not checked. |

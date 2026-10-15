@@ -26,3 +26,13 @@ The pipeline has four steps, versioned as `ranking_policy@1.0.0` (revised 2026-1
 
 ## Evidence
 risk-methodology.md (ranking guidance; worked example excluding equity for a 1-month preservation goal).
+
+
+## Amendment — ranking_policy@1.1.0 (2026-10-15, user decisions after the red-team audit)
+- **Evidence gate for capital preservation (RT-19).** Under objectives A, B and C, a market-linked option needs at least **20 independent
+  windows** at the horizon (`INSUFFICIENT_LOSS_EVIDENCE` otherwise). Zero losses in fewer windows cannot establish a low loss
+  rate (rule of three). Contractual options are unaffected.
+- **Growth objectives need H ≥ 12 months (RT-20).** D and E are refused below 365 days, in the engine (`InvalidInput`) and in the
+  profile (stays in EXPLORATION with an explanation).
+- **Uninsured credit exposure (red team RT-01).** Contractual options outside T1/T2 fail preservation objectives
+  (`UNINSURED_CREDIT_EXPOSURE`), because the DICGC limit is a hard constraint (risk-methodology §9).

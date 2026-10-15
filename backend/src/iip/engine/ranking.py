@@ -20,7 +20,10 @@ from iip.engine.determinism import content_hash
 from iip.engine.errors import InvalidInput
 from iip.engine.money import D, engine_context, money
 
-POLICY_VERSION = "ranking_policy@1.0.0"
+POLICY_VERSION = "ranking_policy@1.1.0"
+# User decisions 2026-10-15 (red-team RT-19 / RT-20):
+MIN_PRESERVATION_INDEPENDENT_WINDOWS = 20  # market-linked options need ≥ 20 independent windows for objectives A/B/C
+MIN_GROWTH_HORIZON_DAYS = 365  # growth objectives D/E require a withdrawal date at least 12 months away
 NO_CANDIDATE_MESSAGE = "No suitable candidate found under the current constraints."
 
 # Higher index = stronger credit. None (not applicable, e.g. a fund) is handled separately.
@@ -93,6 +96,7 @@ class Candidate:
     data_ok: bool
     min_investment: Decimal | None = None
     flags: tuple[str, ...] = ()
+    independent_windows: int | None = None  # evidence behind loss_frequency (None = not applicable / unknown)
 
 
 @dataclass(frozen=True)
@@ -149,6 +153,8 @@ def _validate(request: RankingRequest, candidates: Sequence[Candidate]) -> None:
     if not (D("0") <= request.risk_lambda <= D("1")):
         raise InvalidInput("risk_lambda must be in [0, 1]")
     if request.objective in GROWTH_OBJECTIVES:
+        if request.horizon_days < MIN_GROWTH_HORIZON_DAYS:
+            raise InvalidInput("growth objectives require a withdrawal date at least 12 months away")
         if request.loss_budget is None:
             raise InvalidInput("growth objectives require an explicit, user-entered loss budget")
         if not (D("0") <= request.loss_budget <= D("1")):
@@ -195,6 +201,12 @@ def _eligibility(request: RankingRequest, c: Candidate) -> list[tuple[str, str]]
                 failures.append(
                     ("UNINSURED_CREDIT_EXPOSURE", "Part or all of the amount carries uninsured issuer credit risk.")
                 )
+            if not c.outcome.is_contractual and (
+                c.independent_windows is None or c.independent_windows < MIN_PRESERVATION_INDEPENDENT_WINDOWS
+            ):
+                n = MIN_PRESERVATION_INDEPENDENT_WINDOWS
+                msg = f"Fewer than {n} independent historical windows at this horizon to establish a low loss rate."
+                failures.append(("INSUFFICIENT_LOSS_EVIDENCE", msg))
             if not c.outcome.is_contractual:
                 if c.loss_frequency is None:
                     failures.append(
@@ -279,6 +291,8 @@ def _policy(request: RankingRequest) -> dict[str, str]:
         "risk_lambda": str(request.risk_lambda),
         "loss_budget": "" if request.loss_budget is None else str(request.loss_budget),
         "credit_floor": request.credit_floor or "",
+        "min_preservation_independent_windows": str(MIN_PRESERVATION_INDEPENDENT_WINDOWS),
+        "min_growth_horizon_days": str(MIN_GROWTH_HORIZON_DAYS),
     }
 
 

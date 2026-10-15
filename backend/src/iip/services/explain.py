@@ -30,7 +30,7 @@ FRESHNESS: dict[str, str] = {
 }
 
 # Age rules per source (source-registry.md §4); the NAV rule lives in the engine (shared with eligibility).
-MANUAL_MAX_DAYS = {"rbi.pr.tbill": 7, "bank.fd": 30}
+MANUAL_MAX_DAYS = {"rbi.pr.tbill": 7, "bank.fd": 30, "bond.quote": 7}
 _NAV_SOURCES = frozenset({"amfi.navall", "amfi.navhistory"})
 _REQUIRED_KEYS = (
     "id", "label", "display", "value", "unit", "what", "formula_id", "formula", "substituted", "inputs", "sources",

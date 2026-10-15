@@ -45,7 +45,7 @@ from iip.engine.money import ONE, PAISA, ZERO, D, engine_context, format_inr, fr
 from iip.engine.ranking import Tier
 from iip.engine.stats import metrics as rm
 from iip.engine.stats.series import Frequency, ReturnSeries
-from iip.services import discovery
+from iip.services import bonds, discovery
 from iip.services import profile as profile_svc
 from iip.services.explain import badge, source_ref
 from iip.services.instruments import FD_RATE_STALE_DAYS, TBILL_STALE_DAYS
@@ -226,8 +226,31 @@ def build_one(
     if kind == "fd":
         return _build_fd(conn, inst, amount=amount, as_of=as_of, withdrawal=withdrawal, ruleset=ruleset,
                          profile=profile)  # fmt: skip
+    if kind in bonds.BOND_KINDS:
+        return _build_bond(conn, inst, amount=amount, as_of=as_of, withdrawal=withdrawal, ruleset=ruleset,
+                           profile=profile)  # fmt: skip
     prov = {"kind": kind, "fixture": inst["origin"] == "fixture"}
     return Built(iid, name, kind, None, (f"UNSUPPORTED_KIND: no candidate builder for '{kind}' in this version",), prov)
+
+
+def _build_bond(
+    conn: sqlite3.Connection,
+    inst: sqlite3.Row,
+    *,
+    amount: Decimal,
+    as_of: date,
+    withdrawal: date,
+    ruleset: tx.TaxRuleSet,
+    profile: tx.TaxProfile | None,
+) -> Built:
+    """Same loader/builder as discovery.build_universe (services/bonds.build_bond)."""
+    iid, name, kind = str(inst["instrument_id"]), str(inst["name"]), str(inst["kind"])
+    b, prov, not_evaluable = bonds.build_bond(
+        conn, inst, amount=amount, as_of=as_of, withdrawal=withdrawal, ruleset=ruleset, profile=profile
+    )
+    terms = conn.execute("SELECT maturity_date FROM bond_terms WHERE instrument_id=?", (iid,)).fetchone()
+    maturity = date.fromisoformat(terms["maturity_date"]) if terms else None
+    return Built(iid, name, kind, b, not_evaluable, prov, maturity=maturity)
 
 
 def _build_mf(
@@ -542,6 +565,10 @@ def _exit_cost(b: Built) -> dict[str, Any]:
         "mf_scheme": "exit-load rate that applies if redeemed at your withdrawal date (scheme terms)",
         "tbill": "no early-exit cost modelled (held to maturity; secondary-market spread not modelled)",
         "fd": "premature penalty × tenure in years (ranking policy's exit-cost measure)",
+        **dict.fromkeys(
+            bonds.BOND_KINDS,
+            "transaction spread you entered (fraction of the clean price); 100 % when unknown or no exchange exit",
+        ),
     }[b.kind]
     return explained(
         f"{b.instrument_id}.exit_cost",
@@ -830,6 +857,8 @@ def _shock_rate(b: Built, value: Decimal, shocks: Mapping[str, Any], ctx: Contex
         return _Applied((("value", res),), f"sale proceeds on {exit_date}, before tax")
     if b.kind == "fd":
         return _NotApplicable("A fixed deposit pays its booked contractual rate; later rate changes do not alter it.")
+    if b.kind in bonds.BOND_KINDS:
+        return _NotApplicable(_BOND_RATE_TEXT)
     if _is_equity_scheme(b.category):
         return _NotApplicable("Interest-rate shocks apply to debt holdings; use equity_pct for an equity fund.")
     return _NotApplicable(
@@ -838,11 +867,20 @@ def _shock_rate(b: Built, value: Decimal, shocks: Mapping[str, Any], ctx: Contex
     )
 
 
+_BOND_RATE_TEXT = (
+    "Held to maturity, the bond pays its contractual coupons and face value whatever yields do. If your withdrawal "
+    "date is before maturity, the outcome band already reprices the sale at +100 / 0 / −100 bp (plus the exit "
+    "spread); use exit_before_maturity_days for an earlier sale."
+)
+
+
 def _shock_spread(b: Built, value: Decimal, shocks: Mapping[str, Any], ctx: Context) -> _Outcome:
     if b.kind == "tbill":
         return _NotApplicable("A Government of India T-bill carries no credit spread.")
     if b.kind == "fd":
         return _NotApplicable("A bank deposit has no traded credit spread; its credit risk is shown as DICGC cover.")
+    if b.kind in bonds.BOND_KINDS:
+        return _NotApplicable(_BOND_RATE_TEXT)
     if _is_equity_scheme(b.category):
         return _NotApplicable("Credit-spread shocks apply to debt holdings, not to an equity fund.")
     return _NotApplicable(
@@ -905,12 +943,13 @@ def _shock_exit(
     early = rebuild(ctx.as_of + timedelta(days=days))
     if not early.evaluable:
         reasons = early.not_evaluable or (early.built.ineligible_reasons if early.built else ())
-        return _NotApplicable("The fund cannot be evaluated at the earlier date: " + "; ".join(reasons))
+        what = "bond" if b.kind in bonds.BOND_KINDS else "fund"
+        return _NotApplicable(f"The {what} cannot be evaluated at the earlier date: " + "; ".join(reasons))
     out = tuple(
         (
             w,
             scn._build(
-                scenario_id="SCN_MF_EARLY_EXIT@1",
+                scenario_id="SCN_BOND_EARLY_EXIT@1" if b.kind in bonds.BOND_KINDS else "SCN_MF_EARLY_EXIT@1",
                 label=scn.ScenarioLabel.ILLUSTRATIVE_DOWNSIDE,
                 inputs=[scn.Quantity("exit_after_days", Decimal(days), "days"),
                         scn.Quantity("horizon_days", Decimal(ctx.horizon_days), "days")],
@@ -918,7 +957,9 @@ def _shock_exit(
                 base_value=_pretax(b, w),
                 shocked_value=_pretax(early, w),
                 approximate=False,
-                caveats=["DISTRIBUTION_AT_SHORTER_HORIZON", "EXIT_LOAD_PER_SCHEME_TERMS", "EARLIER_CASH_DATE"],
+                caveats=(["SALE_PRICE_STRESS_SCENARIOS", "TRANSACTION_SPREAD_PER_ENTRY", "EARLIER_CASH_DATE"]
+                         if b.kind in bonds.BOND_KINDS else
+                         ["DISTRIBUTION_AT_SHORTER_HORIZON", "EXIT_LOAD_PER_SCHEME_TERMS", "EARLIER_CASH_DATE"]),
             ),
         )
         for w in WHICH
@@ -933,7 +974,12 @@ def _shock_reinvest(b: Built, value: Decimal, shocks: Mapping[str, Any], ctx: Co
         "to earn nothing, and the scenario engine has no idle-cash reinvestment model.",
         "fd": "A cumulative FD compounds at its booked rate; there are no payouts to reinvest.",
         "mf_scheme": "A growth-option fund reinvests inside the NAV; there are no payouts to reinvest.",
-    }.get(b.kind, "Reinvestment applies to coupon-paying bonds, which this version does not evaluate.")
+        **dict.fromkeys(
+            bonds.BOND_KINDS,
+            "Coupons are conservatively assumed to earn nothing until your withdrawal date; no reinvestment rate is "
+            "assumed, so a reinvestment scenario is not computed in this version.",
+        ),
+    }.get(b.kind, "Reinvestment does not apply to this instrument.")
     return _NotApplicable(reason)
 
 

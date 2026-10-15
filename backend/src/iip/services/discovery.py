@@ -30,6 +30,7 @@ from iip.engine.ranking import (
     Tier,
     rank,
 )
+from iip.services import bonds
 from iip.services.explain import badge, source_ref
 from iip.services.instruments import FD_RATE_STALE_DAYS, TBILL_STALE_DAYS
 from iip.services.profile import ILLUSTRATIVE_AMOUNT, ILLUSTRATIVE_HORIZON_DAYS, ProfileStatus
@@ -285,6 +286,18 @@ def build_universe(  # noqa: PLR0915 - one linear pass per instrument kind
                 "fixture": r["origin"] == "fixture",
             }
             sources[iid]["freshness"] = badge(sources[iid], as_of)
+
+    # G-secs, SDLs, corporate bonds: the same loader/builder as analysis.build_one (services/bonds.py).
+    for inst in bonds.bond_rows(conn):
+        if inst["kind"] in excluded_kinds:
+            continue
+        b_or_none, prov, _ = bonds.build_bond(
+            conn, inst, amount=amount, as_of=as_of, withdrawal=withdrawal, ruleset=ruleset, profile=profile
+        )
+        if b_or_none is None:
+            continue  # no terms or no quote stored at all (as for T-bills: not in the universe)
+        built.append(b_or_none)
+        sources[str(inst["instrument_id"])] = prov
     return Universe(tuple(built), sources, skipped, evaluated)
 
 
@@ -394,6 +407,14 @@ def explained_outcome(
             "CAND_MF_EMPIRICAL@1": (
                 "R = NAV(t+H)/NAV(t) − 1 over every past window; V = (amount − stamp)(1 + R)(1 − load) − tax"
             ),
+            "CAND_BOND_HTM@1": (
+                "n = ⌊amount / (face × dirty / 100)⌋ whole bonds; V = idle cash + n·face/100 × (Σ coupons + redemption)"
+                " − tax(interest at slab + capital gain); callable → worst of maturity and call paths"
+            ),
+            "CAND_BOND_EARLY_EXIT@1": (
+                "V = idle cash + n·face/100 × (coupons received + exit clean × (1 − spread) + exit accrued) − tax; "
+                "exit price at entry yield +100 / 0 / −100 bp + exit spread (stress scenarios)"
+            ),
         }[ev.formula_id],
         "substituted": f"gross {format_inr(value + tax)} − tax {format_inr(tax)} = {format_inr(value)}",
         "inputs": [_input_line(k, v) for k, v in ev.inputs]
@@ -415,8 +436,9 @@ def explained_outcome(
     }
 
 
-_MONEY_KEYS = {"amount", "dicgc_exposure_at_bank"}
-_RATE_KEYS = {"quoted_yield", "rate"}
+_MONEY_KEYS = {"amount", "dicgc_exposure_at_bank", "cash_left_idle", "face_value"}
+_RATE_KEYS = {"quoted_yield", "rate", "coupon_rate"}
+_PER_100_KEYS = {"price_per_100", "clean_price_per_100", "accrued_per_100", "dirty_purchase_per_100"}
 
 
 def _input_line(key: str, raw: str) -> str:
@@ -426,7 +448,13 @@ def _input_line(key: str, raw: str) -> str:
             return f"{key}: {format_inr(Decimal(raw))}"
         if key in _RATE_KEYS:
             return f"{key}: {pct(Decimal(raw))}"
-        if key == "price_per_100":
+        if key.startswith("path_"):  # "gross X; tax Y; net Z" (bond paths/scenarios)
+            parts = [p.split(" ", 1) for p in raw.split("; ")]
+            return f"{key}: " + "; ".join(f"{k} {format_inr(Decimal(v))}" for k, v in parts)
+        if key == "ytm" and " (" in raw:
+            value, comp = raw.split(" (", 1)
+            return f"{key}: {pct(Decimal(value))} ({comp}"
+        if key in _PER_100_KEYS:
             return f"{key}: {quantize(Decimal(raw), Decimal('0.0001'))}"
     except (ArithmeticError, ValueError):
         pass
@@ -917,6 +945,8 @@ def _loss_display(b: cb.BuiltCandidate) -> dict[str, str] | None:
     if b.evidence is None:
         return None
     if c.outcome.is_contractual:
+        if c.loss_frequency is None and "CORPORATE_CREDIT_RISK" in c.flags:
+            return {"value": "n/a", "display": "contractual; carries the issuer's default risk (rating only)"}
         if c.loss_frequency is None:
             return {"value": "n/a", "display": "contractual; uninsured part carries the institution's credit risk"}
         return {"value": "0", "display": "none (contractual)"}

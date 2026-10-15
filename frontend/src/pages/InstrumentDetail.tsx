@@ -10,7 +10,8 @@ import { ApiError } from "../lib/api";
 import { dateLabel, inr, utcStamp } from "../lib/format";
 import type { ExitLoad, Freshness, InstrumentDetailResponse, SeriesPoint } from "../lib/types";
 import { useApi } from "../lib/useApi";
-import { exitLoadText } from "./MfExplorer";
+import { exitLoadHref, exitLoadText } from "./MfExplorer";
+import { kindLabel } from "../lib/kinds";
 import type { BondList } from "../lib/types-bonds";
 import {
   CiteLink,
@@ -26,16 +27,6 @@ import {
   TBILL_FRESH_DAYS,
 } from "./FixedIncome";
 
-const KIND_LABEL: Record<string, string> = {
-  mf_scheme: "Mutual fund scheme",
-  tbill: "Treasury bill",
-  gsec: "Government security",
-  sdl: "State development loan",
-  corp_bond: "Corporate bond",
-  fd: "Fixed deposit",
-  small_savings: "Small savings scheme",
-  cash: "Cash",
-};
 const MAX_ROWS = 50;
 
 type SeriesKind = "nav" | "yield";
@@ -88,7 +79,12 @@ function Terms({ d }: { d: InstrumentDetailResponse }) {
               "Exit load",
               (() => {
                 const x = parseExitLoad(m.exit_load_json);
-                if (x === null) return <span className="subtle">not entered</span>;
+                if (x === null)
+                  return (
+                    <>
+                      <span className="subtle">not entered</span> · <Link to={exitLoadHref(d.instrument.instrument_id, d.instrument.name)}>Enter exit load</Link>
+                    </>
+                  );
                 if (x === "unreadable") return <span className="field-error">stored value is unreadable</span>;
                 return (
                   <>
@@ -379,7 +375,7 @@ export default function InstrumentDetail() {
         <div className="page-head__text">
           <h1>{i.name}</h1>
           <p className="small muted">
-            {KIND_LABEL[i.kind] ?? i.kind}
+            {kindLabel(i.kind)}
             {i.amfi_code ? ` · AMFI code ${i.amfi_code}` : ""}
             {i.isin ? ` · ISIN ${i.isin}` : ""} · id <span className="mono">{i.instrument_id}</span>
           </p>

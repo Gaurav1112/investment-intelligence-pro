@@ -90,6 +90,8 @@ describe("Discovery", () => {
     expect(within(summary).getByText(/^1 × Other reason/)).toBeInTheDocument();
     expect(screen.getByText("EXIT_LOAD_UNKNOWN: enter the scheme's exit load from its SID/KIM")).toBeInTheDocument();
     expect(screen.getAllByText(/Exit load not entered yet/).length).toBe(2); // ledger row + per-reason count
+    // Walkthrough 2026-10-15: the reason links straight to the form that fixes it.
+    expect(screen.getByRole("link", { name: "Enter exit load" })).toHaveAttribute("href", "/mf?q=TEST%20Debt%20B&exit_load=mf%3A3");
   });
 
   it("counts reason codes per instrument, most common first", () => {

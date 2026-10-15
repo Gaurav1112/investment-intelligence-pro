@@ -29,6 +29,7 @@ import { useApi } from "../lib/useApi";
 import { CasImport } from "./CasImport";
 import { FieldError, navLabel, todayIst, validationErrors } from "./FixedIncome";
 import { apiCode, apiMessage, InstrumentSearch, safeFreshness } from "./Watchlist";
+import { kindLabel } from "../lib/kinds";
 
 // ------------------------------------------------------------------ helpers
 
@@ -252,7 +253,7 @@ function HoldingsTable({ rows, onExplain }: { rows: SummaryHolding[]; onExplain:
               <td>
                 <Link to={`/i/${encodeURIComponent(h.instrument_id)}`}>{h.name}</Link>
                 <div className="small subtle">
-                  {h.kind} · {h.category} · {h.lots} open lot{h.lots === 1 ? "" : "s"}
+                  {kindLabel(h.kind)} · {h.category} · {h.lots} open lot{h.lots === 1 ? "" : "s"}
                 </div>
                 {h.exclusion ? (
                   <div className="small exclusion-note">
@@ -358,7 +359,7 @@ function Totals({ s, onExplain }: { s: PortfolioSummary; onExplain: OnExplain })
   );
 }
 
-function AllocationTable({ a, title }: { a: Allocation; title: string }) {
+function AllocationTable({ a, title, label }: { a: Allocation; title: string; label?: (key: string) => string }) {
   if (a.items.length === 0) return <p className="small subtle">{title}: no valued holdings.</p>;
   return (
     <div className="table-wrap">
@@ -377,7 +378,7 @@ function AllocationTable({ a, title }: { a: Allocation; title: string }) {
         <tbody>
           {a.items.map((it) => (
             <tr key={it.key}>
-              <td>{it.key}</td>
+              <td>{label ? label(it.key) : it.key}</td>
               <td className="num">{inr(it.market_value)}</td>
               <td className="num">{it.share}</td>
               <td className="bar-cell" aria-hidden="true">
@@ -1030,7 +1031,7 @@ function SummaryView({ portfolioId, tick }: { portfolioId: string; tick: number 
           <HoldingsTable rows={s.holdings} onExplain={setExplain} />
           <h2>Allocation</h2>
           <div className="grid grid--2">
-            <AllocationTable a={s.allocation.by_kind} title="By instrument type" />
+            <AllocationTable a={s.allocation.by_kind} title="By instrument type" label={kindLabel} />
             <AllocationTable a={s.allocation.by_category} title="By category" />
           </div>
           <p className="small subtle">Valued holdings only; shares are rounded so they add up to exactly 100.00%.</p>

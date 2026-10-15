@@ -1,7 +1,7 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { InstName } from "../components/Code";
 import { PageHeader } from "../components/PageHeader";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { DataTable, type Column } from "../components/DataTable";
 import { FreshnessBadge } from "../components/FreshnessBadge";
 import { Empty, ErrorState, Loading } from "../components/States";
@@ -26,6 +26,12 @@ import {
 } from "./FixedIncome";
 
 /** "1.00 % if redeemed within 365 days" / "Nil" — with the date the user cited. */
+/** Link target that opens Mutual funds filtered to one scheme with its exit-load form open. */
+export function exitLoadHref(instrumentId: string, name: string): string {
+  const q = name.split(" — ")[0]?.trim() || name;
+  return `/mf?q=${encodeURIComponent(q)}&exit_load=${encodeURIComponent(instrumentId)}`;
+}
+
 export function exitLoadText(x: ExitLoad): string {
   const nil = /^0+(\.0+)?$/.test(x.rate) || x.days === 0;
   return nil ? "Nil" : `${ratePct(x.rate)} if redeemed within ${x.days} day${x.days === 1 ? "" : "s"}`;
@@ -175,14 +181,25 @@ function ExitLoadForm({ row, onDone, onCancel }: { row: InstrumentListItem; onDo
 }
 
 export default function MfExplorer() {
-  const [query, setQuery] = useState("");
-  const [q, setQ] = useState("");
+  const [params, setParams] = useSearchParams();
+  const [query, setQuery] = useState(params.get("q") ?? "");
+  const [q, setQ] = useState(params.get("q") ?? "");
   const list = useApi<InstrumentList>(`/api/instruments?kind=mf_scheme${q ? `&q=${encodeURIComponent(q)}` : ""}`);
   const [activity, setActivity] = useState<Activity[]>([]);
   const [busy, setBusy] = useState<Record<string, boolean>>({});
   const [navPending, setNavPending] = useState(false);
   const [progress, setProgress] = useState("");
   const [editing, setEditing] = useState<InstrumentListItem | null>(null);
+  // Arriving from a "Enter exit load" link (Discovery ledger, instrument page): open that scheme's form once listed.
+  const wantExitLoad = params.get("exit_load");
+  useEffect(() => {
+    if (!wantExitLoad || !list.data) return;
+    const row = list.data.items.find((x) => x.instrument_id === wantExitLoad);
+    if (row) setEditing(row);
+    const next = new URLSearchParams(params);
+    next.delete("exit_load");
+    setParams(next, { replace: true });
+  }, [wantExitLoad, list.data, params, setParams]);
   const today = todayIst();
 
   const focusAfter = useFocusAfter();

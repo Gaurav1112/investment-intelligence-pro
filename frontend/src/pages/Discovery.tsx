@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
+import { exitLoadHref } from "./MfExplorer";
 import { AiWording } from "../components/AiWording";
 import { ExplainDrawer, ExplainedNumber } from "../components/ExplainDrawer";
 import { FreshnessBadge } from "../components/FreshnessBadge";
@@ -438,6 +439,12 @@ export default function Discovery() {
                         {(r.exclusion_codes.length ? r.exclusion_codes : r.reasons).map((x) => (
                           <li key={x}>
                             <CodeText raw={x} />
+                            {x.startsWith("EXIT_LOAD_UNKNOWN") && !r.fixture ? (
+                              <>
+                                {" "}
+                                <Link to={exitLoadHref(r.instrument_id, r.name)}>Enter exit load</Link>
+                              </>
+                            ) : null}
                           </li>
                         ))}
                       </ul>

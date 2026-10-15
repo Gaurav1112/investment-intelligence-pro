@@ -236,3 +236,26 @@ describe("MfExplorer in hosted mode (ADR-0013: long jobs answer in bounded steps
     expect(s.stored).toBe(40);
   });
 });
+
+
+describe("MfExplorer deep link (walkthrough 2026-10-15)", () => {
+  it("opens the exit-load form for the scheme named in ?exit_load=, searching by ?q=", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        calls.push(url);
+        return new Response(JSON.stringify(LIST), { status: 200, headers: { "Content-Type": "application/json" } });
+      }),
+    );
+    const first = LIST.items[0]!;
+    render(
+      <MemoryRouter initialEntries={[`/mf?q=Example&exit_load=${encodeURIComponent(first.instrument_id)}`]}>
+        <MfExplorer />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByRole("heading", { name: `Exit load for ${first.name}` })).toBeInTheDocument();
+    expect(calls.some((u) => u.includes("q=Example"))).toBe(true);
+    vi.unstubAllGlobals();
+  });
+});

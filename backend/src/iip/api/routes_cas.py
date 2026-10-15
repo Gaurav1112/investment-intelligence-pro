@@ -13,7 +13,8 @@ from fastapi.concurrency import run_in_threadpool
 from python_multipart.multipart import MultipartParser, parse_options_header
 
 from iip.api.routes_portfolio import _error, _guard, _state
-from iip.services import cas
+from iip.data.fetch import Fetcher
+from iip.services import cas, ingestion
 from iip.services import portfolio as pf
 
 MAX_PARTS = 8
@@ -112,7 +113,18 @@ def router() -> APIRouter:
         data = file_part[1]
         del form, pw_part
         return await run_in_threadpool(
-            lambda: _guard(lambda: cas.preview_cas_import(st.conn, portfolio_id, data, password, st.clock()))
+            lambda: _guard(
+                lambda: cas.preview_cas_import(
+                    st.conn,
+                    portfolio_id,
+                    data,
+                    password,
+                    st.clock(),
+                    resolve_isins=lambda isins: ingestion.register_schemes_by_isin(
+                        st.conn, getattr(st, "fetcher_factory", Fetcher)(), isins, st.clock
+                    ),
+                )
+            )
         )
 
     @r.post("/holdings/import-cas/{batch_id}/apply")

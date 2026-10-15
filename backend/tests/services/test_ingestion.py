@@ -130,3 +130,27 @@ def test_backfilled_schemes_keep_their_history(conn) -> None:  # type: ignore[no
                          end=date(2026, 10, 14), now=lambda: NOW)  # fmt: skip
     ing.ingest_navall(conn, fetcher(amfi), lambda: NOW)
     assert conn.execute("SELECT COUNT(*) FROM observations WHERE series_id='nav:119018'").fetchone()[0] >= 2
+
+
+def test_register_held_schemes_by_exact_isin_including_reinvestment_alias(conn) -> None:  # type: ignore[no-untyped-def]
+    """CAS holdings outside the minimised scope (Regular/IDCW) are registered by EXACT ISIN from the live file."""
+    from iip.data.parsers.amfi_navall import parse_navall
+    from tests.data.conftest import NAVALL_RETRIEVED, NAVALL_URL, make_payload
+
+    recs = parse_navall(make_payload("amfi.navall", NAVALL, NAVALL_URL, NAVALL_RETRIEVED)).records
+    regular_idcw = next(r for r in recs if r.isin_reinvest and "regular" in (r.plan or "").lower())
+    wanted = {regular_idcw.isin_growth or "", regular_idcw.isin_reinvest or "", "INE000000000"}
+    found = ing.register_schemes_by_isin(conn, fetcher(amfi), wanted, lambda: NOW)
+    iid = ing.instrument_id(regular_idcw.scheme_code)
+    assert found[regular_idcw.isin_reinvest] == iid and "INE000000000" not in found
+    assert conn.execute("SELECT COUNT(*) FROM observations WHERE series_id=?",
+                        (ing.series_id(regular_idcw.scheme_code),)).fetchone()[0] >= 1  # fmt: skip
+    alias = conn.execute("SELECT value_json FROM settings WHERE key=?",
+                         ("isin.alias:" + regular_idcw.isin_reinvest,)).fetchone()  # fmt: skip
+    assert alias is not None
+
+
+def test_register_by_isin_fetch_failure_matches_nothing(conn) -> None:  # type: ignore[no-untyped-def]
+    assert (
+        ing.register_schemes_by_isin(conn, fetcher(lambda _r: httpx.Response(500)), {"INF000A01AB9"}, lambda: NOW) == {}
+    )

@@ -352,11 +352,17 @@ def test_sec75_startup_refused_for_non_loopback_local_endpoint(url: str) -> None
         from_env({"IIP_LLM": "local", "IIP_LLM_BASE_URL": url, "IIP_LLM_MODEL": "m"})
 
 
-def test_sec75_hostname_resolving_off_box_refused() -> None:
+def test_sec75_hostname_resolving_off_box_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = LLMConfig("local", "http://my-llm.lan:11434/v1", "m")
     with pytest.raises(LLMConfigError, match="non-loopback"):
         validate_config(cfg, lambda _: ["127.0.0.1", "192.168.1.10"])
     validate_config(cfg, lambda _: ["127.0.0.1", "::1"])  # resolves only to loopback → allowed
+    # Hermetic: the startup path uses the system resolver, so stub DNS (example.com → a public address).
+    import socket
+
+    monkeypatch.setattr(
+        socket, "getaddrinfo", lambda *a, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+    )
     with pytest.raises(StartupRefused):
         validate(Settings(env="test", llm=LLMConfig("local", "http://example.com:11434/v1", "m")))
 

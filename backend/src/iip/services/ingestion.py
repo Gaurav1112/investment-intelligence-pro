@@ -8,6 +8,7 @@ Data minimisation (AMFI ToU: personal use; do not store a "significant portion")
 
 from __future__ import annotations
 
+import json
 import secrets
 import sqlite3
 from collections.abc import Callable, Iterable
@@ -208,6 +209,54 @@ def ingest_navall(conn: sqlite3.Connection, fetcher: Fetcher, now: Callable[[], 
     _finish_run(conn, run_id, now(), status, rep.rows_ok, rep.rows_rejected, payload.sha256, "")
     detail = f"{len(scope)} schemes in the minimised scope; {pruned} older NAVs of untracked schemes pruned"
     return RunSummary(run_id, source, status, rep.rows_ok, rep.rows_rejected, stored, detail)
+
+
+ISIN_ALIAS_PREFIX = "isin.alias:"
+
+
+def register_schemes_by_isin(
+    conn: sqlite3.Connection, fetcher: Fetcher, isins: set[str], now: Callable[[], datetime]
+) -> dict[str, str]:
+    """Look up ISINs the user HOLDS (e.g. from a CAS) in AMFI's current NAVAll and register those schemes.
+
+    Exact ISIN only (payout/growth or reinvestment column) — never names. A reinvestment-option ISIN maps to the same
+    AMFI scheme code as its payout ISIN, so it is recorded as an alias of that instrument. Held schemes are within the
+    data-minimisation scope (AMFI ToU: keep held/watched schemes). Returns {isin: instrument_id} for those found;
+    a fetch failure returns {} (callers report the ISINs as unmatched — nothing is guessed)."""
+    wanted = {i for i in isins if i}
+    if not wanted:
+        return {}
+    try:
+        payload = fetcher.fetch(navall_request())
+        result = parse_navall(payload)
+    except (FetchError, DataError):
+        return {}
+    found: dict[str, str] = {}
+    records = []
+    for rec in result.records:
+        hits = {i for i in (rec.isin_growth, rec.isin_reinvest) if i and i in wanted}
+        if hits:
+            records.append(rec)
+            for isin in hits:
+                found[isin] = instrument_id(rec.scheme_code)
+    if not records:
+        return {}
+    codes = {r.scheme_code for r in records}
+    with write_tx(conn):
+        _store_schemes(conn, records, payload.retrieved_at)
+        for isin, iid in found.items():
+            row = conn.execute("SELECT isin FROM instruments WHERE instrument_id=?", (iid,)).fetchone()
+            if row is not None and row["isin"] != isin:
+                conn.execute(
+                    "INSERT INTO settings(key, value_json) VALUES (?, ?)"
+                    " ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json",
+                    (ISIN_ALIAS_PREFIX + isin, json.dumps(iid)),
+                )
+    run_id = _start_run(conn, "amfi.navall", now())
+    observations = _validated(result)
+    stored = _store_observations(conn, observations, run_id, lambda c: c in codes)
+    _finish_run(conn, run_id, now(), "ok", stored, 0, payload.sha256, "registered held schemes by ISIN")
+    return found
 
 
 def prune_untracked_history(conn: sqlite3.Connection, tracked: set[int]) -> int:

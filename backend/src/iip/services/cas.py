@@ -288,6 +288,12 @@ def _match(conn: sqlite3.Connection, s: CasScheme) -> tuple[str | None, str | No
     if s.isin is None:
         return None, None, s.isin_problem or "NO_ISIN"
     found = conn.execute("SELECT instrument_id, name FROM instruments WHERE isin=?", (s.isin,)).fetchall()
+    if not found:
+        alias = conn.execute("SELECT value_json FROM settings WHERE key=?", ("isin.alias:" + s.isin,)).fetchone()
+        if alias is not None:
+            found = conn.execute(
+                "SELECT instrument_id, name FROM instruments WHERE instrument_id=?", (json.loads(alias[0]),)
+            ).fetchall()
     if len(found) > 1:
         return None, None, "AMBIGUOUS_ISIN"
     if not found:
@@ -353,7 +359,12 @@ def _s(d: Decimal | None) -> str | None:
 
 
 def preview_cas_import(
-    conn: sqlite3.Connection, portfolio_id: str, data: bytes, password: object, now: datetime
+    conn: sqlite3.Connection,
+    portfolio_id: str,
+    data: bytes,
+    password: object,
+    now: datetime,
+    resolve_isins: Callable[[set[str]], dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Validate, parse (memory only), map and reconcile; store a *pending* batch. Nothing reaches
     ``transactions`` until :func:`apply_cas_import` commits."""
@@ -363,6 +374,13 @@ def preview_cas_import(
     del pw
     sha = sha256_hex(data)
     today = now.date()
+
+    if resolve_isins is not None:
+        # Held schemes outside the minimised scope (Regular plans, IDCW options) are looked up by exact ISIN in AMFI's
+        # current file and registered; anything not found stays unmatched with its reason.
+        unknown = {s.isin for s in statement.schemes if s.isin and _match(conn, s)[0] is None}
+        if unknown:
+            resolve_isins(unknown)
 
     mapping = _map_statement(conn, statement, today)
     will_store, rejected, ignored = mapping.will_store, mapping.rejected, mapping.ignored

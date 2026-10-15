@@ -338,7 +338,7 @@ export interface TaxRuleRow {
 
 export interface MethodologyResponse {
   versions: Record<string, string>;
-  tax: { snapshot_date: string; coverage_to: string; rules: TaxRuleRow[] } | null;
+  tax: { snapshot_date: string; coverage_to: string; table_version?: string; rules: TaxRuleRow[] } | null;
   disclosures: Record<string, string>;
 }
 

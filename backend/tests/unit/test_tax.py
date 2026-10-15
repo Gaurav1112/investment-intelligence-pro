@@ -58,13 +58,14 @@ def equity(acq: date, sale: date, gain: str, lot: str = "L1") -> Disposal:
     return Disposal(lot_id=lot, instrument_class=EQ, acquisition_date=acq, transfer_date=sale, gain_inr=D(gain))
 
 
-def debt_mf(acq: date, sale: date, gain: str) -> Disposal:
+def debt_mf(acq: date, sale: date, gain: str, *, listed: bool | None = False) -> Disposal:
     return Disposal(
         lot_id="D1",
         instrument_class=MF,
         acquisition_date=acq,
         transfer_date=sale,
         gain_inr=D(gain),
+        listed=listed,
         domestic_equity_share=D("0"),
         debt_share=D("0.90"),
     )
@@ -144,7 +145,8 @@ def test_lots_spanning_financial_years_are_rejected(rules: TaxRuleSet) -> None:
 
 
 def test_mixed_exemption_limits_in_fy_2024_25_abstain(rules: TaxRuleSet) -> None:
-    # FY2024-25 straddles the 23-Jul-2024 change (₹1 lakh/10 % vs ₹1.25 lakh/12.5 %); pool allocation unspecified.
+    # FY2024-25 straddles the 23-Jul-2024 change (10 % vs 12.5 %, one ₹1.25 lakh pool); how the pool is split
+    # between the two rates is not in the statute text, so the engine abstains.
     lots = [
         equity(date(2023, 1, 2), date(2024, 7, 1), "50000", "A"),
         equity(date(2023, 1, 2), date(2024, 8, 1), "50000", "B"),
@@ -171,6 +173,36 @@ def test_debt_mf_bought_31_mar_2023_gets_24_month_ltcg(rules: TaxRuleSet) -> Non
     assert c.rule_id == "MF-DEBT-PRE2023-LT/ITA1961"
     assert c.gain_type is GainType.LTCG
     assert only_total(report) == D("6500.00")  # 12.5 % = 6,250 + 250 cess
+
+
+def test_pre_2023_debt_unit_listed_status_decides_the_threshold(rules: TaxRuleSet) -> None:
+    # Correction r2 (Finance (No.2) Act 2024 s.3(b); ITA 2025 s.2(101)(b)(i)): a LISTED unit is long-term after
+    # 12 months, an unlisted one after 24.  The table only encodes the unlisted case; listed units abstain
+    # instead of silently taking the 24-month threshold.
+    acq, sale = date(2023, 3, 1), date(2024, 9, 2)  # held 18 months, transfer after 23-Jul-2024
+    unlisted = compute_tax([debt_mf(acq, sale, "50000")], rules, profile())
+    assert unlisted.classifications[0].rule_id == "MF-DEBT-PRE2023-ST/ITA1961"
+    assert unlisted.classifications[0].gain_type is GainType.STCG
+    with pytest.raises(RuleNotFound):  # listed (debt ETF): 18 months > 12 → LTCG by statute; not encoded → abstain
+        select_rule(rules, debt_mf(acq, sale, "50000", listed=True))
+    with pytest.raises(MissingData, match="listed"):
+        select_rule(rules, debt_mf(acq, sale, "50000", listed=None))
+
+
+def test_fy_2024_25_pre_23_jul_equity_ltcg_gets_1_25_lakh_exemption(rules: TaxRuleSet) -> None:
+    # Correction r2: Finance (No.2) Act 2024 s.31 — "the limit of one lakh twenty-five thousand rupees shall apply
+    # on aggregate of the long-term capital gains under sub-clauses (a) and (b)", (a) being pre-23-Jul-2024 transfers.
+    report = compute_tax([equity(date(2023, 1, 2), date(2024, 7, 1), "150000")], rules, profile())
+    c = report.classifications[0]
+    assert c.rule_id == "EQ-LTCG-OLD"
+    assert c.exemption_applied_inr == D("125000")  # was 100000 before r2
+    assert c.taxable_gain_inr == D("25000")
+    assert only_total(report) == D("2600.00")  # 10 % = 2,500 + 100 cess
+    mf = Disposal(
+        lot_id="M", instrument_class=MF, acquisition_date=date(2023, 1, 2), transfer_date=date(2024, 7, 1),
+        gain_inr=D("150000"), domestic_equity_share=D("0.80"), debt_share=D("0.10"),
+    )  # fmt: skip
+    assert compute_tax([mf], rules, profile()).classifications[0].exemption_applied_inr == D("125000")
 
 
 def test_mutual_fund_without_composition_raises_missing_data(rules: TaxRuleSet) -> None:
@@ -282,12 +314,27 @@ def test_out_of_scope_profiles_abstain(rules: TaxRuleSet) -> None:
 # --- verification status -----------------------------------------------------------------------
 
 
+def _gsec(sale: date) -> Disposal:
+    return Disposal(
+        lot_id="G", instrument_class="GSEC", acquisition_date=date(2025, 1, 2), transfer_date=sale, gain_inr=D("50000")
+    )
+
+
 def test_nv_rule_propagates_unverified_flag(rules: TaxRuleSet) -> None:
-    # Debt MF after 1-Apr-2026: the s.50AA → 2025-Act section mapping is NOT VERIFIED.
+    # G-sec gains: whether a Retail-Direct G-sec is a "listed" security is NOT VERIFIED (CA question 7).
+    report = compute_tax([_gsec(date(2026, 6, 1))], rules, profile())
+    assert report.classifications[0].rule_id == "GSEC-CG-LT/ITA2025"
+    assert report.unverified_assumption is True
+    assert "GSEC-CG-LT/ITA2025" in report.unverified_rule_ids
+    assert only_total(report) == D("6500.00")  # 12.5 % = 6,250 + 250 cess
+
+
+def test_specified_mf_under_2025_act_is_primary_verified(rules: TaxRuleSet) -> None:
+    # Track 6: ITA 2025 s.76(2)(a)/(5)(b) read in the primary text → no longer an unverified assumption.
     report = compute_tax([debt_mf(date(2023, 4, 1), date(2026, 6, 1), "50000")], rules, profile())
     assert report.classifications[0].rule_id == "MF-DEBT-SMF/ITA2025"
-    assert report.unverified_assumption is True
-    assert "MF-DEBT-SMF/ITA2025" in report.unverified_rule_ids
+    assert report.classifications[0].section == "76"
+    assert report.unverified_assumption is False
     assert only_total(report) == D("15600.00")
 
 

@@ -27,10 +27,11 @@
    | 112A (equity LTCG) | 198 | `VERIFIED-PRIMARY` (same) |
    | 115BAC (new regime) | 202 | `VERIFIED-PRIMARY` (FB2026 memo) |
    | 10(15)/47(viic) SGB redemption exemption | 70(1)(x) | `VERIFIED-PRIMARY` (FB2026 memo) |
-   | 87A (rebate) | 156 | `VERIFIED-SECONDARY` (several mapping tables). Note that the FB2026 memo also uses "section 156" in an unrelated demand-notice context, so CA confirmation is needed. |
-   | 50AA (specified MF, MLD, unlisted bonds) | 76 | `NOT VERIFIED` (secondary sources only; taxtmi ready reckoner) |
-   | 194A (TDS on interest) | 393(1) Table Sl. 5 | `VERIFIED-SECONDARY` (the FB2026 memo cites s.393(4) for TDS exemptions; the threshold table itself was not read in primary) |
-   | 194K (TDS on MF income) | 393(1) | `NOT VERIFIED` (exact Table serial number) |
+   | 87A (rebate) | 156 | `VERIFIED-PRIMARY` (Track 6: ITA 2025 s.156 "Rebate of income-tax in case of certain individuals"; s.198(7) refers to "the rebate under section 156") |
+   | 50AA (specified MF, MLD, unlisted bonds) | 76 | `VERIFIED-PRIMARY` (Track 6: ITA 2025 s.76(2)(a)-(b), s.76(5)(b)) |
+   | 194A (TDS on interest) | 393(1) Table Sl. 5(ii)/(iii) | `VERIFIED-PRIMARY` (Track 6: s.393(1) Table read; rate from Finance Act 2026 Part II) |
+   | 194K (TDS on MF income) | 393(1) Table Sl. 4(i) | `VERIFIED-PRIMARY` (Track 6) |
+   | 193 (TDS on interest on securities) | 393(1) Table Sl. 5(i) | `VERIFIED-PRIMARY` (Track 6; G-sec interest exempt via s.393(4) Table Sl. 6(a)(iii)) |
 
 3. **Budget 2026-27 (Finance Act 2026; Presidential assent 30-Mar-2026, `VERIFIED-SECONDARY`)** made no change to slab rates or to capital gains rates. It changed four investment-relevant items, all from 1-Apr-2026 (`VERIFIED-PRIMARY`, FB2026 memo):
    - STT on F&O increased.
@@ -515,6 +516,31 @@ Conventions:
 ---
 
 ## 9. Open questions requiring Chartered Accountant review
+
+> **Track 6 update (2026-10-15): answers from primary sources.** The statute texts were read: the Income-tax Act 2025
+> as amended by the Finance Act 2026 (CBDT consolidated PDF), the Finance Act 2026, the Finance Act 2025, the Finance
+> (No. 2) Act 2024 and the Income-tax Act 1961 (India Code). URLs, SHA-256 and quoted clauses:
+> `docs/finance/ca-review-packet.md` sections 1-2. Each answer below still needs CA confirmation.
+>
+> | Q | Status | Answer from the statute text |
+> |---|---|---|
+> | 1 | OPEN | No provision names T-bills. s.2(112) "zero coupon bond" is limited to bonds of infrastructure companies/funds, PSUs and scheduled banks, so it excludes T-bills; s.2(59) "interest payable in any manner" may cover the discount but does not say so. SLAB either way. |
+> | 2 | RESOLVED | s.50AA → **ITA 2025 s.76**; s.76(5)(b) carries the >65 % debt / ≥65 % FoF definition with the annual-average test. |
+> | 3 | RESOLVED | Listed units, including non-equity ETFs: **12 months** (Finance (No. 2) Act 2024 s.3(b) omitted "(other than a unit)"; ITA 2025 s.2(101)(b)(i)). Unlisted FoF units: **24 months**. The app abstains for listed non-equity ETFs (no 12-month rows yet). |
+> | 4 | PARTLY | The tests are statutory annual averages (s.76(5)(b)(i); s.198(8)(I)); classifying a given scheme is a data question. Interim handling before the year's average is known is still open. |
+> | 5 | PARTLY | s.156 confirmed. No rebate against tax on s.196/197/198 gains (s.156(3); s.198(7)) or, for FY2025-26, on s.111A/112/112A gains (87A second proviso per Finance Act 2025 s.20; 1961 Act s.112A(6)). The ₹12 lakh ceiling is on "total income", which reads as including those gains: CA to confirm. |
+> | 6 | RESOLVED | Unlisted pre-1-Apr-2023 debt units: 24 months, 12.5 %, no indexation from 23-Jul-2024 (Finance (No. 2) Act 2024 s.3(b), s.30; ITA 2025 s.2(101)(a), s.197). Listed units (debt ETFs) take 12 months; the app now abstains for them. |
+> | 7 | PARTLY | TDS: none on Central/State Government security interest (s.393(4) Table Sl. 6(a)(iii)), except the Savings (Taxable) Bonds and FRSB 2020 (Taxable). Whether a Retail-Direct G-sec is "listed" remains OPEN; if not, s.76(2)(b) ("an unlisted bond") may apply. |
+> | 8 | PARTLY | No exemption for secondary buyers (s.70(1)(x) as substituted by Finance Act 2026 s.43: "held by an individual from the date of original issue till maturity"). Listed status (12 vs 24 months) and cost basis OPEN. |
+> | 9 | RESOLVED | Finance Act 2026 s.44(b) substitutes s.93(2) ("no deduction shall be allowed"), in force 1-Apr-2026 (s.1(2)(a)); the 2025 Act applies only from TY2026-27. |
+> | 10 | PARTLY | The enacted Finance Act 2026 matches the memorandum for every rule in the table (SGB s.43, s.93(2) s.44, buyback s.42, slabs, surcharge, cess). No full clause-by-clause comparison was done. |
+> | 11 | RESOLVED | s.536(1) repeals the 1961 Act; s.536(2)(c) keeps it for tax years beginning before 1-Apr-2026; s.536(2)(n) carries capital losses forward "in accordance with the manner provided in the repealed Income-tax Act". |
+> | 12 | OPEN | s.198(8)(ii) counts investment "in the equity shares of domestic companies listed on a recognised stock exchange"; it is silent on hedges. |
+> | 13 | OPEN | Income-tax Rules 2026 not read. |
+>
+> Track 6 also found and corrected one value: the FY2024-25 equity LTCG exemption for transfers before 23-Jul-2024 is
+> ₹1,25,000, not ₹1,00,000 (Finance (No. 2) Act 2024 s.31: "the limit of one lakh twenty-five thousand rupees shall
+> apply on aggregate of the long-term capital gains under sub-clauses (a) and (b)").
 
 1. **T-bill discount (TBILL-01):** is it taxed as capital gains (STCG at slab), as interest/income from other sources, or under deep-discount accrual? The rate is SLAB in all cases. Head of income matters for loss set-off, ITR schedule and FY-spanning bills.
 2. **Section 50AA → 2025 Act section number** and confirmation that the >65% debt "specified mutual fund" definition was carried forward verbatim.

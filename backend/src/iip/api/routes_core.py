@@ -235,6 +235,7 @@ def router() -> APIRouter:  # noqa: PLR0915 - route table
                          "compliance": rules.version, "discovery": discovery.SERVICE_VERSION},
             "tax": None if tr is None else {
                 "snapshot_date": tr.snapshot_date.isoformat(), "coverage_to": tr.coverage_to.isoformat(),
+                "table_version": tr.table_version,
                 "rules": [{"rule_id": x.rule_id, "instrument_class": x.instrument_class,
                            "effective_from": x.effective_from.isoformat(),
                            "effective_to": x.effective_to.isoformat() if x.effective_to else None,

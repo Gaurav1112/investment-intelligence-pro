@@ -20,15 +20,9 @@ from iip.rules.loader import (
     parse_tax_rules,
 )
 
-# Rules that Agent B's research marks NOT VERIFIED (wholly or in part). They must stay NV.
+# Rules still NOT VERIFIED after Track 6 (primary-text verification, 2026-10-15). They must stay NV until a CA
+# signs off or a primary text is read and cited (see india.yaml header and docs/finance/ca-review-packet.md).
 KNOWN_NV = {
-    "MF-DEBT-SMF/ITA2025",
-    "MF-OTHER-ST/ITA1961",
-    "MF-OTHER-ST/ITA2025",
-    "MF-OTHER-LT/ITA1961",
-    "MF-OTHER-LT/ITA2025",
-    "BOND-L-LT-OLD",
-    "BOND-UL/ITA2025",
     "GSEC-CG-ST/ITA1961",
     "GSEC-CG-ST/ITA2025",
     "GSEC-CG-LT/ITA1961",
@@ -37,12 +31,31 @@ KNOWN_NV = {
     "TBILL-01/ITA2025",
     "SGB-02-ST",
     "SGB-02-LT",
+}
+
+# NV rules upgraded to P in Track 6. Each must cite the primary text it was verified against.
+UPGRADED_FROM_NV = {
+    "MF-DEBT-SMF/ITA2025",
+    "MF-OTHER-ST/ITA1961",
+    "MF-OTHER-ST/ITA2025",
+    "MF-OTHER-LT/ITA1961",
+    "MF-OTHER-LT/ITA2025",
+    "BOND-L-LT-OLD",
+    "BOND-UL/ITA2025",
     "REBATE-01/FY2025-26",
     "REBATE-01/TY2026-27",
     "TDS-SEC-01/ITA2025",
     "TDS-MF-01/ITA2025",
     "DIV-INTEXP-01",
 }
+
+PRIMARY_HOSTS = (
+    "https://www.incometaxindia.gov.in/",
+    "https://egazette.gov.in/",
+    "https://thc.nic.in/",
+    "https://www.indiacode.nic.in/",
+    "https://www.indiabudget.gov.in/",
+)
 
 
 def raw_tax() -> dict[str, Any]:
@@ -92,7 +105,46 @@ def test_nv_rules_stay_nv() -> None:
     missing = KNOWN_NV - status.keys()
     assert not missing, missing
     upgraded = {rid for rid in KNOWN_NV if status[rid] is not Verification.NV}
-    assert not upgraded, f"NV rules upgraded without CA sign-off: {upgraded}"
+    assert not upgraded, f"NV rules upgraded without CA sign-off or a primary citation: {upgraded}"
+    unexpected_nv = {rid for rid, st in status.items() if st is Verification.NV} - KNOWN_NV
+    assert not unexpected_nv, f"new NV rules must be listed here: {unexpected_nv}"
+
+
+def test_rules_upgraded_from_nv_cite_a_primary_text() -> None:
+    by_id = {item["rule_id"]: item for item in _all_items(raw_tax())}
+    for rid in UPGRADED_FROM_NV:
+        item = by_id[rid]
+        assert item["verification_status"] == "P", rid
+        assert str(item["source_url"]).startswith(PRIMARY_HOSTS), rid
+        notes = str(item.get("notes", ""))
+        assert "PRIMARY [" in notes, f"{rid}: notes must name the primary text read"
+        assert '"' in notes, f"{rid}: notes must quote the statute"
+        assert " s." in notes, f"{rid}: notes must give the section/clause"
+
+
+def test_table_version_is_recorded() -> None:
+    rs = load_tax_rules()
+    assert rs.table_version.startswith("india-tax@")
+    data = raw_tax()
+    del data["table_version"]
+    with pytest.raises(RuleTableError, match="table_version"):
+        parse_tax_rules(data)
+
+
+def test_rebate_exclusions_cover_every_special_rate_section() -> None:
+    # Correction r2: s.112A(6) (1961) and s.198(7) (2025) bar the rebate against equity LTCG tax too, and
+    # s.87A 2nd proviso / s.156(3) cap it at tax at slab rates — so EVERY special-rate section is excluded.
+    rs = load_tax_rules()
+    for reb in rs.rebates:
+        special = {
+            r.section
+            for r in rs.rules
+            if r.act is reb.act and r.rate_kind is RateKind.SPECIAL and r.section is not None
+        }
+        assert special <= set(reb.excluded_sections), (reb.rule_id, special - set(reb.excluded_sections))
+    by_id = {r.rule_id: r for r in rs.rebates}
+    assert by_id["REBATE-01/FY2025-26"].excluded_sections == ("111A", "112", "112A")
+    assert by_id["REBATE-01/TY2026-27"].excluded_sections == ("196", "197", "198")
 
 
 def test_every_research_rule_id_is_present() -> None:

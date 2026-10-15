@@ -3,7 +3,25 @@
 #
 # Conventions
 # * verification_status: P = VERIFIED-PRIMARY, S = VERIFIED-SECONDARY, NV = NOT VERIFIED.
-#   A row with mixed status in the research takes the WEAKEST status.  NV rows stay NV until a CA signs off.
+#   A row with mixed status in the research takes the WEAKEST status.  NV rows stay NV until a CA signs off,
+#   OR until the statute itself is read: a row may be upgraded to P only with a citation (URL + section/clause +
+#   a short quoted phrase) to a primary text that was actually read (Track 6, 2026-10-15; see
+#   docs/finance/ca-review-packet.md §1 for the source list and the SHA-256 of every document read).
+# * Primary texts read in Track 6 (short names used in notes below):
+#   [ITA25]  Income-tax Act 2025 as amended by Finance Act 2026, CBDT consolidated text,
+#            https://www.incometaxindia.gov.in/documents/d/guest/income_tax_act_2025_as_amended_by_fa_act_2026-pdf
+#            (direct fetch HTTP 403; read via web.archive.org snapshot 20260612085646 of that exact URL).
+#   [FA26]   Finance Act 2026 (No. 4 of 2026), Gazette CG-DL-E-31032026-271439,
+#            https://www.incometaxindia.gov.in/documents/d/guest/finance-act-2026-pdf-1 (via snapshot 20261006014925).
+#   [FA24]   Finance (No. 2) Act 2024 (No. 15 of 2024), https://egazette.gov.in/WriteReadData/2024/256436.pdf
+#   [FA25]   Finance Act 2025 (No. 7 of 2025), Gazette CG-DL-E-29032025-262125, Gazette copy on a government
+#            host: https://thc.nic.in/Central%20Governmental%20Acts/Finance%20Act,%202025.pdf
+#   [ITA61]  Income-tax Act 1961, India Code, https://www.indiacode.nic.in/bitstream/123456789/2435/1/a1961-43.pdf
+#            (via snapshot 20260111174633; this consolidation predates the 2024-25 amendments, so it is used only
+#            for text those amendments did not touch).
+#   [MEMO24] Finance (No.2) Bill 2024 memorandum, https://www.indiabudget.gov.in/budget2024-25/doc/memo.pdf
+# * Changing a value: edit the row (or close it with effective_to and add a new row), bump table_version,
+#   and add a regression test in tests/unit/test_tax.py or tests/unit/test_rules_loader.py.
 # * Rows are split per Act: income on/before 2026-03-31 → ITA1961, from 2026-04-01 → ITA2025.  Split rows
 #   carry the research rule_id plus "/ITA1961" or "/ITA2025" (tables: "/FY2025-26", "/TY2026-27").
 # * effective_from/effective_to are TRANSFER (income) dates, inclusive.  effective_to: null = in force at snapshot.
@@ -15,6 +33,8 @@
 # * Decimals are quoted strings (the loader rejects floats).
 
 schema_version: 1
+# Bumped on every change to a value, condition or status (not on note-only edits).  r2 = Track 6 verification.
+table_version: india-tax@2026-10-15.r2
 jurisdiction: IN
 snapshot_date: 2026-10-15
 # Last day for which the research states rates (end of Tax Year 2026-27).  Later transfers abstain.
@@ -25,20 +45,22 @@ acts:
     act: ITA1961
     effective_from: null
     effective_to: 2026-03-31
-    source_url: https://www.incometaxindia.gov.in/documents/d/guest/press-release-income-tax-act-2025-comes-into-force-from-01-april-2026-pdf
-    verification_status: S
+    source_url: https://www.incometaxindia.gov.in/documents/d/guest/income_tax_act_2025_as_amended_by_fa_act_2026-pdf
+    verification_status: P
     notes: >-
-      Income up to 31-Mar-2026 is taxed under the Income-tax Act 1961. Start date not recorded in the research
-      (precedes every rule in this file). Implied by LAW-ITA25.
+      PRIMARY [ITA25] s.536(1): "The Income-tax Act, 1961 (43 of 1961) is hereby repealed."; s.536(2)(c) keeps the
+      repealed Act for "any tax year beginning before the 1st April, 2026". Income up to 31-Mar-2026 therefore stays
+      under the 1961 Act. Start date not recorded (precedes every rule in this file).
   - rule_id: LAW-ITA25
     act: ITA2025
     effective_from: 2026-04-01
     effective_to: null
-    source_url: https://www.incometaxindia.gov.in/documents/d/guest/press-release-income-tax-act-2025-comes-into-force-from-01-april-2026-pdf
-    verification_status: S
+    source_url: https://www.incometaxindia.gov.in/documents/d/guest/income_tax_act_2025_as_amended_by_fa_act_2026-pdf
+    verification_status: P
     notes: >-
-      Income-tax Act 2025 in force from 1-Apr-2026 (commencement VERIFIED-SECONDARY, CBDT press release HTTP 403;
-      FB2026 memo references to ss.196/197/198/202 VERIFIED-PRIMARY). "Tax year" replaces previous/assessment year.
+      PRIMARY [ITA25] s.1(3): "Save as otherwise provided in this Act, it shall come into force on the 1st April,
+      2026." Corroborated by the Gazette text as enacted (Act 30 of 2025, assent 21-Aug-2025, Gazette
+      CG-DL-E-22082025-265620). "Tax year" replaces previous/assessment year.
 
 rules:
   # ---------------- Listed equity shares (STT paid) -------------------------------------------------
@@ -53,9 +75,11 @@ rules:
     rate: "0.15"
     effective_from: 2024-04-01
     effective_to: 2024-07-22
-    source_url: https://www.indiabudget.gov.in/budget2024-25/doc/memo.pdf
+    source_url: https://egazette.gov.in/WriteReadData/2024/256436.pdf
     verification_status: P
-    notes: Research effective_from "(pre-2024)"; narrowed to 2024-04-01.
+    notes: >-
+      PRIMARY [FA24] s.29 (s.111A(1) as substituted): "at the rate of fifteen per cent. for any transfer which takes
+      place before the 23rd day of July, 2024". Research effective_from "(pre-2024)"; narrowed to 2024-04-01.
   - rule_id: EQ-STCG/ITA1961
     act: ITA1961
     section_1961: "111A"
@@ -67,8 +91,11 @@ rules:
     rate: "0.20"
     effective_from: 2024-07-23
     effective_to: 2026-03-31
-    source_url: https://www.indiabudget.gov.in/budget2024-25/doc/memo.pdf
+    source_url: https://egazette.gov.in/WriteReadData/2024/256436.pdf
     verification_status: P
+    notes: >-
+      PRIMARY [FA24] s.29 (s.111A(1)): "at the rate of twenty per cent. for any transfer which takes place on or
+      after the 23rd day of July, 2024".
   - rule_id: EQ-STCG/ITA2025
     act: ITA2025
     section_1961: "111A"
@@ -80,8 +107,12 @@ rules:
     rate: "0.20"
     effective_from: 2026-04-01
     effective_to: null
-    source_url: https://www.indiabudget.gov.in/doc/memo.pdf
+    source_url: https://www.incometaxindia.gov.in/documents/d/guest/income_tax_act_2025_as_amended_by_fa_act_2026-pdf
     verification_status: P
+    notes: >-
+      PRIMARY [ITA25] s.196(1)(i): "income-tax calculated on such short-term capital gains at the rate of 20%"
+      (equity share / unit of an equity oriented fund, sale chargeable to STT). Short-term = held "not more than ...
+      twelve months" for a listed security or equity-oriented-fund unit, s.2(101)(b).
   - rule_id: EQ-LTCG-OLD
     act: ITA1961
     section_1961: "112A"
@@ -91,15 +122,20 @@ rules:
     holding_threshold_months: 12
     gain_type: LTCG
     rate: "0.10"
-    annual_exemption_inr: "100000"
+    annual_exemption_inr: "125000"
     exemption_scope: EQUITY_LTCG_ANNUAL
     effective_from: 2024-04-01
     effective_to: 2024-07-22
-    source_url: https://www.indiabudget.gov.in/budget2024-25/doc/memo.pdf
+    source_url: https://egazette.gov.in/WriteReadData/2024/256436.pdf
     verification_status: P
     notes: >-
-      Research effective_from "(pre-2024)"; narrowed to 2024-04-01. Lots acquired on/before 31-Jan-2018 are
-      excluded (s.112A grandfathering not specified in the research → abstain).
+      CORRECTED in table r2 (was 100000). PRIMARY [FA24] s.31 (s.112A(2)(i) as substituted): tax on LTCG "exceeding
+      one lakh twenty-five thousand rupees" at "(a) ... ten per cent. for any transfer which takes place before the
+      23rd day of July, 2024", and "the limit of one lakh twenty-five thousand rupees shall apply on aggregate of
+      the long-term capital gains under sub-clauses (a) and (b)". So FY2024-25 transfers before 23-Jul-2024 share
+      the same Rs 1.25 lakh pool. Research effective_from "(pre-2024)"; narrowed to 2024-04-01. Lots acquired
+      on/before 31-Jan-2018 abstain (grandfathering not modelled). A FY2024-25 mix of 10 % and 12.5 % lots still
+      abstains: how the pool is allocated between the two rates is not in the statute text (CA question).
   - rule_id: EQ-LTCG/ITA1961
     act: ITA1961
     section_1961: "112A"
@@ -113,9 +149,12 @@ rules:
     exemption_scope: EQUITY_LTCG_ANNUAL
     effective_from: 2024-07-23
     effective_to: 2026-03-31
-    source_url: https://www.indiabudget.gov.in/budget2024-25/doc/memo.pdf
+    source_url: https://egazette.gov.in/WriteReadData/2024/256436.pdf
     verification_status: P
-    notes: ₹1,25,000/yr aggregate exemption shared by listed equity, equity-oriented MF and arbitrage gains.
+    notes: >-
+      PRIMARY [FA24] s.31 (s.112A(2)(i)(b)): "at the rate of twelve and one-half per cent. for any transfer which
+      takes place on or after the 23rd day of July, 2024", on gains "exceeding one lakh twenty-five thousand
+      rupees". Rs 1,25,000/yr aggregate exemption shared by listed equity, equity-oriented MF and arbitrage gains.
   - rule_id: EQ-LTCG/ITA2025
     act: ITA2025
     section_1961: "112A"
@@ -129,8 +168,11 @@ rules:
     exemption_scope: EQUITY_LTCG_ANNUAL
     effective_from: 2026-04-01
     effective_to: null
-    source_url: https://www.indiabudget.gov.in/doc/memo.pdf
+    source_url: https://www.incometaxindia.gov.in/documents/d/guest/income_tax_act_2025_as_amended_by_fa_act_2026-pdf
     verification_status: P
+    notes: >-
+      PRIMARY [ITA25] s.198(2)(a): "income-tax calculated on such long-term capital gains exceeding ₹ 125000 at the
+      rate of 12.5%" (STT conditions in s.198(1)(c)).
 
   # ---------------- Equity-oriented mutual funds (incl. arbitrage, equity ETF) ----------------------
   # Research §8 merges these into EQ-*; §2.9/§2.10 cards name them MF-EQ-*.  Same rates and pool.
@@ -146,9 +188,11 @@ rules:
     rate: "0.15"
     effective_from: 2024-04-01
     effective_to: 2024-07-22
-    source_url: https://www.indiabudget.gov.in/budget2024-25/doc/memo.pdf
+    source_url: https://egazette.gov.in/WriteReadData/2024/256436.pdf
     verification_status: P
-    notes: Research effective_from "(pre-2024)"; narrowed to 2024-04-01.
+    notes: >-
+      PRIMARY [FA24] s.29 (s.111A(1)): 15 % "for any transfer which takes place before the 23rd day of July, 2024".
+      Research effective_from "(pre-2024)"; narrowed to 2024-04-01.
   - rule_id: MF-EQ-STCG/ITA1961
     act: ITA1961
     section_1961: "111A"
@@ -160,8 +204,11 @@ rules:
     rate: "0.20"
     effective_from: 2024-07-23
     effective_to: 2026-03-31
-    source_url: https://www.indiabudget.gov.in/budget2024-25/doc/memo.pdf
+    source_url: https://egazette.gov.in/WriteReadData/2024/256436.pdf
     verification_status: P
+    notes: >-
+      PRIMARY [FA24] s.29 (s.111A(1)): "twenty per cent. for any transfer which takes place on or after the 23rd day
+      of July, 2024".
   - rule_id: MF-EQ-STCG/ITA2025
     act: ITA2025
     section_1961: "111A"
@@ -173,9 +220,13 @@ rules:
     rate: "0.20"
     effective_from: 2026-04-01
     effective_to: null
-    source_url: https://www.indiabudget.gov.in/doc/memo.pdf
+    source_url: https://www.incometaxindia.gov.in/documents/d/guest/income_tax_act_2025_as_amended_by_fa_act_2026-pdf
     verification_status: P
-    notes: Whether hedged arbitrage positions count toward 65 % under the 2025 Act is CA question 12.
+    notes: >-
+      PRIMARY [ITA25] s.196(1)(i) 20 %; equity oriented fund per s.198(8)(ii): "a minimum of 65% of the total
+      proceeds of such fund is invested in the equity shares of domestic companies listed on a recognised stock
+      exchange", averaged per s.198(8)(I). NOT MODELLED: the fund-of-funds limb s.198(8)(i) (90 % in a listed equity
+      fund that itself holds 90 %); whether hedged arbitrage positions count toward 65 % is CA question 12.
   - rule_id: MF-EQ-LTCG-OLD
     act: ITA1961
     section_1961: "112A"
@@ -185,13 +236,16 @@ rules:
     holding_threshold_months: 12
     gain_type: LTCG
     rate: "0.10"
-    annual_exemption_inr: "100000"
+    annual_exemption_inr: "125000"
     exemption_scope: EQUITY_LTCG_ANNUAL
     effective_from: 2024-04-01
     effective_to: 2024-07-22
-    source_url: https://www.indiabudget.gov.in/budget2024-25/doc/memo.pdf
+    source_url: https://egazette.gov.in/WriteReadData/2024/256436.pdf
     verification_status: P
-    notes: Research effective_from "(pre-2024)"; narrowed to 2024-04-01. Pre-1-Feb-2018 lots abstain.
+    notes: >-
+      CORRECTED in table r2 (was 100000); same primary text as EQ-LTCG-OLD: [FA24] s.31, "the limit of one lakh
+      twenty-five thousand rupees shall apply on aggregate of the long-term capital gains under sub-clauses (a) and
+      (b)". Research effective_from "(pre-2024)"; narrowed to 2024-04-01. Pre-1-Feb-2018 lots abstain.
   - rule_id: MF-EQ-LTCG/ITA1961
     act: ITA1961
     section_1961: "112A"
@@ -205,8 +259,10 @@ rules:
     exemption_scope: EQUITY_LTCG_ANNUAL
     effective_from: 2024-07-23
     effective_to: 2026-03-31
-    source_url: https://www.indiabudget.gov.in/budget2024-25/doc/memo.pdf
+    source_url: https://egazette.gov.in/WriteReadData/2024/256436.pdf
     verification_status: P
+    notes: >-
+      PRIMARY [FA24] s.31 (s.112A(2)(i)(b)): 12.5 % on gains above Rs 1,25,000 for transfers on/after 23-Jul-2024.
   - rule_id: MF-EQ-LTCG/ITA2025
     act: ITA2025
     section_1961: "112A"
@@ -220,8 +276,11 @@ rules:
     exemption_scope: EQUITY_LTCG_ANNUAL
     effective_from: 2026-04-01
     effective_to: null
-    source_url: https://www.indiabudget.gov.in/doc/memo.pdf
+    source_url: https://www.incometaxindia.gov.in/documents/d/guest/income_tax_act_2025_as_amended_by_fa_act_2026-pdf
     verification_status: P
+    notes: >-
+      PRIMARY [ITA25] s.198(2)(a): "exceeding ₹ 125000 at the rate of 12.5%"; equity oriented fund per s.198(8) (see
+      MF-EQ-STCG/ITA2025).
 
   # ---------------- Specified mutual funds (s.50AA): deemed STCG at slab -----------------------------
   - rule_id: MF-SMF-DEF-OLD
@@ -237,7 +296,10 @@ rules:
     effective_to: 2025-03-31
     source_url: https://www.indiabudget.gov.in/budget2024-25/doc/memo.pdf
     verification_status: P
-    notes: Old definition (≤35 % in domestic equity shares), AY up to 2025-26 (FY ≤ 2024-25).
+    notes: >-
+      Old definition (<=35 % in domestic equity shares), AY up to 2025-26 (FY <= 2024-25). The replacing definition
+      applies "with effect from the 1st day of April, 2026" (= AY2026-27) per [FA24] s.21(b), which confirms the end
+      date.
   - rule_id: MF-DEBT-SMF/ITA1961
     act: ITA1961
     section_1961: "50AA"
@@ -249,11 +311,16 @@ rules:
     rate: SLAB
     effective_from: 2025-04-01
     effective_to: 2026-03-31
-    source_url: https://www.indiabudget.gov.in/budget2024-25/doc/memo.pdf
+    source_url: https://egazette.gov.in/WriteReadData/2024/256436.pdf
     verification_status: P
     notes: >-
-      Specified MF = >65 % debt & money market (or FoF ≥65 % in such funds), from FY2025-26. Overnight, liquid,
-      money market, all debt categories; conservative hybrid likely (CA question 4).
+      PRIMARY [FA24] s.21 (s.50AA as substituted): "is a unit of a Specified Mutual Fund acquired on or after the
+      1st day of April, 2023" -> deemed short-term; s.21(b) new Explanation (ii) w.e.f. 1-Apr-2026 (AY2026-27 =
+      FY2025-26): "invests more than sixty-five per cent. of its total proceeds in debt and money market
+      instruments", or a fund investing "sixty-five per cent. or more" in such funds, measured on "the annual
+      average of the daily closing figures". Overnight, liquid, money market and all debt categories; conservative
+      hybrid depends on its annual-average debt share (CA question 4). The fund-of-funds limb needs look-through
+      data the app does not have.
   - rule_id: MF-DEBT-SMF/ITA2025
     act: ITA2025
     section_1961: "50AA"
@@ -265,11 +332,15 @@ rules:
     rate: SLAB
     effective_from: 2026-04-01
     effective_to: null
-    source_url: https://www.indiabudget.gov.in/budget2024-25/doc/memo.pdf
-    verification_status: NV
+    source_url: https://www.incometaxindia.gov.in/documents/d/guest/income_tax_act_2025_as_amended_by_fa_act_2026-pdf
+    verification_status: P
     notes: >-
-      Definition and dates VERIFIED-PRIMARY; the s.50AA → 2025-Act s.76 mapping and verbatim carry-forward of the
-      >65 % definition are NOT VERIFIED (CA question 2).
+      PRIMARY [ITA25] s.76(1)-(2)(a): gains on "a unit of a Specified Mutual Fund acquired on or after the 1st
+      April, 2023" "shall be treated as short-term capital gains" "Irrespective of anything contained in section
+      2(101)"; s.76(5)(b): "invests more than 65% of its total proceeds in debt and money market instruments or a
+      fund which invests 65% or more of its total proceeds in units of such Mutual Fund", on "the annual average of
+      the daily closing figures". Resolves CA question 2: s.50AA -> s.76, definition carried forward. The
+      fund-of-funds limb needs look-through data the app does not have.
 
   # ---------------- Debt MF units acquired before 1-Apr-2023 ----------------------------------------
   - rule_id: MF-DEBT-PRE2023-ST/ITA1961
@@ -277,56 +348,75 @@ rules:
     section_1961: null
     section_2025: null
     instrument_class: MUTUAL_FUND
-    conditions: {acquisition_date_to: 2023-03-31, debt_share_above: "0.65"}
+    conditions: {acquisition_date_to: 2023-03-31, debt_share_above: "0.65", listed: false}
     holding_threshold_months: 24
     gain_type: STCG
     rate: SLAB
     effective_from: 2024-07-23
     effective_to: 2026-03-31
-    source_url: https://www.indiabudget.gov.in/budget2024-25/doc/memo.pdf
-    verification_status: S
-    notes: 24 months from 23-Jul-2024 (36 earlier — not modelled; earlier transfers abstain). CA question 6.
+    source_url: https://egazette.gov.in/WriteReadData/2024/256436.pdf
+    verification_status: P
+    notes: >-
+      PRIMARY [FA24] s.3(b)(i) (s.2(42A)): "for the words 'thirty-six months', the words 'twenty-four months' shall
+      be substituted" w.e.f. 23-Jul-2024; s.3(b)(ii)(A) omits "(other than a unit)" from the 12-month first proviso,
+      whose base text [ITA61] covers "a security (other than a unit) listed in a recognised stock exchange". So from
+      23-Jul-2024 an UNLISTED debt-fund unit is short-term up to 24 months, a LISTED one (debt ETF) up to 12.
+      CORRECTED in table r2: condition listed: false added; listed pre-2023 debt units now abstain instead of
+      wrongly using 24 months. Units acquired before 1-Apr-2023 are outside s.50AA ("acquired on or after the 1st
+      day of April, 2023"). 36 months earlier - not modelled; earlier transfers abstain.
   - rule_id: MF-DEBT-PRE2023-ST/ITA2025
     act: ITA2025
     section_1961: null
     section_2025: null
     instrument_class: MUTUAL_FUND
-    conditions: {acquisition_date_to: 2023-03-31, debt_share_above: "0.65"}
+    conditions: {acquisition_date_to: 2023-03-31, debt_share_above: "0.65", listed: false}
     holding_threshold_months: 24
     gain_type: STCG
     rate: SLAB
     effective_from: 2026-04-01
     effective_to: null
-    source_url: https://www.indiabudget.gov.in/budget2024-25/doc/memo.pdf
-    verification_status: S
+    source_url: https://www.incometaxindia.gov.in/documents/d/guest/income_tax_act_2025_as_amended_by_fa_act_2026-pdf
+    verification_status: P
+    notes: >-
+      PRIMARY [ITA25] s.2(101)(a): "held by an assessee for not more than twenty-four months"; the 12-month list in
+      s.2(101)(b) is a listed security, a UTI unit, an equity-oriented-fund unit or a zero-coupon bond. s.76(2)(a)
+      reaches only units "acquired on or after the 1st April, 2023". CORRECTED in table r2: listed: false (listed
+      units take 12 months; they abstain).
   - rule_id: MF-DEBT-PRE2023-LT/ITA1961
     act: ITA1961
     section_1961: "112"
     section_2025: "197"
     instrument_class: MUTUAL_FUND
-    conditions: {acquisition_date_to: 2023-03-31, debt_share_above: "0.65"}
+    conditions: {acquisition_date_to: 2023-03-31, debt_share_above: "0.65", listed: false}
     holding_threshold_months: 24
     gain_type: LTCG
     rate: "0.125"
     effective_from: 2024-07-23
     effective_to: 2026-03-31
-    source_url: https://www.indiabudget.gov.in/budget2024-25/doc/memo.pdf
-    verification_status: S
-    notes: No indexation.
+    source_url: https://egazette.gov.in/WriteReadData/2024/256436.pdf
+    verification_status: P
+    notes: >-
+      PRIMARY [FA24] s.30 (s.112(1)(a)(ii)(B)): "at the rate of twelve and one-half per cent. for any transfer which
+      takes place on or after the 23rd day of July, 2024"; no indexation ([MEMO24]: "indexation available under
+      second proviso to section 48 is proposed to be removed"). Holding period as MF-DEBT-PRE2023-ST/ITA1961;
+      listed: false added in r2.
   - rule_id: MF-DEBT-PRE2023-LT/ITA2025
     act: ITA2025
     section_1961: "112"
     section_2025: "197"
     instrument_class: MUTUAL_FUND
-    conditions: {acquisition_date_to: 2023-03-31, debt_share_above: "0.65"}
+    conditions: {acquisition_date_to: 2023-03-31, debt_share_above: "0.65", listed: false}
     holding_threshold_months: 24
     gain_type: LTCG
     rate: "0.125"
     effective_from: 2026-04-01
     effective_to: null
-    source_url: https://www.indiabudget.gov.in/doc/memo.pdf
-    verification_status: S
-    notes: No indexation.
+    source_url: https://www.incometaxindia.gov.in/documents/d/guest/income_tax_act_2025_as_amended_by_fa_act_2026-pdf
+    verification_status: P
+    notes: >-
+      PRIMARY [ITA25] s.197(1)(b): "income-tax calculated on such long-term capital gains at the rate of 12.5%";
+      indexation survives only for land/building acquired before 23-Jul-2024 (s.197(3)). Holding period s.2(101)(a)
+      24 months; listed: false added in r2.
 
   # ---------------- Other (non-equity-oriented, non-specified) MFs ----------------------------------
   # Gold FoF, international FoF, balanced/multi-asset with ≤65 % debt.  Only UNLISTED units are covered:
@@ -342,9 +432,15 @@ rules:
     rate: SLAB
     effective_from: 2025-04-01
     effective_to: 2026-03-31
-    source_url: https://www.indiabudget.gov.in/budget2024-25/doc/memo.pdf
-    verification_status: NV
-    notes: Threshold (12 vs 24 months) and per-hybrid classification NOT VERIFIED (CA questions 3, 4).
+    source_url: https://egazette.gov.in/WriteReadData/2024/256436.pdf
+    verification_status: P
+    notes: >-
+      PRIMARY [FA24] s.3(b) (s.2(42A)): 24 months for assets outside the 12-month proviso; [MEMO24]: "For all listed
+      securities, the holding period is proposed to be 12 months and for all other assets, it shall be 24 months".
+      An unlisted non-equity, non-specified fund unit (e.g. gold or international FoF) is therefore short-term up to
+      24 months. Classification follows s.50AA Explanation (ii) ([FA24] s.21(b)): not specified when debt <= 65 %
+      (annual average of daily closing figures). Resolves CA question 3 for UNLISTED units; LISTED non-equity ETF
+      units take 12 months under the same text but have no rule here (they abstain).
   - rule_id: MF-OTHER-ST/ITA2025
     act: ITA2025
     section_1961: null
@@ -356,9 +452,14 @@ rules:
     rate: SLAB
     effective_from: 2026-04-01
     effective_to: null
-    source_url: https://www.indiabudget.gov.in/budget2024-25/doc/memo.pdf
-    verification_status: NV
-    notes: Threshold (12 vs 24 months) and per-hybrid classification NOT VERIFIED (CA questions 3, 4).
+    source_url: https://www.incometaxindia.gov.in/documents/d/guest/income_tax_act_2025_as_amended_by_fa_act_2026-pdf
+    verification_status: P
+    notes: >-
+      PRIMARY [ITA25] s.2(101)(a): "not more than twenty-four months"; s.2(101)(b)(i)-(iv) gives 12 months only to a
+      "security listed in a recognised stock exchange in India", a UTI unit, a "unit of an equity-oriented fund" or
+      a "zero-coupon bond". Specified-fund test s.76(5)(b) (>65 % debt). Resolves CA question 3 for UNLISTED units;
+      listed non-equity ETF units (12 months) abstain. Whether a particular hybrid crosses 65 % depends on the
+      scheme's annual average (CA question 4: data, not law).
   - rule_id: MF-OTHER-LT/ITA1961
     act: ITA1961
     section_1961: "112"
@@ -370,9 +471,11 @@ rules:
     rate: "0.125"
     effective_from: 2025-04-01
     effective_to: 2026-03-31
-    source_url: https://www.indiabudget.gov.in/budget2024-25/doc/memo.pdf
-    verification_status: NV
-    notes: 12.5 % rate VERIFIED-PRIMARY; threshold NOT VERIFIED.
+    source_url: https://egazette.gov.in/WriteReadData/2024/256436.pdf
+    verification_status: P
+    notes: >-
+      PRIMARY [FA24] s.30 (s.112(1)(a)(ii)(B)): 12.5 % "for any transfer which takes place on or after the 23rd day
+      of July, 2024"; holding period as MF-OTHER-ST/ITA1961.
   - rule_id: MF-OTHER-LT/ITA2025
     act: ITA2025
     section_1961: "112"
@@ -384,9 +487,10 @@ rules:
     rate: "0.125"
     effective_from: 2026-04-01
     effective_to: null
-    source_url: https://www.indiabudget.gov.in/doc/memo.pdf
-    verification_status: NV
-    notes: 12.5 % rate VERIFIED-PRIMARY; threshold NOT VERIFIED.
+    source_url: https://www.incometaxindia.gov.in/documents/d/guest/income_tax_act_2025_as_amended_by_fa_act_2026-pdf
+    verification_status: P
+    notes: >-
+      PRIMARY [ITA25] s.197(1)(b): "at the rate of 12.5%"; holding period as MF-OTHER-ST/ITA2025.
 
   # ---------------- Bonds / debentures --------------------------------------------------------------
   - rule_id: BOND-L-ST/ITA1961
@@ -402,7 +506,10 @@ rules:
     effective_to: 2026-03-31
     source_url: https://www.indiabudget.gov.in/budget2024-25/doc/memo.pdf
     verification_status: P
-    notes: Listed bonds/debentures; research also lists listed G-sec/SDL and SGB sold on exchange (see GSEC-CG).
+    notes: >-
+      Listed bonds/debentures. PRIMARY [MEMO24]: "For all listed securities, the holding period is proposed to be 12
+      months"; [ITA61] s.2(42A) first proviso (12 months for a listed security). Research also lists listed
+      G-sec/SDL and SGB sold on exchange (see GSEC-CG).
   - rule_id: BOND-L-ST/ITA2025
     act: ITA2025
     section_1961: null
@@ -414,8 +521,11 @@ rules:
     rate: SLAB
     effective_from: 2026-04-01
     effective_to: null
-    source_url: https://www.indiabudget.gov.in/budget2024-25/doc/memo.pdf
+    source_url: https://www.incometaxindia.gov.in/documents/d/guest/income_tax_act_2025_as_amended_by_fa_act_2026-pdf
     verification_status: P
+    notes: >-
+      PRIMARY [ITA25] s.2(101)(b)(i): twelve months for a "security listed in a recognised stock exchange in India";
+      slab via s.202(1).
   - rule_id: BOND-L-LT/ITA1961
     act: ITA1961
     section_1961: "112"
@@ -427,9 +537,11 @@ rules:
     rate: "0.125"
     effective_from: 2024-07-23
     effective_to: 2026-03-31
-    source_url: https://www.indiabudget.gov.in/budget2024-25/doc/memo.pdf
+    source_url: https://egazette.gov.in/WriteReadData/2024/256436.pdf
     verification_status: P
-    notes: No indexation.
+    notes: >-
+      PRIMARY [FA24] s.30 (s.112(1)(a)(ii)(B)): "twelve and one-half per cent. for any transfer which takes place on
+      or after the 23rd day of July, 2024". No indexation.
   - rule_id: BOND-L-LT/ITA2025
     act: ITA2025
     section_1961: "112"
@@ -441,9 +553,10 @@ rules:
     rate: "0.125"
     effective_from: 2026-04-01
     effective_to: null
-    source_url: https://www.indiabudget.gov.in/doc/memo.pdf
+    source_url: https://www.incometaxindia.gov.in/documents/d/guest/income_tax_act_2025_as_amended_by_fa_act_2026-pdf
     verification_status: P
-    notes: No indexation.
+    notes: >-
+      PRIMARY [ITA25] s.197(1)(b): "at the rate of 12.5%". No indexation.
   - rule_id: BOND-L-LT-OLD
     act: ITA1961
     section_1961: "112"
@@ -455,11 +568,16 @@ rules:
     rate: "0.10"
     effective_from: 2024-04-01
     effective_to: 2024-07-22
-    source_url: https://www.indiabudget.gov.in/budget2024-25/doc/memo.pdf
-    verification_status: NV
+    source_url: https://egazette.gov.in/WriteReadData/2024/256436.pdf
+    verification_status: P
     notes: >-
-      Old 10 % without indexation (s.112 proviso) not in the memo excerpt read; memo says "20 % without
-      indexation" for bonds generally. Research effective_from "(pre-2024)"; narrowed to 2024-04-01.
+      PRIMARY [FA24] s.30, proviso to s.112(1) as substituted: "where the tax payable in respect of any income
+      arising from the transfer of a long-term capital asset which takes place before the 23rd day of July, 2024,
+      being listed securities (other than a unit) or zero coupon bond, exceeds ten per cent. of the amount of
+      capital gains before giving effect to the provisions of the second proviso to section 48, then, such excess
+      shall be ignored". With [MEMO24] ("For bonds and debentures, rate for taxation of long-term capital gains was
+      20% without indexation") the effective rate on a listed bond is 10 % without indexation, which this row
+      encodes. Research effective_from "(pre-2024)"; narrowed to 2024-04-01.
   - rule_id: BOND-UL/ITA1961
     act: ITA1961
     section_1961: "50AA"
@@ -471,9 +589,11 @@ rules:
     rate: SLAB
     effective_from: 2024-07-23
     effective_to: 2026-03-31
-    source_url: https://www.indiabudget.gov.in/budget2024-25/doc/memo.pdf
+    source_url: https://egazette.gov.in/WriteReadData/2024/256436.pdf
     verification_status: P
-    notes: Unlisted bonds/debentures; transfer, redemption or maturity → deemed STCG at slab.
+    notes: >-
+      PRIMARY [FA24] s.21 (s.50AA): "is an unlisted bond or an unlisted debenture which is transferred or redeemed
+      or matures on or after the 23rd day of July, 2024" -> deemed short-term at slab.
   - rule_id: BOND-UL/ITA2025
     act: ITA2025
     section_1961: "50AA"
@@ -485,9 +605,12 @@ rules:
     rate: SLAB
     effective_from: 2026-04-01
     effective_to: null
-    source_url: https://www.indiabudget.gov.in/budget2024-25/doc/memo.pdf
-    verification_status: NV
-    notes: s.50AA → 2025-Act s.76 mapping NOT VERIFIED (secondary sources only).
+    source_url: https://www.incometaxindia.gov.in/documents/d/guest/income_tax_act_2025_as_amended_by_fa_act_2026-pdf
+    verification_status: P
+    notes: >-
+      PRIMARY [ITA25] s.76(2)(b): "an unlisted bond or an unlisted debenture which is transferred or redeemed or
+      matures on or after the 23rd July, 2024"; s.76(1): "shall be treated as short-term capital gains". Resolves
+      the s.50AA -> s.76 mapping.
 
   # ---------------- Government securities -----------------------------------------------------------
   - rule_id: GSEC-CG-ST/ITA1961
@@ -503,7 +626,12 @@ rules:
     effective_to: 2026-03-31
     source_url: https://www.indiabudget.gov.in/budget2024-25/doc/memo.pdf
     verification_status: NV
-    notes: Follows BOND-L-ST; whether RBI Retail Direct G-secs are "listed" is NOT VERIFIED (CA question 7).
+    notes: >-
+      NOT VERIFIED. Statute read: [ITA61] s.2(42A) first proviso and [MEMO24] give 12 months to a security "listed
+      in a recognised stock exchange in India". Whether a G-sec held in an RBI Retail Direct Gilt account (or bought
+      on NDS-OM) is such a listed security is a FACT the statute does not settle and no primary RBI/SEBI text was
+      read (CA question 7). If not listed: 24 months, and it may even be an "unlisted bond" under s.50AA (deemed
+      STCG at slab) - CA must confirm.
   - rule_id: GSEC-CG-ST/ITA2025
     act: ITA2025
     section_1961: null
@@ -517,7 +645,10 @@ rules:
     effective_to: null
     source_url: https://www.indiabudget.gov.in/budget2024-25/doc/memo.pdf
     verification_status: NV
-    notes: Follows BOND-L-ST; "listed" status NOT VERIFIED (CA question 7).
+    notes: >-
+      NOT VERIFIED. [ITA25] s.2(101)(b)(i) (12 months for a "security listed in a recognised stock exchange in
+      India") read; listed status of Retail-Direct G-secs not settled by any primary text read (CA question 7). If
+      not listed: 24 months, and s.76(2)(b) ("an unlisted bond") could make every gain short-term at slab.
   - rule_id: GSEC-CG-LT/ITA1961
     act: ITA1961
     section_1961: "112"
@@ -531,7 +662,9 @@ rules:
     effective_to: 2026-03-31
     source_url: https://www.indiabudget.gov.in/budget2024-25/doc/memo.pdf
     verification_status: NV
-    notes: Follows BOND-L-LT; "listed" status NOT VERIFIED (CA question 7).
+    notes: >-
+      NOT VERIFIED. 12.5 % rate is primary ([FA24] s.30); the 12-month threshold depends on "listed" status (CA
+      question 7, see GSEC-CG-ST/ITA1961).
   - rule_id: GSEC-CG-LT/ITA2025
     act: ITA2025
     section_1961: "112"
@@ -545,7 +678,9 @@ rules:
     effective_to: null
     source_url: https://www.indiabudget.gov.in/doc/memo.pdf
     verification_status: NV
-    notes: Follows BOND-L-LT; "listed" status NOT VERIFIED (CA question 7).
+    notes: >-
+      NOT VERIFIED. 12.5 % rate is primary ([ITA25] s.197(1)(b)); threshold depends on "listed" status and
+      s.76(2)(b) may apply (CA question 7).
   - rule_id: TBILL-01/ITA1961
     act: ITA1961
     section_1961: null
@@ -560,9 +695,13 @@ rules:
     source_url: https://www.rbi.org.in/commonman/english/scripts/FAQs.aspx?Id=711
     verification_status: NV
     notes: >-
-      No authoritative source found. Head of income unresolved (capital gains vs interest/other sources vs
-      deep-discount accrual); SLAB under every reading (CA question 1). source_url is the RBI G-sec FAQ that
-      describes the instrument, not a tax authority. Research gives no start date; narrowed to 2024-04-01.
+      NOT VERIFIED. No provision of [ITA61] or [ITA25] read names Treasury bills. The "zero coupon bond" definition
+      ([ITA25] s.2(112)) is limited to bonds "issued by any infrastructure capital company or infrastructure capital
+      fund or infrastructure debt fund or public sector company or scheduled bank", so T-bills are not zero coupon
+      bonds. [ITA25] s.2(59) defines interest as "interest payable in any manner for moneys borrowed or debt
+      incurred", which may reach the discount, but no primary text says so. Head of income unresolved (capital gains
+      vs other sources); SLAB under every reading (CA question 1). source_url is the RBI G-sec FAQ (instrument facts
+      only). Research gives no start date; narrowed to 2024-04-01.
   - rule_id: TBILL-01/ITA2025
     act: ITA2025
     section_1961: null
@@ -576,7 +715,8 @@ rules:
     effective_to: null
     source_url: https://www.rbi.org.in/commonman/english/scripts/FAQs.aspx?Id=711
     verification_status: NV
-    notes: See TBILL-01/ITA1961.
+    notes: >-
+      NOT VERIFIED. See TBILL-01/ITA1961 (same reading of [ITA25] s.2(59) and s.2(112); CA question 1).
 
   # ---------------- Interest at slab ----------------------------------------------------------------
   - rule_id: INT-SLAB-01/ITA1961
@@ -624,9 +764,12 @@ rules:
     rate: EXEMPT
     effective_from: 2026-04-01
     effective_to: null
-    source_url: https://www.indiabudget.gov.in/doc/memo.pdf
+    source_url: https://www.incometaxindia.gov.in/documents/d/guest/income_tax_act_2025_as_amended_by_fa_act_2026-pdf
     verification_status: P
-    notes: Exemption only for original subscribers holding continuously to maturity (all series), from TY2026-27.
+    notes: >-
+      PRIMARY [ITA25] s.70(1)(x) as substituted by [FA26] s.43 w.e.f. 1-4-2026: transfer "by way of redemption, of
+      Sovereign Gold Bond ... if held by an individual from the date of original issue till maturity" is not a
+      transfer. Applies to the 2015 scheme "or any subsequent Sovereign Gold Bond Scheme".
   - rule_id: SGB-02-ST
     act: ITA2025
     section_1961: null
@@ -640,7 +783,13 @@ rules:
     effective_to: null
     source_url: https://www.indiabudget.gov.in/doc/memo.pdf
     verification_status: NV
-    notes: No exemption is VERIFIED-PRIMARY; computation, cost basis and holding period NOT VERIFIED (CA question 8).
+    notes: >-
+      NOT VERIFIED (computation). PRIMARY for the no-exemption part: [ITA25] s.70(1)(x) exempts only a bond "held by
+      an individual from the date of original issue till maturity" ([FA26] s.43), so a secondary buyer's redemption
+      is a taxable transfer. NOT VERIFIED: that an SGB is a "security listed in a recognised stock exchange"
+      (s.2(101)(b)(i), 12 months) - the RBI SGB FAQ read says only that bonds "are tradable" and "only bonds held in
+      de-mat form ... can be traded in stock exchanges" and is out of date on tax; cost basis for a secondary buyer
+      (CA question 8).
   - rule_id: SGB-02-LT
     act: ITA2025
     section_1961: "112"
@@ -654,7 +803,9 @@ rules:
     effective_to: null
     source_url: https://www.indiabudget.gov.in/doc/memo.pdf
     verification_status: NV
-    notes: No exemption is VERIFIED-PRIMARY; computation NOT VERIFIED (CA question 8).
+    notes: >-
+      NOT VERIFIED (computation). 12.5 % rate primary ([ITA25] s.197(1)(b)); no exemption primary (s.70(1)(x));
+      12-month threshold depends on listed status (see SGB-02-ST; CA question 8).
 
   # ---------------- Buyback (consideration taxed as capital gains from 1-Apr-2026) ------------------
   - rule_id: BUYBACK-01-ST
@@ -670,7 +821,11 @@ rules:
     effective_to: null
     source_url: https://www.indiabudget.gov.in/doc/memo.pdf
     verification_status: S
-    notes: Non-promoter listed-equity buyback. VERIFIED-PRIMARY as Bill; VERIFIED-SECONDARY as enacted.
+    notes: >-
+      Non-promoter listed-equity buyback. PRIMARY (enacted) [ITA25] s.69(1): consideration less cost "shall be
+      deemed to be the 'Capital gains'"; s.69(2) ([FA26] s.42) adds extra tax only for promoters. NOT READ in
+      primary: that the buyback transaction is chargeable to STT, which s.196(1)(b) requires for the 20 % rate.
+      Status stays S.
   - rule_id: BUYBACK-01-LT
     act: ITA2025
     section_1961: "112A"
@@ -686,7 +841,9 @@ rules:
     effective_to: null
     source_url: https://www.indiabudget.gov.in/doc/memo.pdf
     verification_status: S
-    notes: Per EQ rules (shares the annual equity LTCG exemption). VERIFIED-SECONDARY as enacted.
+    notes: >-
+      Per EQ rules (shares the annual equity LTCG exemption). [ITA25] s.69(1) read (capital gains); s.198(1)(c) STT
+      condition on the buyback not verified in primary. Status stays S.
 
 slab_tables:
   - rule_id: SLAB-NEW-01/FY2025-26
@@ -704,9 +861,12 @@ slab_tables:
       - {lower: "1600000", upper: "2000000", rate: "0.20"}
       - {lower: "2000000", upper: "2400000", rate: "0.25"}
       - {lower: "2400000", rate: "0.30"}
-    source_url: https://www.indiabudget.gov.in/budget2025-26/doc/memo.pdf
+    source_url: https://thc.nic.in/Central%20Governmental%20Acts/Finance%20Act,%202025.pdf
     verification_status: P
-    notes: Old regime is available by option and is not modelled.
+    notes: >-
+      PRIMARY [FA25] s.25 inserting s.115BAC(1A)(iii) "for any previous year relevant to the assessment year
+      beginning on or after the 1st April, 2026": "Upto Rs. 4,00,000 Nil" ... "Above Rs. 24,00,000 30 per cent.".
+      Old regime is available by option and is not modelled.
   - rule_id: SLAB-NEW-01/TY2026-27
     act: ITA2025
     section_1961: "115BAC(1A)"
@@ -722,9 +882,11 @@ slab_tables:
       - {lower: "1600000", upper: "2000000", rate: "0.20"}
       - {lower: "2000000", upper: "2400000", rate: "0.25"}
       - {lower: "2400000", rate: "0.30"}
-    source_url: https://www.indiabudget.gov.in/doc/memo.pdf
+    source_url: https://www.incometaxindia.gov.in/documents/d/guest/income_tax_act_2025_as_amended_by_fa_act_2026-pdf
     verification_status: P
-    notes: FB2026 memo restates the FY2025-26 slabs unchanged for TY2026-27.
+    notes: >-
+      PRIMARY [ITA25] s.202(1) Table: "Upto ₹ 400000 Nil", "From ₹ 400001 to ₹ 800000 5%" ... "Above ₹ 2400000 30%"
+      - identical to the FY2025-26 slabs; [FA26] s.56 amends only s.202(2).
 
 surcharges:
   - rule_id: SURCH-01/FY2025-26
@@ -740,11 +902,13 @@ surcharges:
       - {above_inr: "20000000", rate: "0.25"}
     special_rate_cap: "0.15"
     capped_sections: ["111A", "112", "112A"]
-    source_url: https://www.indiabudget.gov.in/doc/memo.pdf
+    source_url: https://www.incometaxindia.gov.in/documents/d/guest/finance-act-2026-pdf-1
     verification_status: P
     notes: >-
-      25 % is the new-regime cap. Surcharge on dividend and on gains u/s 111A/112/112A is capped at 15 %.
-      Marginal relief exists but is not modelled (engine warns).
+      PRIMARY [FA26] s.2(4)(b) Table Sl. No. 10 ("115BAC (1A)", assessment year commencing 1-Apr-2026 = FY2025-26):
+      10 % above Rs 50,00,000; 15 % above Rs 1,00,00,000; "twenty-five per cent." above Rs 2,00,00,000 (excluding
+      dividend and s.111A/112/112A gains); "the rate of surcharge on the income-tax in respect of that part of
+      income shall not exceed fifteen per cent.". Marginal relief (s.2(5)) not modelled (engine warns).
   - rule_id: SURCH-01/TY2026-27
     act: ITA2025
     section_1961: null
@@ -758,9 +922,14 @@ surcharges:
       - {above_inr: "20000000", rate: "0.25"}
     special_rate_cap: "0.15"
     capped_sections: ["196", "197", "198"]
-    source_url: https://www.indiabudget.gov.in/doc/memo.pdf
+    source_url: https://www.incometaxindia.gov.in/documents/d/guest/finance-act-2026-pdf-1
     verification_status: P
-    notes: Cap of 15 % on dividend and on gains u/s 196/197/198. Marginal relief not modelled.
+    notes: >-
+      PRIMARY [FA26] s.2(12)(b) Table Sl. No. 10 (persons taxed "under section 202", tax year 2026-27): 10 % / 15 %
+      / 25 %; "the rate of surcharge on the 'advance tax' in respect of that part of income shall not exceed 15%"
+      for dividend and s.196/197/198 gains. These are the Finance Act 2026 rates for advance tax and TDS; the final
+      rates for TY2026-27 are fixed by the Finance Act 2027 (not yet enacted). Marginal relief (s.2(13)) not
+      modelled.
 
 cess:
   - rule_id: CESS-01/ITA1961
@@ -770,9 +939,12 @@ cess:
     rate: "0.04"
     effective_from: 2024-04-01
     effective_to: 2026-03-31
-    source_url: https://www.indiabudget.gov.in/budget2025-26/doc/memo.pdf
+    source_url: https://www.incometaxindia.gov.in/documents/d/guest/finance-act-2026-pdf-1
     verification_status: P
-    notes: Health & Education Cess on (tax + surcharge). Research says "(in force)"; narrowed to 2024-04-01.
+    notes: >-
+      PRIMARY [FA26] s.2(6) (AY2026-27 = FY2025-26) and [FA25] s.2(11) (AY2025-26 = FY2024-25): "Health and
+      Education Cess on income-tax", "calculated at the rate of four per cent. of such income-tax and surcharge".
+      Research says "(in force)"; narrowed to 2024-04-01.
   - rule_id: CESS-01/ITA2025
     act: ITA2025
     section_1961: null
@@ -780,9 +952,11 @@ cess:
     rate: "0.04"
     effective_from: 2026-04-01
     effective_to: null
-    source_url: https://www.indiabudget.gov.in/doc/memo.pdf
+    source_url: https://www.incometaxindia.gov.in/documents/d/guest/finance-act-2026-pdf-1
     verification_status: P
-    notes: Health & Education Cess on (tax + surcharge).
+    notes: >-
+      PRIMARY [FA26] s.2(15)-(16) (tax year 2026-27): "calculated at the rate of 4% of such income-tax and
+      surcharge".
 
 rebates:
   - rule_id: REBATE-01/FY2025-26
@@ -792,14 +966,18 @@ rebates:
     regime: NEW
     max_rebate_inr: "60000"
     total_income_ceiling_inr: "1200000"
-    excluded_sections: ["111A", "112"]
+    excluded_sections: ["111A", "112", "112A"]
     effective_from: 2025-04-01
     effective_to: 2026-03-31
-    source_url: https://www.indiabudget.gov.in/budget2025-26/doc/memo.pdf
-    verification_status: NV
+    source_url: https://thc.nic.in/Central%20Governmental%20Acts/Finance%20Act,%202025.pdf
+    verification_status: P
     notes: >-
-      Rule VERIFIED-PRIMARY: not available on tax at special rates and capped at tax at slab rates, with marginal
-      relief. NOT VERIFIED: s.112A interplay; whether special-rate income counts toward the ₹12 lakh ceiling.
+      PRIMARY [FA25] s.20 (s.87A w.e.f. 1-4-2026 = AY2026-27): "twelve hundred thousand rupees" and "sixty thousand
+      rupees" substituted, and "the deduction under the first proviso, shall not exceed the amount of income-tax
+      payable as per the rates provided in sub-section (1A) of section 115BAC" - so no rebate against tax at special
+      rates (s.111A, s.112). [ITA61] s.112A(6): "the rebate under section 87A shall be allowed from the income-tax
+      on the total income as reduced by tax payable on such capital gains". CORRECTED in table r2: "112A" added to
+      excluded_sections. The ceiling is on "total income", which includes capital gains (CA to confirm, question 5).
       The engine does NOT apply the rebate (warns REBATE_NOT_APPLIED), so tax is never understated.
   - rule_id: REBATE-01/TY2026-27
     act: ITA2025
@@ -808,12 +986,17 @@ rebates:
     regime: NEW
     max_rebate_inr: "60000"
     total_income_ceiling_inr: "1200000"
-    excluded_sections: ["196", "197"]
+    excluded_sections: ["196", "197", "198"]
     effective_from: 2026-04-01
     effective_to: 2027-03-31
-    source_url: https://www.indiabudget.gov.in/doc/memo.pdf
-    verification_status: NV
-    notes: 87A → s.156 mapping VERIFIED-SECONDARY only (CA question 5); s.198 interplay NOT VERIFIED. Not applied.
+    source_url: https://www.incometaxindia.gov.in/documents/d/guest/income_tax_act_2025_as_amended_by_fa_act_2026-pdf
+    verification_status: P
+    notes: >-
+      PRIMARY [ITA25] s.156(2)(a): "the income does not exceed twelve lakh rupees, 100% of the income-tax payable or
+      ₹ 60000, whichever is less" (with marginal relief in s.156(2)(b)); s.156(3): "shall not exceed income-tax
+      payable as per the rates provided in section 202(1)"; s.198(7): "the rebate under section 156 shall be allowed
+      from the income-tax on the total income as reduced by tax payable on such capital gains". Resolves the 87A ->
+      s.156 mapping. CORRECTED in table r2: "198" added to excluded_sections. Not applied by the engine.
 
 withholding:
   - rule_id: TDS-INT-OLD
@@ -844,16 +1027,19 @@ withholding:
   - rule_id: TDS-INT-01/ITA2025
     act: ITA2025
     section_1961: "194A"
-    section_2025: "393(1) Table Sl. 5"
+    section_2025: "393(1) Table Sl. 5(ii)"
     payer_scope: bank / co-operative bank / post office interest, per payer per tax year
     rate: "0.10"
     threshold_inr: "50000"
     threshold_senior_inr: "100000"
     effective_from: 2026-04-01
     effective_to: null
-    source_url: https://www.indiabudget.gov.in/doc/memo.pdf
-    verification_status: S
-    notes: Carried into s.393 of the 2025 Act (threshold table not read in primary).
+    source_url: https://www.incometaxindia.gov.in/documents/d/guest/income_tax_act_2025_as_amended_by_fa_act_2026-pdf
+    verification_status: P
+    notes: >-
+      PRIMARY [ITA25] s.393(1) Table Sl. No. 5(ii) (banking company / co-operative bank / post office): "₹ 1,00,000
+      in the case of a senior citizen; ₹ 50,000 in case of person other than senior citizen", rate "Rates in force";
+      [FA26] Part II item 1(a)(i): "on income by way of interest other than 'Interest on securities' 10%".
   - rule_id: TDS-INT-02/ITA1961
     act: ITA1961
     section_1961: "194A"
@@ -868,15 +1054,18 @@ withholding:
   - rule_id: TDS-INT-02/ITA2025
     act: ITA2025
     section_1961: "194A"
-    section_2025: "393(1) Table Sl. 5"
+    section_2025: "393(1) Table Sl. 5(iii)"
     payer_scope: interest from other payers (e.g. NBFC/HFC deposit), per payer per tax year
     rate: "0.10"
     threshold_inr: "10000"
     effective_from: 2026-04-01
     effective_to: null
-    source_url: https://www.indiabudget.gov.in/doc/memo.pdf
-    verification_status: S
-    notes: 194A → s.393(1) mapping VERIFIED-SECONDARY.
+    source_url: https://www.incometaxindia.gov.in/documents/d/guest/income_tax_act_2025_as_amended_by_fa_act_2026-pdf
+    verification_status: P
+    notes: >-
+      PRIMARY [ITA25] s.393(1) Table Sl. No. 5(iii): interest other than on securities paid by a "Specified person"
+      (s.402(37): any person not an individual/HUF, or a large individual/HUF business), "Threshold limit: ₹
+      10,000"; rate 10 % per [FA26] Part II item 1(a)(i).
   - rule_id: TDS-SEC-01/ITA1961
     act: ITA1961
     section_1961: "193"
@@ -891,15 +1080,19 @@ withholding:
   - rule_id: TDS-SEC-01/ITA2025
     act: ITA2025
     section_1961: "193"
-    section_2025: null
+    section_2025: "393(1) Table Sl. 5(i)"
     payer_scope: interest on securities incl. listed debentures, per tax year
     rate: "0.10"
     threshold_inr: "10000"
     effective_from: 2026-04-01
     effective_to: null
-    source_url: https://www.indiabudget.gov.in/budget2025-26/doc/memo.pdf
-    verification_status: NV
-    notes: 2025-Act section and carry-over not in the research; TDS on G-sec interest under the 2025 Act NOT VERIFIED.
+    source_url: https://www.incometaxindia.gov.in/documents/d/guest/income_tax_act_2025_as_amended_by_fa_act_2026-pdf
+    verification_status: P
+    notes: >-
+      PRIMARY [ITA25] s.393(1) Table Sl. No. 5(i): "Interest on securities", "Threshold limit: ₹ 10,000"; rate 10 %
+      per [FA26] Part II item 1(a)(vi)-(vii). G-sec interest: s.393(4) Table Sl. No. 6(a)(iii) - no TDS on "any
+      security of the Central Government or a State Government" other than the 8 %/7.75 % Savings (Taxable) Bonds
+      and "Floating Rate Savings Bonds, 2020 (Taxable)" (resolves the G-sec TDS part of CA question 7).
   - rule_id: TDS-MF-01/ITA1961
     act: ITA1961
     section_1961: "194K"
@@ -914,15 +1107,18 @@ withholding:
   - rule_id: TDS-MF-01/ITA2025
     act: ITA2025
     section_1961: "194K"
-    section_2025: "393(1)"
+    section_2025: "393(1) Table Sl. 4(i)"
     payer_scope: MF IDCW/dividend, per tax year
     rate: "0.10"
     threshold_inr: "10000"
     effective_from: 2026-04-01
     effective_to: null
-    source_url: https://www.indiabudget.gov.in/budget2025-26/doc/memo.pdf
-    verification_status: NV
-    notes: 194K → s.393(1) Table serial number NOT VERIFIED.
+    source_url: https://www.incometaxindia.gov.in/documents/d/guest/income_tax_act_2025_as_amended_by_fa_act_2026-pdf
+    verification_status: P
+    notes: >-
+      PRIMARY [ITA25] s.393(1) Table Sl. No. 4(i): income in respect of "units of a Mutual Fund specified under
+      Schedule VII", "Rate: 10%", "Threshold limit: ₹ 10,000". s.393(4) Table Sl. No. 4: no deduction "If income is
+      of the nature of capital gain" (no TDS on resident redemptions).
 
 deductions:
   - rule_id: DIV-INTEXP-01
@@ -933,11 +1129,14 @@ deductions:
     allowed: false
     effective_from: 2026-04-01
     effective_to: null
-    source_url: https://www.indiabudget.gov.in/doc/memo.pdf
-    verification_status: NV
+    source_url: https://www.incometaxindia.gov.in/documents/d/guest/income_tax_act_2025_as_amended_by_fa_act_2026-pdf
+    verification_status: P
     notes: >-
-      Memo text is internally inconsistent ("1st April 2026 … apply for tax year 2025-26 onwards"), so the
-      sources conflict → NV (CA question 9). Information only; the engine does not use this rule.
+      PRIMARY [ITA25] s.93(2) as substituted by [FA26] s.44(b), footnote "Substituted by the Finance Act, 2026,
+      w.e.f. 1-4-2026": "in respect of any dividend income or income from units of a Mutual Fund specified under
+      Schedule VII ... no deduction shall be allowed." [FA26] s.1(2)(a) brings ss.2-129 into force on 1-Apr-2026.
+      Because the 2025 Act governs only tax years from 1-Apr-2026, the memo's "tax year 2025-26 onwards" has no
+      effect before TY2026-27 (resolves CA question 9). Information only; the engine does not use this rule.
 
 levies:
   - rule_id: STT-MF-01

@@ -43,10 +43,22 @@ describe("Risk page", () => {
   });
 
   it("reads ?id= and shows Explained metrics with drawdown dates, VaR/CVaR in % and ₹, and refusals in words", async () => {
-    const calls = stubFetch((url) => (url.startsWith("/api/risk/") ? json(RISK_EQUITY) : json(FORECAST)));
+    const calls = stubFetch((url) =>
+      url.startsWith("/api/risk/")
+        ? json(RISK_EQUITY)
+        : url.startsWith("/api/instruments/")
+          ? json({ instrument: { name: "FIXTURE Large Cap Fund C — Direct · Growth", origin: "fixture" } })
+          : json(FORECAST),
+    );
     renderAt("/risk?id=mf:900003");
     await screen.findByText("Annualised volatility");
-    expect(calls.map((c) => c.url).sort()).toEqual(["/api/forecast/mf%3A900003", "/api/risk/mf%3A900003"]);
+    expect(calls.map((c) => c.url).sort()).toEqual([
+      "/api/forecast/mf%3A900003",
+      "/api/instruments/mf%3A900003",
+      "/api/risk/mf%3A900003",
+    ]);
+    // An id from the URL is shown by its name, not as a bare internal id (live-browser finding).
+    expect((await screen.findAllByText("FIXTURE Large Cap Fund C — Direct · Growth")).length).toBeGreaterThan(0);
     const dl = metricsList();
     expect(within(dl).getByRole("button", { name: /Annualised volatility: 24\.09%/ })).toBeInTheDocument();
     expect(within(dl).getByRole("button", { name: /Maximum drawdown: 80\.25%/ })).toBeInTheDocument();

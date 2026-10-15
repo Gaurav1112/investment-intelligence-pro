@@ -5,6 +5,7 @@ import { ExplainDrawer, ExplainedNumber } from "../components/ExplainDrawer";
 import { FreshnessBadge } from "../components/FreshnessBadge";
 import { Empty, Loading } from "../components/States";
 import { TierLabel } from "../components/Tier";
+import { useApi } from "../lib/useApi";
 import { api, ApiError } from "../lib/api";
 import { compareDecimals, dateLabel, inrCompact } from "../lib/format";
 import type {
@@ -253,15 +254,22 @@ export function InstrumentPicker({
 
 /** A single selected instrument with a "change" button, or the picker. */
 export function SinglePicker({ idPrefix, selected, onChange }: { idPrefix: string; selected: Picked | null; onChange: (p: Picked | null) => void }) {
+  // A selection that arrives from the URL (?id=) carries only the id: resolve its name for display.
+  const needsName = selected !== null && !selected.name;
+  const detail = useApi<{ instrument: { name: string; origin: string } }>(
+    needsName ? `/api/instruments/${encodeURIComponent(selected.instrument_id)}` : null,
+  );
+  const name = selected?.name || detail.data?.instrument.name || null;
+  const fixture = selected?.fixture || detail.data?.instrument.origin === "fixture";
   if (!selected) return <InstrumentPicker idPrefix={idPrefix} onPick={onChange} />;
   return (
     <div className="field">
       <span className="label-like">Instrument</span>
       <div className="row-tight" role="status">
         <span>
-          Selected: <strong>{selected.name ?? selected.instrument_id}</strong> <span className="mono small">{selected.instrument_id}</span>
+          Selected: {name ? <strong>{name}</strong> : null} <span className="mono small">{selected.instrument_id}</span>
         </span>
-        {selected.fixture ? <FreshnessBadge freshness="FIXTURE" /> : null}
+        {fixture ? <FreshnessBadge freshness="FIXTURE" /> : null}
         <button type="button" className="btn btn--ghost" onClick={() => onChange(null)}>
           Change instrument
         </button>

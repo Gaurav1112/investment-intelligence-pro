@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, NavLink, Route, Routes, useLocation } from "react-router-dom";
 import { ApiError, login, readLoginFragment, restoreSession, UNAUTHORIZED_EVENT } from "./lib/api";
 import { dateLabel, inr, utcStamp } from "./lib/format";
@@ -99,6 +99,32 @@ const NAV: { group: string; items: [string, string][] }[] = [
   },
 ];
 
+const APP_NAME = "Investment Intelligence Pro";
+const EXTRA_TITLES: [string, string][] = [["/settings", "Settings"]];
+
+/** Page name for a path (WCAG 2.4.2): nav labels, plus pages reached by link only. */
+export function pageTitle(pathname: string): string {
+  if (pathname.startsWith("/i/")) return "Instrument detail";
+  if (pathname.startsWith("/evidence/")) return "Evidence";
+  const all: [string, string][] = [...NAV.flatMap((g) => g.items), ...EXTRA_TITLES];
+  return all.find(([to]) => to === pathname)?.[1] ?? "Page";
+}
+
+/** Set the document title on every route change; after the first render also move focus to `focusId` so screen-reader
+ * and keyboard users land at the start of the new page instead of on a nav link that no longer describes it. */
+export function useRouteTitle(focusId: string | null) {
+  const { pathname } = useLocation();
+  const first = useRef(true);
+  useEffect(() => {
+    document.title = `${pageTitle(pathname)} · ${APP_NAME}`;
+    if (first.current) {
+      first.current = false;
+      return;
+    }
+    if (focusId) document.getElementById(focusId)?.focus();
+  }, [pathname, focusId]);
+}
+
 function ContextBar() {
   const { status } = useProfile();
   if (!status)
@@ -159,8 +185,12 @@ export function Shell({ children }: { children: ReactNode }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const { pathname } = useLocation();
   useEffect(() => setMenuOpen(false), [pathname]); // a chosen page closes the small-screen menu
+  useRouteTitle("main");
   return (
     <div className="shell">
+      <p className="sr-only" role="status" aria-live="polite">
+        {pageTitle(pathname)}
+      </p>
       <a className="skip-link" href="#main">
         Skip to content
       </a>

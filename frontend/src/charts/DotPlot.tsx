@@ -1,5 +1,4 @@
 import { scaleLinear } from "d3-scale";
-import { useState } from "react";
 
 /** Quantile dot plot (ux-design §0.3/§5.4): N equally likely historical quantiles, "k of N" — never a probability. */
 export interface DotPlotProps {
@@ -15,7 +14,6 @@ export interface DotPlotProps {
 }
 
 export function DotPlot({ label, quantiles, displays, target, baseline, width = 560 }: DotPlotProps) {
-  const [focus, setFocus] = useState<number | null>(null);
   const vals = quantiles.map(Number); // display geometry only; values are already final
   const extras = [target, baseline].filter(Boolean).map((x) => Number(x?.value));
   const lo = Math.min(...vals, ...extras);
@@ -75,23 +73,17 @@ export function DotPlot({ label, quantiles, displays, target, baseline, width = 
           </g>
         ) : null}
         {placed.map((p, i) => (
-          <circle
-            key={i}
-            cx={p.cx}
-            cy={p.cy}
-            r={r - 0.5}
-            className={`dot${focus === i ? " dot--focus" : ""}`}
-            tabIndex={0}
-            onFocus={() => setFocus(i)}
-            onBlur={() => setFocus(null)}
-            aria-label={`Outcome ${i + 1} of ${vals.length}: ${displays[i]}`}
-          />
+          // Not focusable: an svg role="img" has presentational children, so per-dot labels were 20 silent Tab stops
+          // (WCAG 4.1.2). The svg's own label summarises the range; "View as table" lists every dot. The <title> is a
+          // mouse tooltip only.
+          <circle key={i} cx={p.cx} cy={p.cy} r={r - 0.5} className="dot">
+            <title>{`Outcome ${i + 1} of ${vals.length}: ${displays[i]}`}</title>
+          </circle>
         ))}
       </svg>
       <figcaption className="small">
         {label}. Each dot is one of {vals.length} equally likely historical outcomes — a historical frequency, not a forecast.
         {target ? ` Reached or beat the target in ${target.hits} of ${vals.length}.` : ""}
-        {focus !== null ? <span className="num"> Focused: {displays[focus]}</span> : null}
       </figcaption>
       <details className="small">
         <summary>View as table</summary>

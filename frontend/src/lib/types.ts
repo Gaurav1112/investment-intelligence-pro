@@ -773,6 +773,8 @@ export interface CompareRow {
   returns?: Band<ReturnPair>;
   liquidity?: { days_to_cash: number; lock_in_days: number | null };
   exit_cost?: AnalysisExplained | Refusal;
+  /** analysis._real_returns: CPI-adjusted net return per band point (Fisher), or a refusal per point (e.g. CPI_STALE). */
+  real_return?: Band<AnalysisExplained | Refusal>;
   loss_frequency?: { value: string; display: string } | null;
 }
 
@@ -1061,8 +1063,32 @@ export interface ForecastResponse {
   limitations?: string[];
   unreliable_when?: string[];
   validation?: ForecastValidation;
+  /** analysis._yield_carry (B4): only on OK responses. */
+  yield_carry?: YieldCarry;
   run: RunBlock;
 }
+
+export interface YieldCarryRow {
+  delta_yield_bp: number;
+  stress: boolean;
+  return: AnalysisExplained;
+  value_inr: AnalysisExplained;
+}
+
+export interface YieldCarryOk {
+  status: "OK";
+  label: string;
+  model_id: string;
+  factsheet_as_of: string;
+  factsheet_freshness: string;
+  carry: AnalysisExplained;
+  scenarios: YieldCarryRow[];
+  stress_scenarios: YieldCarryRow[];
+  context_amount: AnalysisContext;
+}
+
+/** Debt funds get scenarios; other funds `not_applicable`; missing/stale factsheet facts a typed Refusal. */
+export type YieldCarry = YieldCarryOk | { status: "not_applicable"; reason: string } | Refusal;
 
 export type RiskVar = (AnalysisExplained & { value_inr: AnalysisExplained | null }) | Refusal;
 export type RiskDrawdown =

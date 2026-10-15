@@ -3,7 +3,7 @@ import { PageHeader } from "../components/PageHeader";
 import { useSearchParams } from "react-router-dom";
 import { Loading } from "../components/States";
 import { dateLabel, pct, roundHalfUp } from "../lib/format";
-import type { AnalysisExplained, ForecastResponse, Refusal, RiskResponse, RiskVar } from "../lib/types";
+import type { AnalysisExplained, ForecastResponse, Refusal, RiskResponse, RiskVar, YieldCarry, YieldCarryRow } from "../lib/types";
 import { useApi } from "../lib/useApi";
 import {
   AnalysisErrorState,
@@ -220,6 +220,72 @@ function Val({ item, onExplain }: { item: AnalysisExplained | undefined; onExpla
   return <Ex item={item} onExplain={onExplain} />;
 }
 
+const bpText = (bp: number) => (bp === 0 ? "no change" : `${bp > 0 ? "+" : "−"}${Math.abs(bp)} bp`);
+
+function CarryRows({ rows, onExplain }: { rows: YieldCarryRow[]; onExplain: OnExplain }) {
+  return (
+    <>
+      {rows.map((r) => (
+        <tr key={`${r.stress ? "s" : "n"}${r.delta_yield_bp}`}>
+          <th scope="row">
+            {bpText(r.delta_yield_bp)}
+            {r.stress ? <span className="small subtle"> (stress)</span> : null}
+          </th>
+          <td className="num">
+            <Ex item={r.return} onExplain={onExplain} />
+          </td>
+          <td className="num">
+            <Ex item={r.value_inr} onExplain={onExplain} />
+          </td>
+        </tr>
+      ))}
+    </>
+  );
+}
+
+/** B4 yield-carry scenarios for a debt fund (engine values only), or why there are none. */
+export function YieldCarryView({ yc, onExplain }: { yc: YieldCarry | undefined; onExplain: OnExplain }) {
+  if (!yc) return null;
+  return (
+    <section aria-labelledby="yc-title">
+      <h3 id="yc-title">Yield carry (debt funds)</h3>
+      {isRefusal(yc) ? (
+        <Refused r={yc} />
+      ) : yc.status === "not_applicable" ? (
+        <p className="small subtle">{yc.reason}</p>
+      ) : (
+        <>
+          <p className="small">
+            <strong>{yc.label}</strong> · factsheet as of {dateLabel(yc.factsheet_as_of)}
+            {yc.factsheet_freshness === "STALE" ? <strong> (STALE factsheet)</strong> : null} · carry net of expenses{" "}
+            <Ex item={yc.carry} onExplain={onExplain} />
+          </p>
+          <div className="table-wrap">
+            <table className="table table--compact">
+              <caption className="small">If portfolio yields move immediately and stay there ({yc.model_id})</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Yield move</th>
+                  <th scope="col" className="num">
+                    Return over the horizon
+                  </th>
+                  <th scope="col" className="num">
+                    Amount (before exit load and tax)
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                <CarryRows rows={yc.scenarios} onExplain={onExplain} />
+                <CarryRows rows={yc.stress_scenarios} onExplain={onExplain} />
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
 function ForecastView({ res, onExplain }: { res: ForecastResponse; onExplain: OnExplain }) {
   const sr = res.scenario_range;
   const v = res.validation;
@@ -312,6 +378,7 @@ function ForecastView({ res, onExplain }: { res: ForecastResponse; onExplain: On
           )}
         </>
       ) : null}
+      <YieldCarryView yc={res.yield_carry} onExplain={onExplain} />
       {res.unreliable_when?.length ? (
         <>
           <h3>Unreliable when</h3>

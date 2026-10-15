@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { ERR_FEASIBILITY_NO_SERIES, FORECAST, FORECAST_REFUSED, RISK_EQUITY, RISK_LIQUID } from "../test/analysisFixtures";
 import Risk from "./Risk";
+import type { YieldCarry } from "../lib/types";
 
 type Call = { url: string; method: string; body: unknown };
 const json = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { "Content-Type": "application/json" } });
@@ -124,5 +125,56 @@ describe("Risk page", () => {
     renderAt("/risk?id=fd:fixture-bank:180d");
     const alerts = await screen.findAllByRole("alert");
     expect(alerts[0]).toHaveTextContent("this analysis needs a stored NAV series (mutual fund schemes only) (NO_SERIES)");
+  });
+});
+
+describe("yield carry on the forecast (TS-1)", () => {
+  const q = FORECAST.scenario_range!.quantiles[0]!;
+  const ex = (id: string, label: string, display: string) => ({ ...q.return, id, label, display });
+  const rowOf = (bp: number, stress: boolean, r: string, inr: string) => ({
+    delta_yield_bp: bp,
+    stress,
+    return: ex(`yc.r.${bp}`, `Horizon return if yields move ${bp}bp`, r),
+    value_inr: ex(`yc.inr.${bp}`, `Amount if yields move ${bp}bp (before exit load and tax)`, inr),
+  });
+  const withCarry = (yield_carry: unknown) => ({ ...FORECAST, yield_carry });
+
+  it("renders the engine's carry and every scenario row as explainable numbers", async () => {
+    const yc: YieldCarry = {
+      status: "OK",
+      label: "scenario range, not a forecast — APPROXIMATE (duration only; roll-down and credit ignored)",
+      model_id: "B4_YIELD_CARRY",
+      factsheet_as_of: "2026-09-30",
+      factsheet_freshness: "STALE",
+      carry: ex("yc.carry", "Carry net of expenses over the horizon", "3.40%"),
+      scenarios: [rowOf(-50, false, "4.10%", "₹1,04,100.00"), rowOf(0, false, "3.40%", "₹1,03,400.00"), rowOf(50, false, "2.70%", "₹1,02,700.00")],
+      stress_scenarios: [rowOf(200, true, "0.60%", "₹1,00,600.00")],
+      context_amount: FORECAST.context_amount!,
+    };
+    stubFetch((url) => (url.startsWith("/api/risk/") ? json(RISK_EQUITY) : json(withCarry(yc))));
+    renderAt("/risk?id=mf:900003");
+    const section = await screen.findByRole("region", { name: "Yield carry (debt funds)" });
+    expect(within(section).getByText(/APPROXIMATE \(duration only/)).toBeInTheDocument();
+    expect(within(section).getByText("(STALE factsheet)")).toBeInTheDocument();
+    expect(within(section).getByRole("button", { name: /^Carry net of expenses over the horizon: 3\.40%/ })).toBeInTheDocument();
+    expect(within(section).getByRole("rowheader", { name: "−50 bp" })).toBeInTheDocument();
+    expect(within(section).getByRole("rowheader", { name: "no change" })).toBeInTheDocument();
+    expect(within(section).getByRole("rowheader", { name: /^\+200 bp ?\(stress\)$/ })).toBeInTheDocument();
+    expect(within(section).getByRole("button", { name: /^Amount if yields move 200bp \(before exit load and tax\): ₹1,00,600\.00/ })).toBeInTheDocument();
+  });
+
+  it("a refusal (missing factsheet facts) is shown in words; not_applicable is a plain note", async () => {
+    const refused = { id: "yc", label: "Yield-carry scenario range (debt fund)", status: "refused", code: "FUND_FACTS_UNAVAILABLE", reason: "needs the factsheet's portfolio YTM, modified duration and expense ratio (missing: ytm); none is assumed", value: null };
+    stubFetch((url) => (url.startsWith("/api/risk/") ? json(RISK_EQUITY) : json(withCarry(refused))));
+    const view = renderAt("/risk?id=mf:900003");
+    const section = await screen.findByRole("region", { name: "Yield carry (debt funds)" });
+    expect(section).toHaveTextContent(/Not shown: needs the factsheet's portfolio YTM.*\(FUND_FACTS_UNAVAILABLE\)/);
+    expect(within(section).queryByRole("button")).not.toBeInTheDocument();
+    view.unmount();
+
+    stubFetch((url) => (url.startsWith("/api/risk/") ? json(RISK_EQUITY) : json(withCarry({ status: "not_applicable", reason: "Yield carry applies to debt-category funds only." }))));
+    renderAt("/risk?id=mf:900002");
+    const na = await screen.findByRole("region", { name: "Yield carry (debt funds)" });
+    expect(na).toHaveTextContent("Yield carry applies to debt-category funds only.");
   });
 });

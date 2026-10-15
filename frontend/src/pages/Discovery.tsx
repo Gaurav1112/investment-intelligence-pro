@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { AiWording } from "../components/AiWording";
 import { ExplainDrawer, ExplainedNumber } from "../components/ExplainDrawer";
@@ -242,15 +242,34 @@ export default function Discovery() {
   const [loading, setLoading] = useState(true);
   const [explain, setExplain] = useState<Explained | null>(null);
 
+  // Each run aborts the previous one, so a slower stale response (e.g. the fixtures toggle flipped twice) can never
+  // overwrite a newer result; only the current request touches state.
+  const inflight = useRef<AbortController | null>(null);
   const run = useCallback(() => {
+    inflight.current?.abort();
+    const ctl = new AbortController();
+    inflight.current = ctl;
     setLoading(true);
     setError(null);
-    api<DiscoveryResult>("/api/discover", { method: "POST", body: { include_fixtures: includeFixtures } })
-      .then(setData)
-      .catch(setError)
-      .finally(() => setLoading(false));
+    api<DiscoveryResult>("/api/discover", {
+      method: "POST",
+      body: { include_fixtures: includeFixtures },
+      signal: ctl.signal,
+    })
+      .then((d) => {
+        if (!ctl.signal.aborted) setData(d);
+      })
+      .catch((e: unknown) => {
+        if (!ctl.signal.aborted) setError(e);
+      })
+      .finally(() => {
+        if (!ctl.signal.aborted) setLoading(false);
+      });
   }, [includeFixtures]);
-  useEffect(run, [run, status]);
+  useEffect(() => {
+    run();
+  }, [run, status]);
+  useEffect(() => () => inflight.current?.abort(), []);
 
   if (loading && !data) return <Loading label="Evaluating instruments under your constraints" />;
   if (error) return <ErrorState error={error} retry={run} />;

@@ -9,6 +9,7 @@ import { api } from "../lib/api";
 import { dateLabel, percentToFraction } from "../lib/format";
 import type { ExitLoad, ExitLoadIn, InstrumentList, InstrumentListItem, RunSummary } from "../lib/types";
 import { useApi } from "../lib/useApi";
+import { useFocusAfter } from "../lib/useFocusAfter";
 import {
   citationBody,
   CitationFields,
@@ -141,7 +142,13 @@ export default function MfExplorer() {
   const [editing, setEditing] = useState<InstrumentListItem | null>(null);
   const today = todayIst();
 
-  const log = (a: Activity) => setActivity((xs) => [a, ...xs].slice(0, 10));
+  const focusAfter = useFocusAfter();
+  // Reloading the list replaces the table (and the focused Backfill button) with a loading state, so focus moves to the
+  // result in the activity log instead of falling back to the page body (WCAG 2.4.3).
+  const log = (a: Activity) => {
+    setActivity((xs) => [a, ...xs].slice(0, 10));
+    focusAfter("mf-activity");
+  };
 
   async function fetchNavAll() {
     setNavPending(true);
@@ -292,7 +299,7 @@ export default function MfExplorer() {
         <span className="topbar__spacer" />
         {list.data && list.data.items.length > 0 ? fetchButton : null}
       </div>
-      <div aria-live="polite" aria-label="Recent actions">
+      <div id="mf-activity" tabIndex={-1} aria-live="polite" aria-label="Recent actions">
         {activity.length ? (
           <ul className="activity">
             {activity.map((a) => (

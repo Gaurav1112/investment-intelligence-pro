@@ -306,7 +306,7 @@ export default function Alerts() {
         title="Alerts"
         purpose={
           <>
-            Each alert means one of your own rules was met; it reports what was observed and when. Alerts are stored on this computer only and never suggest a trade.
+            Each alert means one of your own rules was met; it reports what was observed and when. Alerts are stored only in your own database and never suggest a trade.
           </>
         }
       />

@@ -30,6 +30,7 @@ const TABLE_TEXT: Record<string, string> = {
   bond_terms: "Bond terms",
   deposit_terms: "Deposit terms",
   observations: "Observations (prices, NAVs, yields)",
+  import_snapshots: "Pre-import safety snapshots",
 };
 
 function Counts({ tables, caption }: { tables: Record<string, number>; caption: string }) {
@@ -128,7 +129,7 @@ function Backup({ onDone }: { onDone: () => void }) {
   );
 }
 
-function Erase({ backups, onDone }: { backups: number | null; onDone: () => void }) {
+function Erase({ backups, onDone, hosted = false }: { backups: number | null; onDone: () => void; hosted?: boolean }) {
   const [typed, setTyped] = useState("");
   const [deleteBackups, setDeleteBackups] = useState(false);
   const [res, setRes] = useState<EraseResult | null>(null);
@@ -168,15 +169,25 @@ function Erase({ backups, onDone }: { backups: number | null; onDone: () => void
         database, then compacts the files so the bytes are gone. Public market data (instruments, prices, sources) is kept. This
         cannot be undone — export first if you may want the data back.
       </p>
-      <p className="small">
-        <strong>Backups are not erased</strong> unless you tick the box below. Existing backup files contain your data
-        {backups !== null ? ` (currently ${backups} file${backups === 1 ? "" : "s"})` : ""}.
-      </p>
-      <div className="field">
-        <label className="choice">
-          <input type="checkbox" checked={deleteBackups} onChange={(e) => setDeleteBackups(e.target.checked)} /> Also delete every backup file
-        </label>
-      </div>
+      {hosted ? (
+        <p className="small">
+          <strong>Hosted:</strong> the rows are deleted from your Turso database, but Turso&apos;s own point-in-time backups keep
+          the deleted rows until they expire under Turso&apos;s retention. There are no backup files to delete here.
+        </p>
+      ) : (
+        <>
+          <p className="small">
+            <strong>Backups are not erased</strong> unless you tick the box below. Existing backup files contain your data
+            {backups !== null ? ` (currently ${backups} file${backups === 1 ? "" : "s"})` : ""}.
+          </p>
+          <div className="field">
+            <label className="choice">
+              <input type="checkbox" checked={deleteBackups} onChange={(e) => setDeleteBackups(e.target.checked)} /> Also delete every
+              backup file
+            </label>
+          </div>
+        </>
+      )}
       <div className="field">
         <label htmlFor="erase-confirm">
           Type <code>{ERASE_PHRASE}</code> to confirm
@@ -213,10 +224,13 @@ function Erase({ backups, onDone }: { backups: number | null; onDone: () => void
 
 export default function Settings() {
   const inv = useApi<PrivacyInventory>("/api/privacy/inventory");
+  const me = useApi<{ deploy?: string }>("/api/me");
+  const hosted = me.data?.deploy === "vercel";
+  const where = hosted ? "in your hosted database (Turso)" : "on this computer";
   const profile = useProfile();
   return (
     <section>
-      <PageHeader title="Settings & privacy" purpose="Your profile, what is stored on this computer, and how to export or erase it." />
+      <PageHeader title="Settings & privacy" purpose={`Your profile, what is stored ${where}, and how to export or erase it.`} />
 
       <h2>Profile</h2>
       <p>
@@ -251,11 +265,22 @@ export default function Settings() {
       </p>
       <p className="small subtle">
         The JSON file holds every user table with a checksum manifest; the CSV holds your transactions. Both download straight
-        from this computer and contain your amounts — store them carefully.
+        from {hosted ? "the hosted app" : "this computer"} and contain your amounts — store them carefully.
       </p>
 
-      <Backup onDone={inv.reload} />
+      {hosted ? (
+        <>
+          <h2>Backups</h2>
+          <p className="small">
+            The hosted app keeps no backup files. Turso keeps point-in-time backups of your database for its retention period
+            (restore from the Turso dashboard into a new database); for a copy you hold yourself, use “Export everything” above.
+          </p>
+        </>
+      ) : (
+        <Backup onDone={inv.reload} />
+      )}
       <Erase
+        hosted={hosted}
         backups={inv.data?.backups.count ?? null}
         onDone={() => {
           inv.reload();

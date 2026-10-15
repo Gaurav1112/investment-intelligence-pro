@@ -135,3 +135,22 @@ describe("Settings & privacy", () => {
     expect(calls.find((c) => c.url === "/api/privacy/erase")!.body).toEqual({ confirm: ERASE_PHRASE, delete_backups: true });
   });
 });
+
+describe("Settings in hosted mode (walkthrough 2026-10-15)", () => {
+  it("says the data is in the hosted database, offers no file backup, and explains Turso's retention on erase", async () => {
+    stubFetch((url, method) => (url === "/api/me" ? json({ authenticated: true, csrf: "c", env: "prod", deploy: "vercel" }) : realistic(url, method)));
+    renderPage();
+    expect(await screen.findByText(/stored in your hosted database \(Turso\)/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Back up now" })).not.toBeInTheDocument();
+    expect(screen.getByText(/The hosted app keeps no backup files/)).toBeInTheDocument();
+    expect(screen.getByText(/Turso's own point-in-time backups keep/)).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: /delete every/ })).not.toBeInTheDocument();
+  });
+
+  it("locally keeps the file backup and says 'this computer'", async () => {
+    stubFetch((url, method) => (url === "/api/me" ? json({ authenticated: true, csrf: "c", env: "prod", deploy: "local" }) : realistic(url, method)));
+    renderPage();
+    expect(await screen.findByRole("button", { name: "Back up now" })).toBeInTheDocument();
+    expect(screen.getByText(/stored on this computer/)).toBeInTheDocument();
+  });
+});

@@ -42,7 +42,9 @@ REFRESH_MIN_INTERVAL_S = 15 * 60  # SEC-86: one manual refresh per source per 15
 # Hosted (ADR-0013). Vercel Hobby with Fluid compute: maxDuration ≤ 300 s (vercel.json sets 300). A job stops
 # starting new upstream requests after HOSTED_JOB_BUDGET_S, leaving room for one slow request and the DB writes. A
 # function killed at its limit never releases its lease, so leases lapse a little after the limit.
-HOSTED_JOB_BUDGET_S = 200.0
+# Lowered 200 → 90 s after the first live batch (2026-10-15): a 144 s step finished its work but its response never
+# arrived (HTTP 000 at the 300 s limit), while steps up to 98 s always answered. Shorter steps cost only more calls.
+HOSTED_JOB_BUDGET_S = 90.0
 LEASE_TTL_S = 330.0
 
 

@@ -49,7 +49,7 @@ these ways:
 | Dev fixtures, API docs | dev/test only | never (`IIP_ENV=prod`; the seed route refuses) |
 
 **Resumable jobs.** Each call does at least one unit of work, then stops starting new upstream requests after
-`HOSTED_JOB_BUDGET_S = 200` s. That leaves room inside Vercel's 300 s limit for one slow request and its writes.
+`HOSTED_JOB_BUDGET_S = 90` s (was 200; lowered 2026-10-15 after a live 144 s batch step completed its work but its response never arrived — HTTP 000 at the 300 s limit — while every step up to 98 s answered; cause NOT VERIFIED). Shorter steps only mean more calls; progress and staged data carry over.
 - The time budget is checked only after a unit, so a call always makes progress and the loop cannot stall.
 - The MF page loops until `done` (at most 200 calls) and shows the server's progress counts.
 - A new run is rate-limited, but a continuation of the run in progress is not.

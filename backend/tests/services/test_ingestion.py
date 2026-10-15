@@ -1,5 +1,6 @@
 """Ingestion pipeline over synthetic AMFI-format bytes (served by MockTransport — no network)."""
 
+import sqlite3
 from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -225,3 +226,16 @@ def test_runs_left_running_by_a_previous_process_are_marked_interrupted(conn) ->
     alert = alerts._ingestion(conn, NOW, 7)
     assert [c.kind for c in alert] == ["ingestion_failed"] and "interrupted" in alert[0].message
     assert ing.mark_interrupted_runs(conn, NOW) == 0
+
+
+def test_backfill_status_ignores_rejections_from_other_schemes_in_the_fund_house_file(conn: sqlite3.Connection) -> None:
+    """Live batch 2026-10-15: AMFI's history file covers the whole fund house; 255 unusable rows of OTHER schemes made
+    a fully successful backfill "partial". Status now reflects failed requests only; the count is still reported."""
+    run = ing._start_run(conn, "amfi.navhistory", NOW)
+    ok = ing._finish_backfill(conn, run, lambda: NOW, 209814, 255, 1268, [])
+    assert ok.status == "ok" and ok.rows_rejected == 255
+    run = ing._start_run(conn, "amfi.navhistory", NOW)
+    part = ing._finish_backfill(conn, run, lambda: NOW, 100, 0, 50, ["2025-01-01..2025-03-31: FetchFailed"])
+    assert part.status == "partial"
+    run = ing._start_run(conn, "amfi.navhistory", NOW)
+    assert ing._finish_backfill(conn, run, lambda: NOW, 0, 0, 0, ["x: FetchFailed"]).status == "failed"

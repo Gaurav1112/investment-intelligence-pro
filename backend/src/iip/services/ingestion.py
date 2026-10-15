@@ -471,7 +471,9 @@ def _finish_backfill(
     conn: sqlite3.Connection, run_id: str, now: Callable[[], datetime], ok: int, rej: int, stored: int,
     errors: list[str],
 ) -> RunSummary:  # fmt: skip
-    status = "ok" if not errors and rej == 0 else ("partial" if stored else "failed")
+    # AMFI's NAV-history file covers the whole fund house; rejected rows mostly belong to schemes that are not stored
+    # either way, so they are reported (rows_rejected) but do not make the backfill "partial". Only failed requests do.
+    status = "ok" if not errors else ("partial" if stored else "failed")
     _finish_run(conn, run_id, now(), status, ok, rej, None, "; ".join(errors[:5]))
     return RunSummary(run_id, "amfi.navhistory", status, ok, rej, stored, "; ".join(errors[:5]) or "complete")
 
@@ -681,7 +683,9 @@ def _finish_batch(
     errors += [f"{g['amc']}: {g['error']}" for g in groups if g["status"] == "failed"]
     stored = sum(int(n) for g in groups for n in g["stored"].values())
     ok, rej = int(state["ok"]), int(state["rej"])
-    status = "ok" if not errors and rej == 0 else ("partial" if stored else "failed")
+    # AMFI's NAV-history file covers the whole fund house; rejected rows mostly belong to schemes that are not stored
+    # either way, so they are reported (rows_rejected) but do not make the backfill "partial". Only failed requests do.
+    status = "ok" if not errors else ("partial" if stored else "failed")
     codes = sum(len(g["codes"]) for g in groups)
     skipped: list[dict[str, int]] = state["skipped"]
     detail = f"{codes} scheme(s) across {len(groups)} fund house(s), one pass per fund house"

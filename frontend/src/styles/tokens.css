@@ -1,0 +1,67 @@
+/* Design tokens — ux-design.md §4.3. Contrast ratios verified in the spec (all text ≥ 4.5:1, UI ≥ 3:1). */
+:root {
+  color-scheme: light;
+  --bg: #fafaf8;
+  --surface: #ffffff;
+  --surface-2: #f1f2f4;
+  --text: #15171c;
+  --text-muted: #4a5161;
+  --text-subtle: #5f6675;
+  --border: #d9dce1;
+  --border-strong: #7d8492;
+  --accent: #1f55c4;
+  --dir-up: #1f55c4;
+  --dir-down: #a9420a;
+  --fresh-live: #0b6e66;
+  --fresh-delayed: #7a5300;
+  --fresh-eod: #475467;
+  --fresh-stale: #b42318;
+  --fixture: #8e1c6b;
+  --risk-ink: #3e4c8a;
+  --band-90: rgba(31, 85, 196, 0.18);
+  --band-50: rgba(31, 85, 196, 0.35);
+  --cat-1: #0072b2;
+  --cat-2: #e69f00;
+  --cat-3: #009e73;
+  --cat-4: #cc79a7;
+
+  --font: "Inter Variable", Inter, "Segoe UI", system-ui, -apple-system, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --fs-display: 28px; --lh-display: 36px;
+  --fs-title: 20px; --lh-title: 28px;
+  --fs-heading: 16px; --lh-heading: 24px;
+  --fs-body: 14px; --lh-body: 20px;
+  --fs-small: 12px; --lh-small: 16px;
+  --fs-micro: 11px;
+  --radius: 6px;
+  --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-5: 24px; --space-6: 32px;
+  --shadow: 0 1px 2px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.08);
+  --motion: 160ms;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #0d0f13; --surface: #15181e; --surface-2: #1d2129;
+    --text: #e7e9ee; --text-muted: #aeb4c0; --text-subtle: #959dab;
+    --border: #2a2f39; --border-strong: #6b7382;
+    --accent: #86abff; --dir-up: #86abff; --dir-down: #ffa066;
+    --fresh-live: #4fd1c1; --fresh-delayed: #f2c14e; --fresh-eod: #b3bdcc; --fresh-stale: #ff8a80;
+    --fixture: #f48fd0; --risk-ink: #a9b4e8;
+    --band-90: rgba(134, 171, 255, 0.18); --band-50: rgba(134, 171, 255, 0.35);
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0d0f13; --surface: #15181e; --surface-2: #1d2129;
+  --text: #e7e9ee; --text-muted: #aeb4c0; --text-subtle: #959dab;
+  --border: #2a2f39; --border-strong: #6b7382;
+  --accent: #86abff; --dir-up: #86abff; --dir-down: #ffa066;
+  --fresh-live: #4fd1c1; --fresh-delayed: #f2c14e; --fresh-eod: #b3bdcc; --fresh-stale: #ff8a80;
+  --fixture: #f48fd0; --risk-ink: #a9b4e8;
+  --band-90: rgba(134, 171, 255, 0.18); --band-50: rgba(134, 171, 255, 0.35);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --motion: 0ms; }
+}

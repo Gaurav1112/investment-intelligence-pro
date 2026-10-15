@@ -48,6 +48,7 @@ from iip.data.validators import validate_isin
 from iip.engine.determinism import canonical_json, sha256_hex
 from iip.engine.money import ZERO, engine_context
 from iip.services import portfolio as pf
+from iip.services.ingestion import IsinLookupFailed
 from iip.store.db import write_tx
 
 log = logging.getLogger("iip.cas")
@@ -375,18 +376,27 @@ def preview_cas_import(
     sha = sha256_hex(data)
     today = now.date()
 
+    lookup_failed: frozenset[str] = frozenset()
     if resolve_isins is not None:
         # Held schemes outside the minimised scope (Regular plans, IDCW options) are looked up by exact ISIN in AMFI's
         # current file and registered; anything not found stays unmatched with its reason.
         unknown = {s.isin for s in statement.schemes if s.isin and _match(conn, s)[0] is None}
         if unknown:
-            resolve_isins(unknown)
+            try:
+                resolve_isins(unknown)
+            except IsinLookupFailed:
+                lookup_failed = frozenset(unknown)
 
-    mapping = _map_statement(conn, statement, today)
+    mapping = _map_statement(conn, statement, today, lookup_failed)
     will_store, rejected, ignored = mapping.will_store, mapping.rejected, mapping.ignored
     reconciliation = mapping.reconciliation
     blocking = _oversell_check(conn, portfolio_id, mapping.candidates)
     warnings = _warnings(conn, portfolio_id, statement, mapping)
+    if lookup_failed:
+        warnings.append(
+            f"{len(lookup_failed)} ISIN(s) could not be looked up because AMFI's file could not be fetched; their "
+            "rows are rejected as ISIN_LOOKUP_FAILED, not as unknown. Preview the statement again later."
+        )
     mismatches = [r for r in reconciliation if r["status"] != "OK"]
     batch_id = pf._new_id("imp")
     already = pf._already_applied(conn, portfolio_id, sha)
@@ -456,12 +466,16 @@ class _Mapping:
 _SWITCH_TYPES = frozenset({"SWITCH_IN", "SWITCH_IN_MERGER", "SWITCH_OUT", "SWITCH_OUT_MERGER"})
 
 
-def _map_statement(conn: sqlite3.Connection, statement: CasStatement, today: date) -> _Mapping:
+def _map_statement(
+    conn: sqlite3.Connection, statement: CasStatement, today: date, lookup_failed: frozenset[str] = frozenset()
+) -> _Mapping:
     out = _Mapping()
     row = 0
     with engine_context():
         for s in statement.schemes:
             iid, iname, why = _match(conn, s)
+            if iid is None and why == "UNKNOWN_ISIN" and s.isin in lookup_failed:
+                why = "ISIN_LOOKUP_FAILED"  # unknown because AMFI could not be reached, not because it is absent
             net_units = ZERO
             moved_rows_not_stored = 0
             for t in s.txns:

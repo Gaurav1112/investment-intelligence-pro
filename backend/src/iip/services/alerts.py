@@ -226,11 +226,13 @@ def _ingestion(conn: sqlite3.Connection, now: datetime, lookback: int) -> list[C
     cutoff = (now - timedelta(days=lookback)).isoformat()
     out: list[Candidate] = []
     for r in conn.execute(
-        "SELECT run_id, source_id, started_at FROM ingestion_runs WHERE status='failed' AND started_at >= ?"
+        "SELECT run_id, source_id, started_at, error FROM ingestion_runs WHERE status='failed' AND started_at >= ?"
         " ORDER BY started_at, run_id",
         (cutoff,),
     ):
-        body = f"the run for source {r['source_id']} started {r['started_at']} finished with status failed."
+        # Runs cut off by a stop or crash are marked failed at startup (ingestion.mark_interrupted_runs).
+        how = "was interrupted" if (r["error"] or "").startswith("INTERRUPTED") else "finished with status failed"
+        body = f"the run for source {r['source_id']} started {r['started_at']} {how}."
         out.append(Candidate("ingestion_failed", "warning", r["source_id"], _rule_text(rule, body), r["source_id"],
                              r["run_id"], f"ingestion-failed:{r['run_id']}"))  # fmt: skip
     return out

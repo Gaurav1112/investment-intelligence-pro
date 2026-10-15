@@ -8,6 +8,7 @@ import os
 import secrets
 import sqlite3
 import threading
+import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -20,10 +21,13 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from iip.api.security import SESSION_COOKIE, RateLimiter, SecurityMiddleware, SessionStore
 from iip.api.settings import Settings, ensure_access_token
+from iip.data.fetch import CircuitBreaker, Fetcher
+from iip.services import ingestion
 from iip.store.db import connect, current_version, migrate
 
 log = logging.getLogger("iip.api")
 APP_VERSION = "0.1.0"
+REFRESH_MIN_INTERVAL_S = 15 * 60  # SEC-86: one manual refresh per source per 15 minutes
 
 
 class TokenIn(BaseModel):
@@ -51,8 +55,33 @@ class AppState:
         self._local = threading.local()
         self._all: list[sqlite3.Connection] = []
         self._lock = threading.Lock()
+        # C-16 / SEC-86 (ECC F3): one breaker for the process so its state outlives a request; outbound requests are
+        # paced; manual refreshes are limited per source, with an atomic check-and-set (routes run in a thread pool).
+        self.breaker = CircuitBreaker(clock=clock)
+        self.pause: Callable[[float], object] = time.sleep
+        self.fetcher_factory: Callable[[], Fetcher] | None = None
+        self._refresh_lock = threading.Lock()
+        self._last_refresh: dict[str, datetime] = {}
         migrate(self.conn, clock().isoformat())
         _restrict_db_files(self.settings.db_path)
+        if ingestion.mark_interrupted_runs(self.conn, clock()):
+            log.warning("ingestion runs left 'running' by a previous process were marked failed (interrupted)")
+
+    def fetcher(self) -> Fetcher:
+        """A fetcher sharing the process-wide circuit breaker (tests inject ``fetcher_factory``)."""
+        if self.fetcher_factory is not None:
+            return self.fetcher_factory()
+        return Fetcher(breaker=self.breaker)
+
+    def claim_refresh(self, source_id: str) -> int | None:
+        """Reserve this source's manual-refresh slot. None = granted; otherwise the seconds to wait."""
+        with self._refresh_lock:
+            now = self.clock()
+            last = self._last_refresh.get(source_id)
+            if last is not None and (elapsed := (now - last).total_seconds()) < REFRESH_MIN_INTERVAL_S:
+                return int(REFRESH_MIN_INTERVAL_S - elapsed) + 1
+            self._last_refresh[source_id] = now
+            return None
 
     @property
     def conn(self) -> sqlite3.Connection:

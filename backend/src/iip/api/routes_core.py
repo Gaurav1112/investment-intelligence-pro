@@ -12,7 +12,6 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from iip.api import routes_llm
-from iip.data.fetch import Fetcher
 from iip.data.registry import REGISTRY, SourceMode
 from iip.engine import tax as tx
 from iip.engine.candidates import ENGINE_VERSION
@@ -31,7 +30,10 @@ def tax_rules() -> tx.TaxRuleSet | None:
         return None
 
 
-REFRESH_MIN_INTERVAL_S = 15 * 60
+def _rate_limited(wait: int) -> JSONResponse:
+    return JSONResponse({"code": "RATE_LIMITED", "retry_after_s": wait}, status_code=429,
+                        headers={"Retry-After": str(wait)})  # fmt: skip
+
 
 _TERMS_QUERIES = (
     ("mf_schemes", "SELECT * FROM mf_schemes WHERE instrument_id=?"),
@@ -158,19 +160,14 @@ def router() -> APIRouter:  # noqa: PLR0915 - route table
     def run_navall(request: Request) -> Any:
         st = _state(request)
         # SEC-86: at most one manual refresh per source per 15 minutes; refused calls make no outbound request.
-        now = st.clock()
-        last = getattr(st, "last_navall_refresh", None)
-        if last is not None and (now - last).total_seconds() < REFRESH_MIN_INTERVAL_S:
-            wait = int(REFRESH_MIN_INTERVAL_S - (now - last).total_seconds()) + 1
-            return JSONResponse({"code": "RATE_LIMITED", "retry_after_s": wait}, status_code=429,
-                                headers={"Retry-After": str(wait)})  # fmt: skip
-        st.last_navall_refresh = now
+        if (wait := st.claim_refresh("amfi.navall")) is not None:
+            return _rate_limited(wait)
         ingestion.sync_sources(st.conn)
-        summary = ingestion.ingest_navall(st.conn, Fetcher(), st.clock)
+        summary = ingestion.ingest_navall(st.conn, st.fetcher(), st.clock)
         return summary.__dict__
 
     @r.post("/ingestion/backfill/{amfi_code}")
-    def backfill(amfi_code: int, body: BackfillIn, request: Request) -> dict[str, Any]:
+    def backfill(amfi_code: int, body: BackfillIn, request: Request) -> Any:
         st = _state(request)
         row = st.conn.execute(
             "SELECT m.amc FROM instruments i JOIN mf_schemes m USING(instrument_id) WHERE i.amfi_code=?",
@@ -178,14 +175,18 @@ def router() -> APIRouter:  # noqa: PLR0915 - route table
         ).fetchone()
         if row is None:
             raise HTTPException(404, "scheme not in the local store; run the AMFI NAV ingestion first")
-        fetcher = Fetcher()
+        # C-16 (ECC F3): a backfill can make ~160 requests (fund-house probe + 90-day windows), so it shares the
+        # per-source limit, pauses between requests and uses the process-wide circuit breaker.
+        if (wait := st.claim_refresh("amfi.navhistory")) is not None:
+            return _rate_limited(wait)
+        fetcher = st.fetcher()
         today = st.clock().date()
-        mf_id = ingestion.discover_fund_house_id(st.conn, fetcher, row["amc"], today.replace(day=1))
+        mf_id = ingestion.discover_fund_house_id(st.conn, fetcher, row["amc"], today.replace(day=1), pause=st.pause)
         if mf_id is None:
             raise HTTPException(424, "could not determine AMFI's fund-house id for this AMC")
         summary = ingestion.backfill_history(
             st.conn, fetcher, scheme_code=amfi_code, mf_id=mf_id,
-            start=date(today.year - body.years, today.month, 1), end=today, now=st.clock,
+            start=date(today.year - body.years, today.month, 1), end=today, now=st.clock, pause=st.pause,
         )  # fmt: skip
         return summary.__dict__
 

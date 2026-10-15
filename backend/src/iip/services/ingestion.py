@@ -11,7 +11,8 @@ from __future__ import annotations
 import json
 import secrets
 import sqlite3
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
@@ -98,6 +99,32 @@ def _finish_run(
         " WHERE run_id=?",
         (now.isoformat(), status, ok, rej, sha, err or None, run_id),
     )
+
+
+@contextmanager
+def _failing_run(conn: sqlite3.Connection, run_id: str, now: Callable[[], datetime]) -> Iterator[None]:
+    """Any unexpected error after ``_start_run`` records the run as 'failed' (so the ingestion alert fires) and
+    re-raises. Only the exception CLASS is stored: a message can carry values (threat-model C-13)."""
+    try:
+        yield
+    except BaseException as exc:
+        if conn.in_transaction:
+            conn.rollback()
+        _finish_run(conn, run_id, now(), "failed", 0, 0, None, type(exc).__name__)
+        raise
+
+
+INTERRUPTED = "INTERRUPTED: the app stopped while this run was in progress"
+
+
+def mark_interrupted_runs(conn: sqlite3.Connection, now: datetime) -> int:
+    """At startup no run can be in progress (one process), so any 'running' row was cut off by a crash or a stop.
+    It becomes 'failed' with an explicit reason, which the 'ingestion run failed' alert picks up."""
+    cur = conn.execute(
+        "UPDATE ingestion_runs SET status='failed', finished_at=?, error=? WHERE status='running'",
+        (now.isoformat(), INTERRUPTED),
+    )
+    return cur.rowcount
 
 
 def tracked_scheme_codes(conn: sqlite3.Connection) -> set[int]:
@@ -197,13 +224,14 @@ def ingest_navall(conn: sqlite3.Connection, fetcher: Fetcher, now: Callable[[], 
     except (FetchError, DataError) as exc:
         _finish_run(conn, run_id, now(), "failed", 0, 0, None, f"{type(exc).__name__}: {exc}")
         return RunSummary(run_id, source, "failed", 0, 0, 0, f"{type(exc).__name__}: {exc}")
-    tracked = tracked_scheme_codes(conn)
-    scope = {r.scheme_code for r in result.records if in_minimised_scope(r, tracked)}
-    observations = _validated(result)
-    with write_tx(conn):
-        _store_schemes(conn, (r for r in result.records if r.scheme_code in scope), payload.retrieved_at)
-    stored = _store_observations(conn, observations, run_id, lambda c: c in scope)
-    pruned = prune_untracked_history(conn, tracked)
+    with _failing_run(conn, run_id, now):
+        tracked = tracked_scheme_codes(conn)
+        scope = {r.scheme_code for r in result.records if in_minimised_scope(r, tracked)}
+        observations = _validated(result)
+        with write_tx(conn):
+            _store_schemes(conn, (r for r in result.records if r.scheme_code in scope), payload.retrieved_at)
+        stored = _store_observations(conn, observations, run_id, lambda c: c in scope)
+        pruned = prune_untracked_history(conn, tracked)
     rep = result.report
     status = "ok" if rep.rows_rejected == 0 else "partial"
     _finish_run(conn, run_id, now(), status, rep.rows_ok, rep.rows_rejected, payload.sha256, "")
@@ -214,6 +242,10 @@ def ingest_navall(conn: sqlite3.Connection, fetcher: Fetcher, now: Callable[[], 
 ISIN_ALIAS_PREFIX = "isin.alias:"
 
 
+class IsinLookupFailed(Exception):
+    """AMFI's file could not be fetched or parsed, so it is UNKNOWN whether the ISINs exist (not "no match")."""
+
+
 def register_schemes_by_isin(
     conn: sqlite3.Connection, fetcher: Fetcher, isins: set[str], now: Callable[[], datetime]
 ) -> dict[str, str]:
@@ -221,16 +253,17 @@ def register_schemes_by_isin(
 
     Exact ISIN only (payout/growth or reinvestment column) — never names. A reinvestment-option ISIN maps to the same
     AMFI scheme code as its payout ISIN, so it is recorded as an alias of that instrument. Held schemes are within the
-    data-minimisation scope (AMFI ToU: keep held/watched schemes). Returns {isin: instrument_id} for those found;
-    a fetch failure returns {} (callers report the ISINs as unmatched — nothing is guessed)."""
+    data-minimisation scope (AMFI ToU: keep held/watched schemes). Returns {isin: instrument_id} for those found.
+    A fetch or parse failure raises :class:`IsinLookupFailed` (message: the error class only), so callers can tell
+    "lookup failed, retry" apart from "no such ISIN" — nothing is guessed or registered either way."""
     wanted = {i for i in isins if i}
     if not wanted:
         return {}
     try:
         payload = fetcher.fetch(navall_request())
         result = parse_navall(payload)
-    except (FetchError, DataError):
-        return {}
+    except (FetchError, DataError) as exc:
+        raise IsinLookupFailed(type(exc).__name__) from exc
     found: dict[str, str] = {}
     records = []
     for rec in result.records:
@@ -253,8 +286,9 @@ def register_schemes_by_isin(
                     (ISIN_ALIAS_PREFIX + isin, json.dumps(iid)),
                 )
     run_id = _start_run(conn, "amfi.navall", now())
-    observations = _validated(result)
-    stored = _store_observations(conn, observations, run_id, lambda c: c in codes)
+    with _failing_run(conn, run_id, now):
+        observations = _validated(result)
+        stored = _store_observations(conn, observations, run_id, lambda c: c in codes)
     _finish_run(conn, run_id, now(), "ok", stored, 0, payload.sha256, "registered held schemes by ISIN")
     return found
 
@@ -276,12 +310,10 @@ def prune_untracked_history(conn: sqlite3.Connection, tracked: set[int]) -> int:
         for r in candidates:
             if int(r["series_id"].split(":")[1]) in keep:
                 continue
-            # Break supersede links pointing at rows we delete, then drop older NAVAll rows for this scheme.
-            conn.execute(
-                "UPDATE observations SET superseded_by = NULL WHERE superseded_by IN (SELECT obs_id FROM observations"
-                " WHERE series_id=? AND source_id='amfi.navall' AND observation_date < ?)",
-                (r["series_id"], r["latest"]),
-            )
+            # Drop older NAVAll rows for this scheme. A correction pair (old row superseded_by new row) always shares
+            # one date, so this single DELETE removes both and the self-referencing FK holds at statement end. Never
+            # clear superseded_by first: that re-marked the old row current beside the new one (ux_obs_current
+            # breach, ECC PR-1/DB-1) and the rollback made every later prune fail the same way.
             cur = conn.execute(
                 "DELETE FROM observations WHERE series_id=? AND source_id='amfi.navall' AND observation_date < ?",
                 (r["series_id"], r["latest"]),
@@ -337,20 +369,21 @@ def backfill_history(
     stored = ok = rej = 0
     errors: list[str] = []
     window_end = end
-    while window_end >= start:
-        window_start = max(start, window_end - timedelta(days=MAX_HISTORY_WINDOW_DAYS))
-        try:
-            payload = fetcher.fetch(navhistory_request(mf_id=mf_id, tp=1, from_date=window_start, to_date=window_end))
-            res = parse_navhistory(payload)
-            ok += res.report.rows_ok
-            rej += res.report.rows_rejected
-            mine = [o for o in res.observations if int(o.entity_key) == scheme_code]
-            stored += _store_observations(conn, _validated_list(mine), run_id, lambda _c: True)
-        except (FetchError, DataError) as exc:
-            errors.append(f"{window_start}..{window_end}: {type(exc).__name__}")
-        if pause is not None:
-            pause(1.0)
-        window_end = window_start - timedelta(days=1)
+    with _failing_run(conn, run_id, now):
+        while window_end >= start:
+            window_start = max(start, window_end - timedelta(days=MAX_HISTORY_WINDOW_DAYS))
+            try:
+                request = navhistory_request(mf_id=mf_id, tp=1, from_date=window_start, to_date=window_end)
+                res = parse_navhistory(fetcher.fetch(request))
+                ok += res.report.rows_ok
+                rej += res.report.rows_rejected
+                mine = [o for o in res.observations if int(o.entity_key) == scheme_code]
+                stored += _store_observations(conn, _validated_list(mine), run_id, lambda _c: True)
+            except (FetchError, DataError) as exc:
+                errors.append(f"{window_start}..{window_end}: {type(exc).__name__}")
+            if pause is not None:
+                pause(1.0)
+            window_end = window_start - timedelta(days=1)
     status = "ok" if not errors and rej == 0 else ("partial" if stored else "failed")
     _finish_run(conn, run_id, now(), status, ok, rej, None, "; ".join(errors[:5]))
     return RunSummary(run_id, source, status, ok, rej, stored, "; ".join(errors[:5]) or "complete")

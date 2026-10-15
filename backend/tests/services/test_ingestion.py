@@ -150,7 +150,78 @@ def test_register_held_schemes_by_exact_isin_including_reinvestment_alias(conn) 
     assert alias is not None
 
 
-def test_register_by_isin_fetch_failure_matches_nothing(conn) -> None:  # type: ignore[no-untyped-def]
-    assert (
-        ing.register_schemes_by_isin(conn, fetcher(lambda _r: httpx.Response(500)), {"INF000A01AB9"}, lambda: NOW) == {}
-    )
+def test_register_by_isin_fetch_failure_is_reported_not_returned_as_no_match(conn) -> None:  # type: ignore[no-untyped-def]
+    """F3 (ECC panel): a failed AMFI lookup must not look like "no stored instrument has this ISIN"."""
+    with pytest.raises(ing.IsinLookupFailed):
+        ing.register_schemes_by_isin(conn, fetcher(lambda _r: httpx.Response(500)), {"INF000A01AB9"}, lambda: NOW)
+    assert conn.execute("SELECT COUNT(*) FROM instruments").fetchone()[0] == 0  # nothing guessed or registered
+
+
+# ------------------------------------------------------------------ ECC panel (track A) regressions
+
+
+def _nav_row(sid: str, day: str, value: str) -> object:
+    from iip.store.observations import ObservationRow
+
+    return ObservationRow(
+        series_id=sid, kind="nav", value=value, unit="INR_per_unit", currency="INR", observation_date=day,
+        retrieved_at=NOW.isoformat(), source_id="amfi.navall", source_url="https://portal.amfiindia.com/x",
+        quality_status="ok", raw_sha256="a" * 64)  # fmt: skip
+
+
+def test_prune_survives_a_same_day_nav_correction(conn) -> None:  # type: ignore[no-untyped-def]
+    """PR-1 / DB-1: a corrected NAV (old row superseded by a new row, same date) that falls behind the latest date
+    used to be re-linked as current by the prune, breaching ux_obs_current; every later NAVAll then failed."""
+    from iip.store.observations import upsert_observation
+
+    sid = "nav:990001"
+    upsert_observation(conn, _nav_row(sid, "2026-10-13", "10.0000"))  # type: ignore[arg-type]
+    upsert_observation(conn, _nav_row(sid, "2026-10-13", "10.0100"))  # type: ignore[arg-type]  # a correction
+    upsert_observation(conn, _nav_row(sid, "2026-10-14", "10.0200"))  # type: ignore[arg-type]
+    assert ing.prune_untracked_history(conn, set()) == 2
+    rows = conn.execute("SELECT observation_date, superseded_by FROM observations WHERE series_id=?", (sid,))
+    assert [tuple(r) for r in rows] == [("2026-10-14", None)]
+    assert ing.prune_untracked_history(conn, set()) == 0  # and the next run is clean too
+
+
+def test_navall_failure_after_start_marks_the_run_failed_and_reraises(conn, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """F4: an unexpected error after the fetch used to leave the run 'running' forever, so no alert fired."""
+    import sqlite3
+
+    from iip.services import alerts
+
+    def boom(*_a: object, **_k: object) -> int:
+        raise sqlite3.OperationalError("database is locked units=123.45")
+
+    monkeypatch.setattr(ing, "prune_untracked_history", boom)
+    with pytest.raises(sqlite3.OperationalError):
+        ing.ingest_navall(conn, fetcher(amfi), lambda: NOW)
+    run = conn.execute("SELECT status, finished_at, error FROM ingestion_runs").fetchone()
+    assert run["status"] == "failed" and run["finished_at"] is not None
+    assert run["error"] == "OperationalError"  # class only: an exception message may carry values (C-13)
+    assert [c.kind for c in alerts._ingestion(conn, NOW, 7)] == ["ingestion_failed"]
+
+
+def test_backfill_failure_after_start_marks_the_run_failed(conn, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def boom(*_a: object, **_k: object) -> int:
+        raise RuntimeError("bad")
+
+    monkeypatch.setattr(ing, "_store_observations", boom)
+    with pytest.raises(RuntimeError):
+        ing.backfill_history(conn, fetcher(amfi), scheme_code=119018, mf_id=9, start=date(2026, 10, 13),
+                             end=date(2026, 10, 14), now=lambda: NOW)  # fmt: skip
+    assert tuple(conn.execute("SELECT status, error FROM ingestion_runs").fetchone()) == ("failed", "RuntimeError")
+
+
+def test_runs_left_running_by_a_previous_process_are_marked_interrupted(conn) -> None:  # type: ignore[no-untyped-def]
+    from iip.services import alerts
+
+    conn.execute("INSERT INTO ingestion_runs(run_id, source_id, started_at, status) VALUES"
+                 " ('run_old', 'amfi.navall', ?, 'running')", (NOW.isoformat(),))  # fmt: skip
+    assert ing.mark_interrupted_runs(conn, NOW) == 1
+    row = conn.execute("SELECT status, finished_at, error FROM ingestion_runs").fetchone()
+    assert row["status"] == "failed" and row["finished_at"] == NOW.isoformat()
+    assert row["error"] == ing.INTERRUPTED
+    alert = alerts._ingestion(conn, NOW, 7)
+    assert [c.kind for c in alert] == ["ingestion_failed"] and "interrupted" in alert[0].message
+    assert ing.mark_interrupted_runs(conn, NOW) == 0

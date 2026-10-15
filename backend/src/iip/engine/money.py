@@ -107,7 +107,10 @@ def units_allotment(value: Decimal) -> Decimal:
 def pct(value: Decimal) -> str:
     """Human display of a fraction as a percentage string with 2 dp, HALF_EVEN, e.g. 0.065 → '6.50%'."""
     with engine_context():
-        return f"{(value * 100).quantize(Decimal('0.01'), rounding=ROUND_HALF_EVEN)}%"
+        q = (value * 100).quantize(Decimal("0.01"), rounding=ROUND_HALF_EVEN)
+        if q.is_zero():
+            q = abs(q)  # never display "-0.00%" for a tiny negative that rounds to zero
+        return f"{q}%"
 
 
 def format_inr(amount: Decimal, *, paise: bool = True) -> str:

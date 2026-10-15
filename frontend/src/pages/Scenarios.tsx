@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useSearchParams } from "react-router-dom";
 import { DotPlot } from "../charts/DotPlot";
+import { CodeText } from "../components/Code";
+import { humanise } from "../lib/codes";
+import { PageHeader } from "../components/PageHeader";
 import { Loading } from "../components/States";
 import { api } from "../lib/api";
 import { compareDecimals, dateLabel, fractionToPercent, inr, pct, percentToFraction, roundHalfUp } from "../lib/format";
@@ -45,7 +48,14 @@ export default function Scenarios() {
   };
   return (
     <section>
-      <h1>Scenarios</h1>
+      <PageHeader
+        title="Scenarios"
+        purpose={
+          tab === "lab"
+            ? "Stress one instrument with a hypothetical shock, or check how often a fund's past periods reached a return target."
+            : "How often did a fund's past periods reach a return target? Historical frequency, not a forecast."
+        }
+      />
       <div className="tabs" role="tablist" aria-label="Scenario tools">
         <button type="button" role="tab" id="tab-lab" aria-selected={tab === "lab"} aria-controls="panel-lab" onClick={() => setTab("lab")}>
           Scenario lab
@@ -209,6 +219,7 @@ function ScenarioLab({ initial }: { initial: Picked | null }) {
                 <label htmlFor={`shock-${s.key}`}>{s.label}</label>
                 <input
                   id={`shock-${s.key}`}
+                  className="input-amount"
                   inputMode={s.integer ? "numeric" : "decimal"}
                   value={text[s.key]}
                   onChange={(e) => setText((t) => ({ ...t, [s.key]: e.target.value }))}
@@ -469,6 +480,7 @@ function Feasibility({ initial }: { initial: Picked | null }) {
         <div className="row">
           <div className="field">
             <label htmlFor="feas-target">Target annual return (%)</label>
+            <span className="pct">
             <input
               id="feas-target"
               inputMode="decimal"
@@ -480,6 +492,7 @@ function Feasibility({ initial }: { initial: Picked | null }) {
               aria-invalid={Boolean(problems.target)}
               aria-describedby="feas-target-hint"
             />
+            </span>
             <div id="feas-target-hint" className="hint">
               {aspiration ? "Pre-filled from the aspiration in your profile." : "Per year, compounded (e.g. 20)."}
             </div>
@@ -552,6 +565,43 @@ function FeasibilityView({ res, onExplain }: { res: FeasibilityResponse; onExpla
           <p className="small">
             What would be needed: a longer stored NAV history for this scheme — at least {h + 1} years of daily NAVs and at least two independent{" "}
             {h}-year periods. Backfill longer history (Data health → ingestion), then check again.
+          </p>
+        </div>
+      ) : null}
+      {res.reached_target && res.loss ? (
+        <div className="card answer answer--neutral" aria-live="polite">
+          <p className="answer__eyebrow">At a glance · past {h}-year windows</p>
+          <p className="answer__lead">
+            Reached {target} a year or more in {res.reached_target.count} of {res.reached_target.of} historical windows; lost money in{" "}
+            {res.loss.count} of {res.loss.of}.
+          </p>
+          <dl className="answer__facts">
+            <div>
+              <dt>Reached the target</dt>
+              <dd className="num-dd">
+                {res.reached_target.count} <span className="small subtle">of {res.reached_target.of}</span>
+              </dd>
+            </div>
+            <div>
+              <dt>Lost money</dt>
+              <dd className="num-dd">
+                {res.loss.count} <span className="small subtle">of {res.loss.of}</span>
+              </dd>
+            </div>
+            {res.independent_periods !== undefined ? (
+              <div>
+                <dt>Independent periods behind these</dt>
+                <dd className="num-dd">{res.independent_periods}</dd>
+              </div>
+            ) : null}
+            <div>
+              <dt>Evidence</dt>
+              <dd>{res.low_evidence ? "Low — no percentages shown" : humanise(res.evidence_level)}</dd>
+            </div>
+          </dl>
+          <p className="small subtle">
+            Windows overlap, so they are not independent tries. This describes the past only; it is not a forecast and not a suggestion to change
+            how much risk you take.
           </p>
         </div>
       ) : null}
@@ -706,10 +756,23 @@ function FeasibilityView({ res, onExplain }: { res: FeasibilityResponse; onExpla
         </ul>
       ) : null}
       {res.notes?.length ? <p className="small">{res.notes.join(" ")}</p> : null}
-      {res.flags?.length ? <p className="small subtle">Flags: {res.flags.join(", ")}</p> : null}
+      {res.flags?.length ? (
+        <p className="small subtle">
+          Flags:{" "}
+          {res.flags.map((f, i) => (
+            <span key={f}>
+              {i ? " · " : ""}
+              <CodeText raw={f} />
+            </span>
+          ))}
+        </p>
+      ) : null}
       {res.caveats?.length ? (
-        <details className="small" open>
-          <summary>Caveats ({res.caveats.length})</summary>
+        <details className="small card card--quiet">
+          <summary>
+            <span aria-hidden="true">⚠ </span>
+            <strong>Caveats ({res.caveats.length})</strong> <span className="subtle">— read before relying on these counts</span>
+          </summary>
           <ol>
             {res.caveats.map((c) => (
               <li key={c}>{(c)}</li>

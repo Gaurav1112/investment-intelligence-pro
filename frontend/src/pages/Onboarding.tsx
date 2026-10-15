@@ -93,14 +93,15 @@ export default function Onboarding() {
         {step === 0 && (
           <div className="field">
             <label htmlFor="amount">Investable amount (₹)</label>
-            <input
-              id="amount"
+            <span className="money">
+            <input id="amount"
               inputMode="decimal"
               value={p.amount ?? ""}
               onChange={(e) => set("amount", e.target.value.replace(/[,\s₹]/g, "") || null)}
               aria-invalid={!amountValid}
               aria-describedby="amount-hint"
             />
+            </span>
             <div id="amount-hint" className="hint">
               {p.amount && amountValid ? inr(p.amount) : "Digits only, e.g. 500000"}
             </div>
@@ -142,7 +143,9 @@ export default function Onboarding() {
             {p.loss_acceptable ? (
               <div className="field">
                 <label htmlFor="loss">Largest loss you would accept (% of the amount)</label>
+                <span className="pct">
                 <input id="loss" inputMode="decimal" value={lossPct} onChange={(e) => setLossPct(e.target.value)} aria-invalid={lossFr === "invalid"} />
+                </span>
                 <div className="hint">{growth ? "Required for growth objectives." : "Used as your loss budget."}</div>
               </div>
             ) : null}
@@ -179,7 +182,9 @@ export default function Onboarding() {
             </div>
             <div className="field">
               <label htmlFor="slab">Your marginal income-tax slab (%, new regime) — optional</label>
+              <span className="pct">
               <input id="slab" inputMode="decimal" value={slabPct} onChange={(e) => setSlabPct(e.target.value)} />
+              </span>
               <div className="hint">If empty, after-tax figures use a labelled illustrative 30 % slab, not yours.</div>
             </div>
             <div className="field">
@@ -198,7 +203,9 @@ export default function Onboarding() {
             </label>
             <div className="field">
               <label htmlFor="asp">Return you are hoping for (% a year) — optional</label>
+              <span className="pct">
               <input id="asp" inputMode="decimal" value={aspPct} onChange={(e) => setAspPct(e.target.value)} />
+              </span>
               <div className="hint">
                 Recorded as an aspiration only. It is never used to rank options; see Return-target feasibility for how often
                 it happened historically.

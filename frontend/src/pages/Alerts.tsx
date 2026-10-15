@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { PageHeader } from "../components/PageHeader";
 import { Link } from "react-router-dom";
 import { Empty, Loading } from "../components/States";
 import { api } from "../lib/api";
@@ -301,11 +302,14 @@ export default function Alerts() {
   const items = list.data?.items ?? [];
   return (
     <section>
-      <h1>Alerts</h1>
-      <p className="muted">
-        Each alert means one of your own rules was met; it reports what was observed and when. Alerts are stored on this computer
-        only and never suggest a trade.
-      </p>
+      <PageHeader
+        title="Alerts"
+        purpose={
+          <>
+            Each alert means one of your own rules was met; it reports what was observed and when. Alerts are stored on this computer only and never suggest a trade.
+          </>
+        }
+      />
       <div className="row">
         <button type="button" className="btn btn--primary" onClick={evaluate} disabled={evaluating}>
           {evaluating ? "Evaluating…" : "Evaluate rules now"}

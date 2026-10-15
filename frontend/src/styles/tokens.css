@@ -24,6 +24,11 @@
   --cat-2: #e69f00;
   --cat-3: #009e73;
   --cat-4: #cc79a7;
+  --on-accent: #ffffff;
+  --row-hover: rgba(31, 85, 196, 0.05);
+  --row-zebra: rgba(16, 24, 40, 0.025);
+  --fixture-hatch: rgba(142, 28, 107, 0.08);
+  --backdrop: rgba(13, 15, 19, 0.4);
 
   --font: "Inter Variable", Inter, "Segoe UI", system-ui, -apple-system, sans-serif;
   --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -34,7 +39,9 @@
   --fs-small: 12px; --lh-small: 16px;
   --fs-micro: 11px;
   --radius: 6px;
-  --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-5: 24px; --space-6: 32px;
+  --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-5: 24px; --space-6: 32px; --space-7: 48px;
+  --content-max: 1200px;
+  --row-h: 40px;
   --shadow: 0 1px 2px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.08);
   --motion: 160ms;
 }
@@ -49,6 +56,8 @@
     --fresh-live: #4fd1c1; --fresh-delayed: #f2c14e; --fresh-eod: #b3bdcc; --fresh-stale: #ff8a80;
     --fixture: #f48fd0; --risk-ink: #a9b4e8;
     --band-90: rgba(134, 171, 255, 0.18); --band-50: rgba(134, 171, 255, 0.35);
+    --on-accent: #0d0f13; --row-hover: rgba(134, 171, 255, 0.07); --row-zebra: rgba(255, 255, 255, 0.025);
+    --fixture-hatch: rgba(244, 143, 208, 0.10); --backdrop: rgba(0, 0, 0, 0.6);
   }
 }
 :root[data-theme="dark"] {
@@ -60,6 +69,8 @@
   --fresh-live: #4fd1c1; --fresh-delayed: #f2c14e; --fresh-eod: #b3bdcc; --fresh-stale: #ff8a80;
   --fixture: #f48fd0; --risk-ink: #a9b4e8;
   --band-90: rgba(134, 171, 255, 0.18); --band-50: rgba(134, 171, 255, 0.35);
+  --on-accent: #0d0f13; --row-hover: rgba(134, 171, 255, 0.07); --row-zebra: rgba(255, 255, 255, 0.025);
+  --fixture-hatch: rgba(244, 143, 208, 0.10); --backdrop: rgba(0, 0, 0, 0.6);
 }
 
 @media (prefers-reduced-motion: reduce) {

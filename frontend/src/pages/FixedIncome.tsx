@@ -1,4 +1,5 @@
 import { useState, type FormEvent, type ReactNode } from "react";
+import { PageHeader } from "../components/PageHeader";
 import { Link } from "react-router-dom";
 import { FreshnessBadge } from "../components/FreshnessBadge";
 import { Empty, ErrorState, Loading } from "../components/States";
@@ -435,7 +436,7 @@ function TBillForm({ onSaved }: { onSaved: () => void }) {
 
   return (
     <form className="card" onSubmit={submit} noValidate aria-labelledby="tbill-form-title">
-      <h3 id="tbill-form-title">Add a T-bill</h3>
+      <h2 id="tbill-form-title">Add a T-bill</h2>
       {OFFICIAL_SOURCE_NOTE}
       <div className="field">
         <label htmlFor="tb-name">Name</label>
@@ -460,8 +461,10 @@ function TBillForm({ onSaved }: { onSaved: () => void }) {
       </div>
       <div className="field">
         <label htmlFor="tb-yield">Cut-off yield (% a year)</label>
+        <span className="pct">
         <input id="tb-yield" inputMode="decimal" value={yieldPct} onChange={(e) => setYieldPct(e.target.value)}
           aria-invalid={Boolean(errs["yield_fraction"])} aria-describedby="tb-yield-hint tb-yield-err" />
+        </span>
         <div id="tb-yield-hint" className="hint">
           As printed in the RBI press release (money-market yield, ACT/365). Must be above 0 % and below 50 %.
         </div>
@@ -545,7 +548,7 @@ function FdForm({ onSaved }: { onSaved: () => void }) {
 
   return (
     <form className="card" onSubmit={submit} noValidate aria-labelledby="fd-form-title">
-      <h3 id="fd-form-title">Add a fixed deposit</h3>
+      <h2 id="fd-form-title">Add a fixed deposit</h2>
       {OFFICIAL_SOURCE_NOTE}
       <div className="field">
         <label htmlFor="fd-inst">Institution</label>
@@ -567,8 +570,10 @@ function FdForm({ onSaved }: { onSaved: () => void }) {
       </div>
       <div className="field">
         <label htmlFor="fd-rate">Interest rate (% a year)</label>
+        <span className="pct">
         <input id="fd-rate" inputMode="decimal" value={ratePctText} onChange={(e) => setRatePct(e.target.value)}
           aria-invalid={Boolean(errs["rate"])} aria-describedby="fd-rate-hint fd-rate-err" />
+        </span>
         <div id="fd-rate-hint" className="hint">
           The card rate for this exact tenure from the bank&apos;s rate page. Stored with quarterly compounding. Below 30 %.
         </div>
@@ -576,21 +581,25 @@ function FdForm({ onSaved }: { onSaved: () => void }) {
       </div>
       <div className="field">
         <label htmlFor="fd-tenure">Tenure (days)</label>
-        <input id="fd-tenure" inputMode="numeric" value={tenure} onChange={(e) => setTenure(e.target.value)}
+        <input id="fd-tenure" className="input-short" inputMode="numeric" value={tenure} onChange={(e) => setTenure(e.target.value)}
           aria-invalid={Boolean(errs["tenure_days"])} aria-describedby="fd-tenure-err" />
         <FieldError id="fd-tenure-err" msg={errs["tenure_days"]} />
       </div>
       <div className="field">
         <label htmlFor="fd-penalty">Premature-withdrawal penalty (percentage points) — optional</label>
+        <span className="pct">
         <input id="fd-penalty" inputMode="decimal" value={penaltyPct} onChange={(e) => setPenaltyPct(e.target.value)}
           aria-invalid={Boolean(errs["premature_penalty"])} aria-describedby="fd-penalty-hint fd-penalty-err" />
+        </span>
         <div id="fd-penalty-hint" className="hint">Leave empty if the bank page does not state it; it is then shown as unknown. Below 10.</div>
         <FieldError id="fd-penalty-err" msg={errs["premature_penalty"]} />
       </div>
       <div className="field">
         <label htmlFor="fd-existing">Deposits you already hold at this institution (₹)</label>
+        <span className="money">
         <input id="fd-existing" inputMode="decimal" value={existing} onChange={(e) => setExisting(e.target.value)}
           aria-invalid={Boolean(errs["existing_deposits_at_institution"])} aria-describedby="fd-existing-hint fd-existing-err" />
+        </span>
         <div id="fd-existing-hint" className="hint">
           {existingValid ? inr(existingClean) : "Digits only."} Used to check the DICGC cover limit per institution.
         </div>
@@ -682,11 +691,14 @@ export default function FixedIncome() {
   const [tab, setTab] = useState<Tab>("tbill");
   return (
     <section>
-      <h1>Fixed income</h1>
-      <p className="muted">
-        T-bills and fixed deposits you have entered from official pages, listed by name. This list is not ranked for you; see{" "}
-        <Link to="/discover">Discovery</Link> for an ordering under your constraints.
-      </p>
+      <PageHeader
+        title="Fixed income"
+        purpose={
+          <>
+            T-bills and fixed deposits you have entered from official pages, listed by name. This list is not ranked for you; see{" "} <Link to="/discover">Discovery</Link> for an ordering under your constraints.
+          </>
+        }
+      />
       <div className="tabs" role="tablist" aria-label="Instrument type">
         {TABS.map(([t, l]) => (
           <button key={t} type="button" role="tab" id={`tab-${t}`} aria-selected={tab === t} aria-controls={`panel-${t}`}

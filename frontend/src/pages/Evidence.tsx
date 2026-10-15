@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from "react";
+import { PageHeader } from "../components/PageHeader";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { FreshnessBadge } from "../components/FreshnessBadge";
 import { Loading } from "../components/States";
@@ -230,8 +231,7 @@ export default function Evidence() {
     const valid = /^\d{1,12}$/.test(obsId);
     return (
       <section>
-        <h1>Evidence · observation #{valid ? obsId : "?"}</h1>
-        <p className="muted">Where exactly this stored value came from.</p>
+        <PageHeader title={`Evidence · observation #${valid ? obsId : "?"}`} purpose="Where exactly this stored value came from." />
         {valid ? (
           <EvidenceDetail key={obsId} obsId={obsId} />
         ) : (
@@ -244,7 +244,7 @@ export default function Evidence() {
   }
   return (
     <section>
-      <h1>Evidence</h1>
+      <PageHeader title="Evidence" purpose="Where exactly a stored value came from: source, retrieval time, checksum and quality status." />
       <p>
         Every market value this app uses — a NAV, a yield, a deposit rate — is stored as an <strong>observation</strong>: the value,
         the date it applies to, the source and its address, when it was retrieved (UTC), a SHA-256 checksum of the raw file it was

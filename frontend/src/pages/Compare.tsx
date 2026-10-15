@@ -3,6 +3,8 @@ import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNod
 import { Link, useSearchParams } from "react-router-dom";
 import { ExplainDrawer, ExplainedNumber } from "../components/ExplainDrawer";
 import { FreshnessBadge } from "../components/FreshnessBadge";
+import { CodeText, InstName } from "../components/Code";
+import { PageFooter, PageHeader } from "../components/PageHeader";
 import { Empty, Loading } from "../components/States";
 import { TierLabel } from "../components/Tier";
 import { useApi } from "../lib/useApi";
@@ -310,19 +312,21 @@ export function AmountDateFields({
     <div className="row">
       <div className="field">
         <label htmlFor={`${idPrefix}-amount`}>Amount in ₹ (optional)</label>
-        <input
-          id={`${idPrefix}-amount`}
-          inputMode="decimal"
-          value={amount}
-          onChange={(e) => onAmount(e.target.value)}
-          aria-invalid={Boolean(errors.amount)}
-          aria-describedby={`${idPrefix}-amount-hint`}
-        />
+        <span className="money">
+          <input
+            id={`${idPrefix}-amount`}
+            inputMode="decimal"
+            value={amount}
+            onChange={(e) => onAmount(e.target.value)}
+            aria-invalid={Boolean(errors.amount)}
+            aria-describedby={`${idPrefix}-amount-hint${errors.amount ? ` ${idPrefix}-amount-err` : ""}`}
+          />
+        </span>
         <div id={`${idPrefix}-amount-hint`} className="hint">
           Empty: your profile amount, else the labelled illustrative ₹1,00,000.
         </div>
         {errors.amount ? (
-          <div className="field-error" role="alert">
+          <div className="field-error" id={`${idPrefix}-amount-err`} role="alert">
             {errors.amount}
           </div>
         ) : null}
@@ -350,11 +354,14 @@ export function BandCell({ band, onExplain, contractual }: { band: Band<Analysis
       </span>
     );
   return (
-    <span className="band">
+    <span className="band band--stackable">
+      <span className="band__k">low</span>
       <Ex item={band.q05} onExplain={onExplain} />
-      <span className="subtle"> · </span>
+      <span className="band__sep" aria-hidden="true">–</span>
+      <span className="band__k">mid</span>
       <Ex item={band.q50} onExplain={onExplain} />
-      <span className="subtle"> · </span>
+      <span className="band__sep" aria-hidden="true">–</span>
+      <span className="band__k">high</span>
       <Ex item={band.q95} onExplain={onExplain} />
     </span>
   );
@@ -386,11 +393,21 @@ function rowsFor(res: CompareResponse, onExplain: OnExplain): RowDef[] {
       label: "Eligibility",
       cell: (r) => (
         <div>
-          {r.evaluable ? "Evaluated" : <strong>Not evaluated</strong>}
+          {r.evaluable ? (
+            <span className="chip">
+              <span aria-hidden="true">✓</span> Evaluated
+            </span>
+          ) : (
+            <strong>
+              <span aria-hidden="true">⚠ </span>Not evaluated
+            </strong>
+          )}
           {r.eligibility_reasons.length ? (
             <ul className="small plain-list">
               {r.eligibility_reasons.map((x) => (
-                <li key={x}>{x}</li>
+                <li key={x}>
+                  <CodeText raw={x} />
+                </li>
               ))}
             </ul>
           ) : null}
@@ -402,7 +419,7 @@ function rowsFor(res: CompareResponse, onExplain: OnExplain): RowDef[] {
       key: "gross",
       label: (
         <>
-          Gross proceeds<div className="small subtle">low · middle · high, before exit costs and tax</div>
+          Gross proceeds<div className="small subtle">low – middle – high, before exit costs and tax</div>
         </>
       ),
       cell: (r) => <BandCell band={r.gross_proceeds} contractual={r.contractual} onExplain={onExplain} />,
@@ -411,7 +428,7 @@ function rowsFor(res: CompareResponse, onExplain: OnExplain): RowDef[] {
       key: "costs",
       label: (
         <>
-          Costs<div className="small subtle">exit load in ₹ (low · middle · high); stamp duty</div>
+          Costs<div className="small subtle">exit load in ₹ (low – middle – high); stamp duty</div>
         </>
       ),
       cell: (r) =>
@@ -433,7 +450,7 @@ function rowsFor(res: CompareResponse, onExplain: OnExplain): RowDef[] {
       key: "tax",
       label: (
         <>
-          Assumed tax<div className="small subtle">low · middle · high, with basis</div>
+          Assumed tax<div className="small subtle">low – middle – high, with basis</div>
         </>
       ),
       cell: (r) =>
@@ -464,7 +481,7 @@ function rowsFor(res: CompareResponse, onExplain: OnExplain): RowDef[] {
       key: "pnl",
       label: (
         <>
-          Net profit or loss<div className="small subtle">low · middle · high</div>
+          Net profit or loss<div className="small subtle">low – middle – high</div>
         </>
       ),
       cell: (r) => <BandCell band={r.net_pnl} contractual={r.contractual} onExplain={onExplain} />,
@@ -473,7 +490,7 @@ function rowsFor(res: CompareResponse, onExplain: OnExplain): RowDef[] {
       key: "ret",
       label: (
         <>
-          Absolute return over {days} days<div className="small subtle">low · middle · high; the whole period, not annualised</div>
+          Absolute return over {days} days<div className="small subtle">low – middle – high; the whole period, not annualised</div>
         </>
       ),
       cell: (r) =>
@@ -524,7 +541,15 @@ function rowsFor(res: CompareResponse, onExplain: OnExplain): RowDef[] {
     {
       key: "flags",
       label: "Flags",
-      cell: (r) => (r.flags.length ? <span className="small">⚠ {r.flags.map(flagText).join(" · ")}</span> : <span className="subtle">none</span>),
+      cell: (r) =>
+        r.flags.length ? (
+          <span className="small">
+            <span aria-hidden="true">⚠ </span>
+            {r.flags.map(flagText).join(" · ")}
+          </span>
+        ) : (
+          <span className="subtle">none</span>
+        ),
     },
   );
   return defs;
@@ -647,11 +672,10 @@ export default function Compare() {
 
   return (
     <section>
-      <h1>Compare</h1>
-      <p className="small subtle">
-        2–4 instruments side by side, for one amount and withdrawal date. Every number comes from the engine; select a number to see how it
-        was computed. Not a recommendation.
-      </p>
+      <PageHeader
+        title="Compare"
+        purpose="2–4 instruments side by side, for one amount and withdrawal date. Every number comes from the engine; select a number to see how it was computed. Not a recommendation."
+      />
 
       <div className="card">
         <h2 className="h-inline">Instruments ({ids.length} of {MAX})</h2>
@@ -659,7 +683,9 @@ export default function Compare() {
           <ul className="plain-list" aria-label="Instruments to compare">
             {ids.map((id) => (
               <li key={id} className="row-tight">
-                <span>{label(id)}</span>
+                <span className="inst-name" title={label(id)}>
+                  {label(id)}
+                </span>
                 <span className="small subtle mono">{id}</span>
                 <button type="button" className="btn btn--ghost" onClick={() => setUrl(ids.filter((x) => x !== id), urlAmount, urlDate)} aria-label={`Remove ${label(id)}`}>
                   Remove
@@ -713,14 +739,17 @@ function CompareResult({ res, onExplain }: { res: CompareResponse; onExplain: On
       <FixtureCallout fixture={res.fixture} />
       <ContextLine ctx={res.context} />
       <div className="table-wrap">
-        <table className="table compare-table">
+        <table className="table compare-table table--sticky-first">
           <caption className="sr-only">Comparison of {res.rows.length} instruments</caption>
           <thead>
             <tr>
               <th scope="col">Row</th>
               {res.rows.map((r) => (
                 <th scope="col" key={r.instrument_id}>
-                  <Link to={`/i/${encodeURIComponent(r.instrument_id)}`}>{r.name}</Link>
+                  <Link to={`/i/${encodeURIComponent(r.instrument_id)}`}>
+                    <InstName name={r.name} />
+                  </Link>
+                  <span className="inst-code">{r.instrument_id}</span>
                   <div className="row-tight small">
                     <FreshnessBadge freshness={r.freshness} date={r.observed} />
                   </div>
@@ -764,10 +793,12 @@ function CompareResult({ res, onExplain }: { res: CompareResponse; onExplain: On
           Not in the order (not evaluated): {res.rows.filter((r) => !res.order.includes(r.instrument_id)).map((r) => byId.get(r.instrument_id)?.name).join(", ")}.
         </p>
       ) : null}
-      <p className="small subtle disclosure">{res.disclaimer}</p>
-      <p className="small subtle mono">
-        as of {dateLabel(res.as_of)} · result {res.run.result_hash.slice(0, 12)}… · {Object.entries(res.run.versions).map(([k, v]) => `${k} ${v}`).join(" · ")}
-      </p>
+      <PageFooter>
+        <p className="disclosure">{res.disclaimer}</p>
+        <p className="mono">
+          as of {dateLabel(res.as_of)} · result {res.run.result_hash.slice(0, 12)}… · {Object.entries(res.run.versions).map(([k, v]) => `${k} ${v}`).join(" · ")}
+        </p>
+      </PageFooter>
     </div>
   );
 }

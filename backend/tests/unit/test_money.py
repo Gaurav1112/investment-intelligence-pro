@@ -77,3 +77,9 @@ def test_units_truncate() -> None:
 def test_extremely_large_amounts_keep_paise_precision() -> None:
     big = D("999999999999999.99")  # ~₹10^15
     assert money(big + D("0.01")) == D("1000000000000000.00")
+
+
+def test_pct_never_shows_negative_zero() -> None:
+    # Found in the UX review: a −0.0000004 drawdown displayed as "-0.00%".
+    assert pct(D("-0.0000004")) == "0.00%"
+    assert pct(D("-0.00006")) == "-0.01%"  # (−0.00005 → −0.005 % ties to even → 0.00 %)

@@ -1,4 +1,5 @@
 import { Link } from "react-router-dom";
+import { PageHeader } from "../components/PageHeader";
 import { Empty, ErrorState, Loading } from "../components/States";
 import { TierLabel } from "../components/Tier";
 import { dateLabel } from "../lib/format";
@@ -91,11 +92,14 @@ export default function Methodology() {
   const nv = d.tax?.rules.filter((r) => r.verification === "NV").length ?? 0;
   return (
     <section>
-      <h1>Methodology</h1>
-      <p className="muted">
-        How results are produced, which versions are running, and which tax rules are applied. Full derivations are in{" "}
-        <code>docs/finance/calculation-methodology.md</code> and <code>docs/finance/risk-methodology.md</code>.
-      </p>
+      <PageHeader
+        title="Methodology"
+        purpose={
+          <>
+            How results are produced, which versions are running, and which tax rules are applied. Full derivations are in{" "} <code>docs/finance/calculation-methodology.md</code> and <code>docs/finance/risk-methodology.md</code>.
+          </>
+        }
+      />
 
       <h2>Versions in use</h2>
       {Object.keys(d.versions).length === 0 ? (

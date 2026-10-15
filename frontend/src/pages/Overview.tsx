@@ -2,6 +2,8 @@ import { useEffect, useRef, useState, type FormEvent, type ReactNode, type RefOb
 import { Link, useSearchParams } from "react-router-dom";
 import { ExplainDrawer, ExplainedNumber } from "../components/ExplainDrawer";
 import { FreshnessBadge } from "../components/FreshnessBadge";
+import { PageHeader } from "../components/PageHeader";
+import { StartHere } from "../components/StartHere";
 import { Empty, Loading } from "../components/States";
 import { api, apiUpload } from "../lib/api";
 import { dateLabel, inr, roundHalfUp, utcStamp } from "../lib/format";
@@ -645,14 +647,16 @@ function AddTransactionForm({ portfolioId, onSaved }: { portfolioId: string; onS
       </div>
       <div className="field">
         <label htmlFor="txn-units">Units</label>
-        <input id="txn-units" inputMode="decimal" value={units} onChange={(e) => setUnits(e.target.value)}
+        <input id="txn-units" className="input-amount" inputMode="decimal" value={units} onChange={(e) => setUnits(e.target.value)}
           aria-invalid={Boolean(errs["units"])} aria-describedby="txn-units-err" />
         <FieldError id="txn-units-err" msg={errs["units"]} />
       </div>
       <div className="field">
         <label htmlFor="txn-amount">Amount (₹, total for this transaction)</label>
-        <input id="txn-amount" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)}
-          aria-invalid={Boolean(errs["amount"])} aria-describedby="txn-amount-hint txn-amount-err" />
+        <span className="money">
+          <input id="txn-amount" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)}
+            aria-invalid={Boolean(errs["amount"])} aria-describedby="txn-amount-hint txn-amount-err" />
+        </span>
         <div id="txn-amount-hint" className="hint">
           {AMOUNT_RE.test(amountClean) ? inr(amountClean) : "Digits only, up to 2 decimals."} Paid for a buy; received for a sale.
         </div>
@@ -1083,8 +1087,11 @@ export default function Overview() {
 
   return (
     <section>
-      <h1>Portfolio overview</h1>
-      <p className="muted">What you hold, valued from stored NAVs only. Holdings without a fresh value are listed but kept out of every total.</p>
+      <PageHeader
+        title="Portfolio overview"
+        purpose="What you hold, valued from stored NAVs only. Holdings without a fresh value are listed but kept out of every total."
+      />
+      {firstLoad ? null : <StartHere key={items.length === 0 ? "first-run" : "returning"} defaultOpen={items.length === 0} />}
       <Status msg={notice} focusRef={noticeRef} />
       {firstLoad ? (
         <Loading label="Loading portfolios" />

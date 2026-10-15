@@ -1,4 +1,6 @@
 import { useState, type FormEvent } from "react";
+import { InstName } from "../components/Code";
+import { PageHeader } from "../components/PageHeader";
 import { Link } from "react-router-dom";
 import { DataTable, type Column } from "../components/DataTable";
 import { FreshnessBadge } from "../components/FreshnessBadge";
@@ -175,7 +177,10 @@ export default function MfExplorer() {
       sortValue: (r) => r.name,
       render: (r) => (
         <>
-          <Link to={`/i/${encodeURIComponent(r.instrument_id)}`}>{r.name}</Link>
+          <Link to={`/i/${encodeURIComponent(r.instrument_id)}`}>
+            <InstName name={r.name} />
+          </Link>
+          <span className="inst-code">{r.amfi_code ? `AMFI ${r.amfi_code}` : r.instrument_id}</span>
           {r.fixture ? (
             <div>
               <FreshnessBadge freshness="FIXTURE" />
@@ -263,19 +268,25 @@ export default function MfExplorer() {
           {list.data.truncated ? " (only the first 500 matches are shown — refine the search)" : ""}. Sorted by scheme name, not
           ranked for you. Select a column heading to sort by it.
         </p>
-        <DataTable rows={items} columns={columns} rowKey={(r) => r.instrument_id} caption="Stored mutual fund schemes, sorted by name" initialSort={{ key: "name", dir: "ascending" }} />
+        <DataTable rows={items} columns={columns} rowKey={(r) => r.instrument_id} caption="Stored mutual fund schemes, sorted by name" initialSort={{ key: "name", dir: "ascending" }} tall stickyFirst />
       </>
     );
   }
 
   return (
     <section>
-      <h1>Mutual funds</h1>
-      <p className="muted">Schemes stored locally from AMFI&apos;s official NAV file. Sorted by name, not ranked for you.</p>
+      <PageHeader
+        title="Mutual funds"
+        purpose={
+          <>
+            Schemes stored locally from AMFI&apos;s official NAV file. Sorted by name, not ranked for you.
+          </>
+        }
+      />
       <div className="row">
         <form className="row" role="search" onSubmit={(e) => { e.preventDefault(); setQ(query.trim()); }}>
           <label htmlFor="mf-q" className="sr-only">Search scheme names</label>
-          <input id="mf-q" type="search" placeholder="Search scheme names" value={query} onChange={(e) => setQuery(e.target.value)} />
+          <input id="mf-q" className="input-wide" type="search" placeholder="Search scheme names" value={query} onChange={(e) => setQuery(e.target.value)} />
           <button type="submit" className="btn">Search</button>
         </form>
         <span className="topbar__spacer" />

@@ -1,4 +1,5 @@
 import { useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { PageHeader } from "../components/PageHeader";
 import { Link } from "react-router-dom";
 import { FreshnessBadge } from "../components/FreshnessBadge";
 import { Empty, ErrorState, Loading } from "../components/States";
@@ -288,11 +289,14 @@ export default function Watchlist() {
   const items = list.data?.items ?? [];
   return (
     <section>
-      <h1>Watchlist</h1>
-      <p className="muted">
-        Instruments you are tracking. The change shown is the absolute change between the stored value on or before the day you
-        added it and the latest stored value — never annualised, and never filled in from older data when the latest is STALE.
-      </p>
+      <PageHeader
+        title="Watchlist"
+        purpose={
+          <>
+            Instruments you are tracking. The change shown is the absolute change between the stored value on or before the day you added it and the latest stored value — never annualised, and never filled in from older data when the latest is STALE.
+          </>
+        }
+      />
       <p ref={status} tabIndex={-1} role="status" className={notice ? "callout" : "sr-only"}>
         {notice ?? ""}
       </p>

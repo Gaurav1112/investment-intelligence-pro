@@ -64,7 +64,12 @@ export function DotPlot({ label, quantiles, displays, target, baseline, width = 
         {target ? (
           <g>
             <line x1={x(Number(target.value))} x2={x(Number(target.value))} y1={8} y2={height - 28} className="target-line" />
-            <text x={x(Number(target.value)) + 4} y={28} className="tick">
+            <text
+              x={x(Number(target.value)) + (x(Number(target.value)) > width * 0.7 ? -4 : 4)}
+              y={28}
+              className="tick"
+              textAnchor={x(Number(target.value)) > width * 0.7 ? "end" : "start"}
+            >
               {target.label}
             </text>
           </g>

@@ -1,4 +1,5 @@
 import { Link } from "react-router-dom";
+import { PageHeader } from "../components/PageHeader";
 import { Empty, ErrorState, Loading } from "../components/States";
 import { dateLabel, utcStamp } from "../lib/format";
 import type { DataHealthResponse, IngestionRun, SourceHealth } from "../lib/types";
@@ -138,11 +139,14 @@ export default function DataHealth() {
   const counts = Object.entries(d.observation_counts).sort(([a], [b]) => a.localeCompare(b));
   return (
     <section>
-      <h1>Data health</h1>
-      <p className="muted">
-        Where each number comes from, whether it may be fetched, and what happened the last time it was. Live intraday feeds are
-        not used; end-of-day data is the expected state.
-      </p>
+      <PageHeader
+        title="Data health"
+        purpose={
+          <>
+            Where each number comes from, whether it may be fetched, and what happened the last time it was. Live intraday feeds are not used; end-of-day data is the expected state.
+          </>
+        }
+      />
 
       <h2>Sources</h2>
       {d.sources.length === 0 ? (

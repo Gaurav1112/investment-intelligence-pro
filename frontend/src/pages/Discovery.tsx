@@ -2,11 +2,14 @@ import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { ExplainDrawer, ExplainedNumber } from "../components/ExplainDrawer";
 import { FreshnessBadge } from "../components/FreshnessBadge";
+import { CodeLabel, CodeText, InstName } from "../components/Code";
+import { PageFooter, PageHeader } from "../components/PageHeader";
 import { ErrorState, Loading } from "../components/States";
 import { TierLabel } from "../components/Tier";
 import { api } from "../lib/api";
 import { dateLabel } from "../lib/format";
 import { useProfile } from "../lib/profile";
+import { splitCode } from "../lib/codes";
 import type { DiscoveryResult, DiscoveryRow, Explained } from "../lib/types";
 
 const FLAG_TEXT: Record<string, string> = {
@@ -31,11 +34,14 @@ function Band({ row, onExplain }: { row: DiscoveryRow; onExplain: (e: Explained)
       </span>
     );
   return (
-    <span className="band">
+    <span className="band band--stackable">
+      <span className="band__k">low</span>
       <ExplainedNumber item={o.q05} onExplain={onExplain} />
-      <span className="subtle"> – </span>
+      <span className="band__sep" aria-hidden="true">–</span>
+      <span className="band__k">mid</span>
       <ExplainedNumber item={o.q50} onExplain={onExplain} />
-      <span className="subtle"> – </span>
+      <span className="band__sep" aria-hidden="true">–</span>
+      <span className="band__k">high</span>
       <ExplainedNumber item={o.q95} onExplain={onExplain} />
     </span>
   );
@@ -44,16 +50,16 @@ function Band({ row, onExplain }: { row: DiscoveryRow; onExplain: (e: Explained)
 function ResultsTable({ rows, ranked, onExplain }: { rows: DiscoveryRow[]; ranked: boolean; onExplain: (e: Explained) => void }) {
   return (
     <div className="table-wrap">
-      <table className="table table--results">
+      <table className={`table table--results${ranked ? "" : " table--sticky-first"}`}>
         <caption className="sr-only">{ranked ? "Options ordered by your criteria" : "Illustrative examples, not ranked"}</caption>
         <thead>
           <tr>
-            {ranked ? <th scope="col">#</th> : null}
-            <th scope="col">Instrument</th>
+            {ranked ? <th scope="col" className="num rank">#</th> : null}
+            <th scope="col" className="cell-name">Instrument</th>
             <th scope="col">Certainty</th>
             <th scope="col" className="num">
               Proceeds at your date
-              <div className="small subtle">low · middle · high</div>
+              <div className="small subtle">low – middle – high</div>
             </th>
             <th scope="col" className="num">
               Middle gain
@@ -68,14 +74,28 @@ function ResultsTable({ rows, ranked, onExplain }: { rows: DiscoveryRow[]; ranke
         <tbody>
           {rows.map((r) => (
             <tr key={r.instrument_id} className={r.fixture ? "fixture-zone" : undefined}>
-              {ranked ? <td className="num">{r.rank}</td> : null}
+              {ranked ? <td className="num rank">{r.rank}</td> : null}
               <td className="cell-name">
-                <Link to={`/i/${encodeURIComponent(r.instrument_id)}`}>{r.name}</Link>
+                <Link to={`/i/${encodeURIComponent(r.instrument_id)}`}>
+                  <InstName name={r.name} />
+                </Link>
+                <span className="inst-code">{r.instrument_id}</span>
                 <div className="row small">
                   {r.fixture ? <FreshnessBadge freshness="FIXTURE" /> : null}
                   {r.observed ? <span className="subtle">data as of {dateLabel(r.observed)}</span> : null}
                 </div>
-                {r.flags.length ? <div className="small subtle caveats">⚠ {r.flags.map(flagText).join(" · ")}</div> : null}
+                {r.flags.length ? (
+                  <details className="caveats">
+                    <summary>
+                      <span aria-hidden="true">⚠</span> {r.flags.length} caveat{r.flags.length === 1 ? "" : "s"}
+                    </summary>
+                    <ul className="small">
+                      {r.flags.map((f) => (
+                        <li key={f}>{flagText(f)}</li>
+                      ))}
+                    </ul>
+                  </details>
+                ) : null}
               </td>
               <td>
                 <TierLabel tier={r.tier} />
@@ -100,6 +120,104 @@ function ResultsTable({ rows, ranked, onExplain }: { rows: DiscoveryRow[]; ranke
         </tbody>
       </table>
     </div>
+  );
+}
+
+/** Reason codes of one excluded row (bare codes or "CODE: detail"); free-text reasons are grouped as "other". */
+function rowCodes(r: DiscoveryRow): string[] {
+  const raw = r.exclusion_codes.length ? r.exclusion_codes : r.reasons;
+  return raw.map((x) => splitCode(x).code ?? "OTHER");
+}
+
+/** Count of excluded instruments per reason code, most common first (an instrument can fail more than one constraint). */
+export function ledgerCounts(rows: DiscoveryRow[]): [string, number][] {
+  const counts = new Map<string, number>();
+  for (const r of rows) for (const c of new Set(rowCodes(r))) counts.set(c, (counts.get(c) ?? 0) + 1);
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+}
+
+function AnswerCard({ data, onExplain }: { data: DiscoveryResult; onExplain: (e: Explained) => void }) {
+  const first = data.ranked[0];
+  const low = first?.outcome ? (first.contractual ? first.outcome.q50 : first.outcome.q05) : null;
+  return (
+    <div className="card answer" aria-live="polite">
+      <p className="answer__eyebrow">Result under your constraints</p>
+      <p className="answer__lead">
+        {data.ranked.length === 1 ? "1 option passes" : `${data.ranked.length} options pass`} every constraint; {data.excluded.length} did not.
+      </p>
+      <dl className="answer__facts">
+        {first ? (
+          <div>
+            <dt>First in the order</dt>
+            <dd>
+              <Link to={`/i/${encodeURIComponent(first.instrument_id)}`}>
+                <InstName name={first.name} />
+              </Link>
+            </dd>
+          </div>
+        ) : null}
+        {low ? (
+          <div>
+            <dt>{first?.contractual ? "Its proceeds on your date (contractual)" : "Its low-end proceeds on your date"}</dt>
+            <dd>
+              <ExplainedNumber item={low} onExplain={onExplain} />
+            </dd>
+          </div>
+        ) : null}
+        <div>
+          <dt>Pass every constraint</dt>
+          <dd>{data.ranked.length}</dd>
+        </div>
+        <div>
+          <dt>Excluded</dt>
+          <dd>
+            {data.excluded.length} <span className="small subtle">see the ledger below</span>
+          </dd>
+        </div>
+        {data.skipped_no_history > 0 ? (
+          <div>
+            <dt>Not evaluated (no NAV history)</dt>
+            <dd className="num-dd">{data.skipped_no_history.toLocaleString("en-IN")}</dd>
+          </div>
+        ) : null}
+      </dl>
+      <p className="small subtle">
+        Low end = the 5th-percentile outcome after costs and assumed tax. Past outcomes are not a forecast. Select a number to see how it was
+        computed.
+      </p>
+    </div>
+  );
+}
+
+function NextSteps({ data }: { data: DiscoveryResult }) {
+  const codes = new Set(ledgerCounts(data.excluded).map(([c]) => c));
+  const stale = [...codes].some((c) => c.startsWith("STALE") || c === "INSUFFICIENT_OR_STALE_DATA");
+  return (
+    <>
+      <h3>What you can do next</h3>
+      <ul className="next-steps">
+        <li>
+          Open the <strong>exclusion ledger</strong> below to see which constraint each instrument failed.
+        </li>
+        <li>
+          <Link to="/onboarding">Review your objectives and constraints</Link>. Any change is yours to make; nothing is relaxed automatically.
+        </li>
+        {data.skipped_no_history > 0 ? (
+          <li>
+            {data.skipped_no_history.toLocaleString("en-IN")} scheme(s) were not evaluated for lack of NAV history.{" "}
+            <Link to="/mf">Backfill history in Mutual funds</Link>.
+          </li>
+        ) : null}
+        {stale ? (
+          <li>
+            Some instruments failed because data is missing or out of date — <Link to="/data-health">check Data health</Link>.
+          </li>
+        ) : null}
+        <li>
+          <Link to="/fi">Add T-bills or FDs</Link> from official pages.
+        </li>
+      </ul>
+    </>
   );
 }
 
@@ -138,23 +256,32 @@ export default function Discovery() {
   if (!data) return null;
 
   const ranked = data.status === "RANKED";
+  const counts = ledgerCounts(data.excluded);
   return (
     <section aria-busy={loading}>
-      <h1>Discovery</h1>
-      <p className="muted">
-        {data.context.illustrative ? "Illustrative: " : "For "}
-        <strong>{data.context.amount}</strong> until <strong>{dateLabel(data.context.withdrawal_date)}</strong> (
-        {data.context.horizon_days} days) · after costs and tax ({data.context.tax_basis}) · analysis date{" "}
-        {dateLabel(data.as_of)}
-      </p>
+      <PageHeader
+        title="Discovery"
+        purpose="Which instruments fit this amount, date and objective, evaluated under your own constraints."
+        meta={
+          <span>
+            {data.context.illustrative ? "Illustrative: " : "For "}
+            <strong>{data.context.amount}</strong> until <strong>{dateLabel(data.context.withdrawal_date)}</strong> (
+            {data.context.horizon_days} days) · after costs and tax ({data.context.tax_basis}) · analysis date{" "}
+            {dateLabel(data.as_of)}
+          </span>
+        }
+      />
 
       {data.contains_fixtures ? (
         <div className="callout callout--warn fixture-zone" role="note">
-          <strong>FIXTURE data present.</strong> Some instruments are synthetic development fixtures, not market data.
+          <p>
+            <FreshnessBadge freshness="FIXTURE" /> <strong>FIXTURE data present.</strong> Some instruments are synthetic development fixtures,
+            not market data.
+          </p>
           {data.mode === "PERSONALISED" ? (
             <label className="choice">
-              <input type="checkbox" checked={includeFixtures} onChange={(e) => setIncludeFixtures(e.target.checked)} /> Include
-              fixtures in the ordering (demonstration only)
+              <input type="checkbox" checked={includeFixtures} onChange={(e) => setIncludeFixtures(e.target.checked)} />
+              <span>Include fixtures in the ordering (demonstration only)</span>
             </label>
           ) : null}
         </div>
@@ -166,20 +293,23 @@ export default function Discovery() {
           <p>The supervisor stopped before ordering anything because required context is missing or stale:</p>
           <ul>
             {data.abstain_reasons.map((r) => (
-              <li key={r}>{r}</li>
+              <li key={r}>
+                <CodeText raw={r} />
+              </li>
             ))}
           </ul>
-          <div className="row">
-            <Link className="btn" to="/onboarding">
-              Review objectives
-            </Link>
-            <Link className="btn" to="/data-health">
-              Data health
-            </Link>
-            <Link className="btn" to="/fi">
-              Add T-bills / FDs
-            </Link>
-          </div>
+          <h3>What you can do next</h3>
+          <ul className="next-steps">
+            <li>
+              <Link to="/onboarding">Review objectives</Link> — fill in any missing amount, date, objective or loss tolerance.
+            </li>
+            <li>
+              <Link to="/data-health">Data health</Link> — check that the latest NAVs were fetched.
+            </li>
+            <li>
+              <Link to="/fi">Add T-bills / FDs</Link> — enter them from official pages.
+            </li>
+          </ul>
         </div>
       ) : null}
 
@@ -190,6 +320,7 @@ export default function Discovery() {
             This is a valid result, not an error. {data.excluded.length} instrument(s) were checked; each failed at least one
             of your constraints (see the ledger below). Keeping the money where it is remains an option.
           </p>
+          <NextSteps data={data} />
         </div>
       ) : null}
 
@@ -201,16 +332,20 @@ export default function Discovery() {
         </p>
       ) : null}
 
+      {ranked ? <AnswerCard data={data} onExplain={setExplain} /> : null}
+
       {ranked ? (
-        <div className="card">
-          <h2>Ordered by your criteria</h2>
+        <details className="card card--quiet">
+          <summary>
+            <strong>How the order was decided</strong> <span className="small subtle">({data.criteria.length} criteria)</span>
+          </summary>
           <p className="small">{data.report?.disclosures.find((d) => d.startsWith("Ordered by")) ?? ""}</p>
           <ul className="small">
             {data.criteria.map((c) => (
               <li key={c}>{friendlyCriterion(c)}</li>
             ))}
           </ul>
-        </div>
+        </details>
       ) : null}
 
       {data.ranked.length ? (
@@ -226,7 +361,7 @@ export default function Discovery() {
             <h3>What the analysis found</h3>
             {data.report.sections.map((s) => (
               <p key={`${s.worker}-${s.text}`} className={s.stance === "challenges" ? "callout callout--warn" : undefined}>
-                {s.text} <span className="small subtle">({s.worker})</span>
+                {s.text} <span className="small subtle">({WORKER_LABEL[s.worker] ?? s.worker})</span>
               </p>
             ))}
           </div>
@@ -253,10 +388,16 @@ export default function Discovery() {
       {data.excluded.length ? (
         <details className="card" open={data.status === "NO_SUITABLE_CANDIDATE"}>
           <summary>
-            <strong>Exclusion ledger</strong> ({data.excluded.length})
+            <strong>Exclusion ledger</strong> ({data.excluded.length}) <span className="sr-only">by reason:</span>
+            {counts.map(([code, n]) => (
+              <span key={code} className="chip">
+                {n} × {code === "OTHER" ? "Other reason" : <CodeLabel code={code} />}
+              </span>
+            ))}
           </summary>
-          <div className="table-wrap">
-            <table className="table">
+          <div className="table-wrap table-wrap--tall">
+            <table className="table table--sticky-first">
+              <caption className="sr-only">Instruments that did not qualify and why</caption>
               <thead>
                 <tr>
                   <th scope="col">Instrument</th>
@@ -266,8 +407,19 @@ export default function Discovery() {
               <tbody>
                 {data.excluded.map((r) => (
                   <tr key={r.instrument_id} className={`is-excluded${r.fixture ? " fixture-zone" : ""}`}>
-                    <td>{r.name}</td>
-                    <td className="small">{(r.exclusion_codes.length ? r.exclusion_codes : r.reasons).join(" · ")}</td>
+                    <td className="cell-name">
+                      <InstName name={r.name} code={r.instrument_id} />
+                      {r.fixture ? <FreshnessBadge freshness="FIXTURE" /> : null}
+                    </td>
+                    <td className="small">
+                      <ul className="plain-list">
+                        {(r.exclusion_codes.length ? r.exclusion_codes : r.reasons).map((x) => (
+                          <li key={x}>
+                            <CodeText raw={x} />
+                          </li>
+                        ))}
+                      </ul>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -276,21 +428,20 @@ export default function Discovery() {
         </details>
       ) : null}
 
-      {data.skipped_no_history > 0 ? (
-        <p className="small subtle">
-          {data.skipped_no_history} scheme(s) were not evaluated because their NAV history has not been backfilled. Open a scheme
-          to backfill its history from AMFI.
+      <PageFooter>
+        {data.skipped_no_history > 0 ? (
+          <p>
+            {data.skipped_no_history} scheme(s) were not evaluated because their NAV history has not been backfilled. Open a scheme
+            to backfill its history from AMFI.
+          </p>
+        ) : null}
+        {data.report?.disclosures.filter((d) => !d.startsWith("Personal research tool")).map((d) => (
+          <p key={d}>{d}</p>
+        ))}
+        <p className="mono">
+          run {data.run.run_id ?? "—"} · result hash {data.run.result_hash.slice(0, 16)}… · {Object.values(data.run.versions).join(" · ")}
         </p>
-      ) : null}
-
-      {data.report?.disclosures.filter((d) => !d.startsWith("Personal research tool")).map((d) => (
-        <p key={d} className="small subtle">
-          {d}
-        </p>
-      ))}
-      <p className="small subtle mono">
-        run {data.run.run_id ?? "—"} · result hash {data.run.result_hash.slice(0, 16)}… · {Object.values(data.run.versions).join(" · ")}
-      </p>
+      </PageFooter>
       <ExplainDrawer item={explain} onClose={() => setExplain(null)} />
     </section>
   );

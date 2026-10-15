@@ -298,3 +298,29 @@ describe("Return-target feasibility", () => {
     expect(targetFraction("").problem).toMatch(/Enter a target/);
   });
 });
+
+describe("Return-target feasibility — at a glance", () => {
+  it("states reached and lost counts from the API in one neutral sentence, with caveats one click away and counted", async () => {
+    stubFetch((url) => (url === "/api/profile" ? json(PROFILE(null)) : json(FEASIBILITY_1Y)));
+    renderAt(FEAS_URL);
+    await userEvent.type(screen.getByLabelText("Target annual return (%)"), "20");
+    await userEvent.click(screen.getByRole("button", { name: "Show historical frequency" }));
+    expect(
+      await screen.findByText("Reached 20.00% a year or more in 11 of 156 historical windows; lost money in 112 of 156."),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText(/not a suggestion to change how much risk you take/).length).toBeGreaterThan(1);
+    const caveats = screen.getByText(`Caveats (${FEASIBILITY_1Y.caveats!.length})`).closest("details")!;
+    expect(caveats).not.toHaveAttribute("open");
+    expect(within(caveats).getByText(/Overlapping windows share most of their months/)).toBeInTheDocument();
+    expect(text()).not.toMatch(/more risk|increase (your )?risk|take on risk|\bbest\b|you should/);
+  });
+
+  it("shows no at-a-glance sentence when the engine refused", async () => {
+    stubFetch((url) => (url === "/api/profile" ? json(PROFILE("0.20")) : json(ERR_FEASIBILITY_NO_SERIES, 422)));
+    renderAt(FEAS_URL);
+    await waitFor(() => expect(screen.getByLabelText("Target annual return (%)")).toHaveValue("20"));
+    await userEvent.click(screen.getByRole("button", { name: "Show historical frequency" }));
+    await screen.findByRole("alert");
+    expect(screen.queryByText(/At a glance/)).not.toBeInTheDocument();
+  });
+});

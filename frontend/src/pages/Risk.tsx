@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from "react";
+import { PageHeader } from "../components/PageHeader";
 import { useSearchParams } from "react-router-dom";
 import { Loading } from "../components/States";
 import { dateLabel, pct, roundHalfUp } from "../lib/format";
@@ -54,11 +55,14 @@ export default function Risk() {
 
   return (
     <section>
-      <h1>Risk</h1>
-      <p className="small subtle">
-        Past volatility, drawdowns and one-day loss measures for one mutual fund’s stored NAV history, and a historical scenario range. Gated
-        metrics are refused in words, never shown as a number.
-      </p>
+      <PageHeader
+        title="Risk"
+        purpose={
+          <>
+            Past volatility, drawdowns and one-day loss measures for one mutual fund’s stored NAV history, and a historical scenario range. Gated metrics are refused in words, never shown as a number.
+          </>
+        }
+      />
       <div className="card">
         <SinglePicker
           idPrefix="risk"

@@ -195,7 +195,7 @@ function SeriesSection({ kind, points, fixture }: { kind: SeriesKind; points: Se
               <tbody>
                 {points.map((p) => (
                   <tr key={p.observation_date + p.source_id}>
-                    <td>{dateLabel(p.observation_date)}</td>
+                    <td className="nowrap">{dateLabel(p.observation_date)}</td>
                     <td className="num">{fmtValue(kind, p.value)}</td>
                   </tr>
                 ))}
@@ -230,7 +230,7 @@ function SeriesSection({ kind, points, fixture }: { kind: SeriesKind; points: Se
       <p className="small muted">
         Showing {latestFirst.length} of {points.length} (latest first).
       </p>
-      <div className="table-wrap">
+      <div className="table-wrap table-wrap--tall">
         <table className="table table--compact">
           <caption className="sr-only">Stored observations, latest first</caption>
           <thead>
@@ -247,7 +247,7 @@ function SeriesSection({ kind, points, fixture }: { kind: SeriesKind; points: Se
           <tbody>
             {latestFirst.map((p) => (
               <tr key={p.observation_date + p.source_id} className={p.quality_status === "fixture" ? "fixture-zone" : undefined}>
-                <td>{dateLabel(p.observation_date)}</td>
+                <td className="nowrap">{dateLabel(p.observation_date)}</td>
                 <td className="num">{fmtValue(kind, p.value)}</td>
                 <td>
                   {p.quality_status === "fixture" ? (
@@ -309,23 +309,20 @@ export default function InstrumentDetail() {
   const kind: SeriesKind = d.series.series_id.startsWith("nav:") ? "nav" : "yield";
   return (
     <section className={fixture ? "fixture-zone" : undefined}>
-      <header>
-        <h1>{i.name}</h1>
-        <p className="small muted">
-          {KIND_LABEL[i.kind] ?? i.kind}
-          {i.amfi_code ? ` · AMFI code ${i.amfi_code}` : ""}
-          {i.isin ? ` · ISIN ${i.isin}` : ""} · id <span className="mono">{i.instrument_id}</span>
-        </p>
-        <div className="row">
-          <OriginBadge origin={i.origin} />
-          <HeaderFreshness d={d} />
-        </div>
-        {fixture ? (
-          <p className="callout callout--warn" role="note">
-            <strong>FIXTURE — not market data.</strong> This instrument is synthetic development data.
+      <header className="page-head">
+        <div className="page-head__text">
+          <h1>{i.name}</h1>
+          <p className="small muted">
+            {KIND_LABEL[i.kind] ?? i.kind}
+            {i.amfi_code ? ` · AMFI code ${i.amfi_code}` : ""}
+            {i.isin ? ` · ISIN ${i.isin}` : ""} · id <span className="mono">{i.instrument_id}</span>
           </p>
-        ) : null}
-        <div className="row">
+          <div className="page-head__meta">
+            <OriginBadge origin={i.origin} />
+            <HeaderFreshness d={d} />
+          </div>
+        </div>
+        <div className="page-head__actions">
           <Link className="btn" to={`/compare?ids=${encodeURIComponent(i.instrument_id)}`}>
             Add to comparison
           </Link>
@@ -340,6 +337,11 @@ export default function InstrumentDetail() {
           <Link to={`/compare?ids=${encodeURIComponent(i.instrument_id)}`}>Compare</Link>
         </nav>
       </header>
+      {fixture ? (
+        <p className="callout callout--warn" role="note">
+          <strong>FIXTURE — not market data.</strong> This instrument is synthetic development data.
+        </p>
+      ) : null}
       <h2>Terms</h2>
       <Terms d={d} />
       {d.deposit_terms && !d.series.points.length ? (

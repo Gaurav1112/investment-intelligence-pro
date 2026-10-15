@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from "react";
+import { PageHeader } from "../components/PageHeader";
 import { Link, useSearchParams } from "react-router-dom";
 import { FreshnessBadge } from "../components/FreshnessBadge";
 import { Loading } from "../components/States";
@@ -111,11 +112,14 @@ export default function Simulator() {
   const totalText = check.totalPct === null ? "—" : `${check.totalPct} %`;
   return (
     <section>
-      <h1>Portfolio simulator</h1>
-      <p className="small subtle">
-        Split one amount across instruments and see each holding’s range of proceeds at your withdrawal date. Weights must add up to exactly
-        100 %. Not a recommendation.
-      </p>
+      <PageHeader
+        title="Portfolio simulator"
+        purpose={
+          <>
+            Split one amount across instruments and see each holding’s range of proceeds at your withdrawal date. Weights must add up to exactly 100 %. Not a recommendation.
+          </>
+        }
+      />
       <form className="card" onSubmit={submit} noValidate>
         <h2 className="h-inline">Allocation</h2>
         {rows.length ? (

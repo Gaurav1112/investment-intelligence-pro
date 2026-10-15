@@ -168,3 +168,15 @@ describe("helpers", () => {
     expect(analysisError(v)).toContain("shocks.equity_pct: Input should be less than or equal to 0");
   });
 });
+
+describe("Compare — eligibility row", () => {
+  it("shows a neutral ✓ Evaluated chip, and a plain-English label beside each verbatim engine reason", async () => {
+    stubFetch(() => json(COMPARE_INELIGIBLE));
+    renderAt("/compare?ids=tbill:182d:2027-04-13,mf:900001&date=2026-11-14");
+    const table = await screen.findByRole("table", { name: /comparison of 2 instruments/i });
+    const row = within(table).getByRole("row", { name: /^Eligibility/ });
+    expect(within(row).getByText("Evaluated")).toBeInTheDocument();
+    expect(within(row).getByText(/Does not fit your withdrawal date/)).toBeInTheDocument();
+    expect(within(row).getByText("HORIZON_MISMATCH: matures after your withdrawal date")).toHaveClass("code-suffix");
+  });
+});

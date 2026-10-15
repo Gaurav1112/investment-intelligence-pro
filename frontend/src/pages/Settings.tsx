@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { PageHeader } from "../components/PageHeader";
 import { Link } from "react-router-dom";
 import { Loading } from "../components/States";
 import { api } from "../lib/api";
@@ -214,7 +215,7 @@ export default function Settings() {
   const profile = useProfile();
   return (
     <section>
-      <h1>Settings &amp; privacy</h1>
+      <PageHeader title="Settings & privacy" purpose="Your profile, what is stored on this computer, and how to export or erase it." />
 
       <h2>Profile</h2>
       <p>

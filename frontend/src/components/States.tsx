@@ -32,7 +32,7 @@ export function ErrorState({ error, retry }: { error: unknown; retry?: () => voi
 export function Empty({ title, children }: { title: string; children?: ReactNode }) {
   return (
     <div className="state state--empty">
-      <h3>{title}</h3>
+      <h2 className="state__title">{title}</h2>
       {children}
     </div>
   );

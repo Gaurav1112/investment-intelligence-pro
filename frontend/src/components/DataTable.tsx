@@ -39,6 +39,8 @@ export function DataTable<T>({
   caption,
   initialSort,
   onRowOpen,
+  tall = false,
+  stickyFirst = false,
 }: {
   rows: T[];
   columns: Column<T>[];
@@ -46,6 +48,10 @@ export function DataTable<T>({
   caption: string;
   initialSort?: { key: string; dir: Dir };
   onRowOpen?: (row: T) => void;
+  /** Cap the height and scroll inside the table, so the sticky header stays in view. */
+  tall?: boolean;
+  /** Keep the first column visible while the table scrolls sideways. */
+  stickyFirst?: boolean;
 }) {
   const [sort, setSort] = useState<{ key: string; dir: Dir } | null>(initialSort ?? null);
   const sorted = useMemo(() => {
@@ -70,8 +76,8 @@ export function DataTable<T>({
   }, [rows, columns, sort, rowKey]);
 
   return (
-    <div className="table-wrap">
-      <table className="table">
+    <div className={`table-wrap${tall ? " table-wrap--tall" : ""}`}>
+      <table className={`table${stickyFirst ? " table--sticky-first" : ""}`}>
         <caption className="sr-only">{caption}</caption>
         <thead>
           <tr>

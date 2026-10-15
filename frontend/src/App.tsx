@@ -1,10 +1,12 @@
 import { lazy, Suspense, useEffect, useState, type ReactNode } from "react";
-import { Link, NavLink, Route, Routes } from "react-router-dom";
+import { Link, NavLink, Route, Routes, useLocation } from "react-router-dom";
 import { ApiError, login, readLoginFragment, restoreSession, UNAUTHORIZED_EVENT } from "./lib/api";
-import { dateLabel, inr } from "./lib/format";
+import { dateLabel, inr, utcStamp } from "./lib/format";
 import { OBJECTIVES, ProfileProvider, useProfile } from "./lib/profile";
 import { REQUIRED } from "./components/Disclosures";
 import { Loading } from "./components/States";
+import type { DataHealthResponse } from "./lib/types";
+import { useApi } from "./lib/useApi";
 
 const Onboarding = lazy(() => import("./pages/Onboarding"));
 const Discovery = lazy(() => import("./pages/Discovery"));
@@ -99,7 +101,12 @@ const NAV: { group: string; items: [string, string][] }[] = [
 
 function ContextBar() {
   const { status } = useProfile();
-  if (!status) return <div className="contextbar">Loading your objectives…</div>;
+  if (!status)
+    return (
+      <div className="contextbar" role="status">
+        Loading your objectives…
+      </div>
+    );
   const p = status.profile;
   const exploring = status.mode === "EXPLORATION";
   const obj = p.objective ? OBJECTIVES[p.objective] : null;
@@ -107,15 +114,19 @@ function ContextBar() {
     <div className={`contextbar${exploring ? " contextbar--exploration" : ""}`} role="region" aria-label="Current objectives">
       <strong>{exploring ? "EXPLORATION" : "PERSONALISED"}</strong>
       {exploring ? (
-        <span>Illustrative ₹1,00,000 · 182 days · not ranked for you — {status.missing.length} detail(s) missing</span>
+        <span className="contextbar__item">Illustrative ₹1,00,000 · 182 days · not ranked for you — {status.missing.length} detail(s) missing</span>
       ) : (
         <>
-          <span>{p.amount ? inr(p.amount, { paise: false }) : "—"}</span>
-          <span>withdraw {p.withdrawal_date ? dateLabel(p.withdrawal_date) : "—"} ({status.horizon_days} days)</span>
-          <span>
+          <span className="contextbar__item">
+            <b>{p.amount ? inr(p.amount, { paise: false }) : "—"}</b>
+          </span>
+          <span className="contextbar__item">
+            withdraw <b>{p.withdrawal_date ? dateLabel(p.withdrawal_date) : "—"}</b> ({status.horizon_days} days)
+          </span>
+          <span className="contextbar__item">
             Objective {obj?.code} · {obj?.title}
           </span>
-          <span>Loss: {p.loss_acceptable ? `up to ${p.max_loss_fraction ?? "?"}` : "not acceptable"}</span>
+          <span className="contextbar__item">Loss: {p.loss_acceptable ? `up to ${p.max_loss_fraction ?? "?"}` : "not acceptable"}</span>
         </>
       )}
       <Link to="/onboarding" className="btn btn--ghost">
@@ -125,21 +136,60 @@ function ContextBar() {
   );
 }
 
-function Shell({ children }: { children: ReactNode }) {
+/** Data-as-of line in the top bar: when the official NAV file was last fetched, straight from Data health. */
+function DataAsOf() {
+  const { data, error } = useApi<DataHealthResponse>("/api/data-health");
+  const run = data?.sources.find((s) => s.source_id === "amfi.navall")?.last_run ?? null;
+  let text: string;
+  if (error) text = "Data status unavailable";
+  else if (!data) text = "Checking data…";
+  else if (!run?.finished_at) text = "AMFI NAVs not fetched yet";
+  else text = `AMFI NAVs fetched ${utcStamp(run.finished_at)}${run.status === "ok" ? "" : ` (${run.status})`}`;
+  return (
+    <Link to="/data-health" className="topbar__data" title="Open Data health">
+      <span className="badge badge--eod">
+        <span aria-hidden="true">◑</span> DATA
+      </span>
+      <span className="topbar__data-text">{text}</span>
+    </Link>
+  );
+}
+
+export function Shell({ children }: { children: ReactNode }) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const { pathname } = useLocation();
+  useEffect(() => setMenuOpen(false), [pathname]); // a chosen page closes the small-screen menu
   return (
     <div className="shell">
+      <a className="skip-link" href="#main">
+        Skip to content
+      </a>
       <header className="topbar">
+        <button
+          type="button"
+          className="btn menu-btn"
+          aria-expanded={menuOpen}
+          aria-controls="main-nav"
+          onClick={() => setMenuOpen((o) => !o)}
+        >
+          <span aria-hidden="true">{menuOpen ? "✕" : "☰"}</span> Menu
+        </button>
         <Link to="/" className="brand">
           IIP <span>Investment Intelligence</span>
         </Link>
         <span className="topbar__spacer" />
-        <NavLink to="/settings">Settings</NavLink>
+        <DataAsOf />
+        <NavLink to="/settings" className="topbar__link">
+          Settings
+        </NavLink>
       </header>
       <ContextBar />
-      <nav className="nav" aria-label="Main">
+      <nav className="nav" id="main-nav" aria-label="Main" data-open={menuOpen ? "true" : "false"}>
         {NAV.map((g) => (
-          <div key={g.group}>
-            <h4>{g.group}</h4>
+          <div key={g.group} role="group" aria-labelledby={`nav-${g.group}`}>
+            <p className="nav__group-title" id={`nav-${g.group}`}>
+              {g.group}
+            </p>
             {g.items.map(([to, label]) => (
               <NavLink key={to} to={to} end={to === "/"}>
                 {label}
@@ -148,7 +198,7 @@ function Shell({ children }: { children: ReactNode }) {
           </div>
         ))}
       </nav>
-      <main id="main">
+      <main id="main" tabIndex={-1}>
         <Suspense fallback={<Loading />}>{children}</Suspense>
       </main>
       <footer className="footer">{REQUIRED.footer}</footer>

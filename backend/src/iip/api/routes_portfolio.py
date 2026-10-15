@@ -21,6 +21,14 @@ def _error(code: str, message: str, status: int) -> JSONResponse:
     return JSONResponse({"code": code, "message": message}, status_code=status)
 
 
+def pre_import_safeguard(st: Any) -> Callable[[], object]:
+    """reliability-design §7.1: a copy of the book before every import apply. Locally a verified file backup;
+    hosted (no disk, ADR-0013) an in-database snapshot of the transactions."""
+    if st.hosted:
+        return lambda: pf.snapshot_transactions(st.conn, st.clock(), tag="pre-import")
+    return lambda: pf.make_backup(st.conn, st.settings.data_dir, st.clock(), tag="pre-import")
+
+
 def _guard(fn: Callable[[], Any]) -> Any:
     """Map domain refusals to JSON errors with a code; anything else falls through to the generic 500 handler."""
     try:
@@ -86,12 +94,8 @@ def router() -> APIRouter:
     @r.post("/holdings/import/{batch_id}/apply")
     def import_apply(batch_id: str, body: pf.ApplyIn, request: Request) -> Any:
         st = _state(request)
-
-        def pre_change() -> object:  # reliability-design §7.1: pre-change backup before every import apply
-            return pf.make_backup(st.conn, st.settings.data_dir, st.clock(), tag="pre-import")
-
         return _guard(lambda: pf.apply_holdings_import(st.conn, batch_id, body.sha256, st.clock(),
-                                                       pre_change=pre_change))  # fmt: skip
+                                                       pre_change=pre_import_safeguard(st)))  # fmt: skip
 
     # ------------------------------------------------------------------ watchlist
     @r.get("/watchlist")

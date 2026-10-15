@@ -15,3 +15,10 @@ describe("errorText for rate-limit refusals", () => {
     expect(errorText(new ApiError(429, "RATE_LIMITED"))).toContain("try again later");
   });
 });
+
+describe("errorText for a NAVAll fetch already running", () => {
+  it("explains it in words", () => {
+    const e = new ApiError(429, "NAVALL_IN_PROGRESS", { code: "NAVALL_IN_PROGRESS", retry_after_s: 30 });
+    expect(errorText(e)).toBe("The AMFI latest-NAV fetch is already running. Try again in about 1 minute.");
+  });
+});

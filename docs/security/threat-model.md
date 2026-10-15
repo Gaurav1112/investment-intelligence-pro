@@ -345,6 +345,28 @@ An in-process token bucket keyed per route class. There is no Redis or external 
 
 Over-limit requests return `429` with `Retry-After`.
 
+Hosted mode (ADR-0013) cannot keep these limits in process memory, because serverless instances share none.
+- **Where the limits live:** the login limit, the refresh claims and the single-backfill lease are table rows
+  (`rate_hits`, `refresh_claims`, `leases`). Each check-and-set is ONE conditional SQL statement, so it is atomic
+  across instances.
+- **Lease expiry:** a lease lapses 330 s after it is taken, in case the function holding it was killed at the 300 s
+  limit.
+- **Continuations:** a continuation of a resumable job in progress is not refused; only a new run is limited.
+
+### C-19 Hosted mode (ADR-0013; only when `IIP_DEPLOY=vercel`)
+
+| Threat | Control | Test |
+|---|---|---|
+| Plain-HTTP downgrade or cookie theft | Origin must be `https://`; the session cookie is `Secure; HttpOnly; SameSite=Strict`; HSTS 2 years on every response | `test_login_sets_a_secure_strict_cookie_and_hsts` |
+| Requests via another hostname (Vercel deployment/preview URLs, DNS rebinding) | Host allowlist = exactly the host of `IIP_PUBLIC_ORIGIN`; Origin must equal it | `test_only_the_public_host_is_served`, `test_a_foreign_origin_cannot_log_in_or_change_state` |
+| Weak or missing secrets | Startup refused unless `IIP_ACCESS_TOKEN` ≥ 32 chars, a `libsql://`/`https://` DB URL **and** its token, `IIP_ENV=prod`, auth on, no local LLM, no dev origins. Secrets come only from Vercel's encrypted environment and never appear in `repr` or logs | `test_weak_hosted_configuration_refuses_startup` (12 cases) |
+| Session theft from a database copy | Only SHA-256(cookie) is stored; the same 8 h idle / 24 h absolute limits | `test_sessions_live_in_the_database_and_work_across_instances`, `test_expired_sessions_are_refused` |
+| Token guessing spread across instances | Shared DB login limiter (10/min); one atomic statement | `test_login_limit_is_shared_between_instances`, `test_db_rate_limiter_is_atomic_across_threads` |
+| Hammering AMFI from many instances | Shared refresh claims and the backfill/NAVAll leases (C-16); same 1 s pacing | `test_refresh_claim_is_atomic_and_shared`, `test_lease_is_exclusive_lapses_and_is_released_only_by_its_holder` |
+| Third-party custody (Vercel runtime and logs, Turso storage and backups) | **Accepted by the user** (decision 2026-10-15). No amounts or personal values in logs (C-13). Erase deletes every user row, and the response says provider backups keep them until they expire. Turso and Vercel encrypt in transit (TLS) | `test_privacy_erase_removes_every_user_row_in_the_hosted_store` |
+| Synthetic data mixed into real data | Fixtures are never seeded when hosted | `test_disk_only_features_are_refused_or_substituted` |
+| Shared or public use (regulatory, AMFI licence) | Documented condition: one user, URL and token never shared (deployment.md) | — (policy) |
+
 ### C-17 Supply chain (A03:2025)
 - **Python**
   - `uv.lock` committed. `uv sync --frozen` in every script and CI.
@@ -370,7 +392,8 @@ Over-limit requests return `429` with `Retry-After`.
 | Risk | Why accepted | Revisit when |
 |---|---|---|
 | Same-user malware reads the DB | Out of an app's power. FileVault and OS updates are the mitigation. | Never in scope for a local app. |
-| HTTP (not TLS) on loopback | Loopback traffic doesn't leave the host. TLS on localhost adds cert management for little gain. | Any non-loopback deployment (it would then be **required**). |
+| HTTP (not TLS) on loopback | Loopback traffic doesn't leave the host. TLS on localhost adds cert management for little gain. | Any non-loopback deployment (it would then be **required**). Hosted mode requires HTTPS (C-19). |
+| Hosted: provider custody of financial data (Vercel, Turso) | User decision 2026-10-15 to host; mitigations in C-19 | If the app is ever used by anyone other than its owner (not permitted). |
 | Upstream publishes wrong-but-plausible numbers | We cannot verify a publisher beyond plausibility checks and cross-source comparison where one exists. | When a second source exists for the same series. |
 | LLM prose subtly misleading without numbers | Mitigated by the claim filter and labelling, not eliminated. | Before enabling the LLM by default (never planned). |
 | Browser extensions reading page content | Outside the app's control. | — |

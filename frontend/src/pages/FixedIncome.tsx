@@ -71,6 +71,7 @@ export function errorText(e: unknown): string {
     const minutes = typeof wait === "number" ? Math.max(1, Math.ceil(wait / 60)) : null;
     const later = minutes === null ? "later" : `in about ${minutes} minute${minutes === 1 ? "" : "s"}`;
     if (e.code === "BACKFILL_IN_PROGRESS") return `Another history backfill is still running. Try this one ${later}.`;
+    if (e.code === "NAVALL_IN_PROGRESS") return `The AMFI latest-NAV fetch is already running. Try again ${later}.`;
     if (e.code === "RATE_LIMITED") return `This was fetched recently; to be polite to the source, try again ${later}.`;
     const d = (e.detail as { detail?: unknown } | undefined)?.detail;
     if (typeof d === "string") return `${d} (HTTP ${e.status})`;

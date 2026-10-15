@@ -31,6 +31,7 @@ from iip.data.registry import (
 )
 from iip.data.validators import run_all
 from iip.engine.freshness import nav_is_stale
+from iip.store.coordination import clear_job, load_job, save_job
 from iip.store.db import write_tx
 from iip.store.observations import ObservationRow, upsert_observation
 
@@ -117,13 +118,25 @@ def _failing_run(conn: sqlite3.Connection, run_id: str, now: Callable[[], dateti
 INTERRUPTED = "INTERRUPTED: the app stopped while this run was in progress"
 
 
-def mark_interrupted_runs(conn: sqlite3.Connection, now: datetime) -> int:
+def mark_interrupted_runs(conn: sqlite3.Connection, now: datetime, *, started_before: datetime | None = None) -> int:
     """At startup no run can be in progress (one process), so any 'running' row was cut off by a crash or a stop.
-    It becomes 'failed' with an explicit reason, which the 'ingestion run failed' alert picks up."""
-    cur = conn.execute(
-        "UPDATE ingestion_runs SET status='failed', finished_at=?, error=? WHERE status='running'",
-        (now.isoformat(), INTERRUPTED),
-    )
+    It becomes 'failed' with an explicit reason, which the 'ingestion run failed' alert picks up.
+
+    Hosted (ADR-0013) passes ``started_before``: other instances may be running a job right now, so only runs that
+    started before any live function could have are interrupted, and a resumable job's run is left alone while its
+    progress row was touched within the last hour (its next call continues it and sets the final status)."""
+    if started_before is None:
+        cur = conn.execute(
+            "UPDATE ingestion_runs SET status='failed', finished_at=?, error=? WHERE status='running'",
+            (now.isoformat(), INTERRUPTED),
+        )
+    else:
+        cur = conn.execute(
+            "UPDATE ingestion_runs SET status='failed', finished_at=?, error=? WHERE status='running'"
+            " AND started_at < ? AND run_id NOT IN (SELECT json_extract(state_json, '$.run_id') FROM job_progress"
+            " WHERE updated_at >= ? AND json_extract(state_json, '$.run_id') IS NOT NULL)",
+            (now.isoformat(), INTERRUPTED, started_before.isoformat(), (now - timedelta(hours=1)).isoformat()),
+        )
     return cur.rowcount
 
 
@@ -327,29 +340,47 @@ def discover_fund_house_id(
     pause: Callable[[float], object] | None = None,
 ) -> int | None:  # fmt: skip
     """Find AMFI's internal fund-house id for an AMC by probing one day per id (mapping is NOT published)."""
-    key = f"amfi.mf_id:{amc_name.strip().lower()}"
-    row = conn.execute("SELECT value_json FROM settings WHERE key=?", (key,)).fetchone()
-    if row:
-        return int(row["value_json"])
-    for mf_id in range(1, max_id + 1):
+    cached = cached_fund_house_id(conn, amc_name)
+    if cached is not None:
+        return cached
+    found, _next = probe_fund_house_ids(conn, fetcher, amc_name, probe_day, range(1, max_id + 1), pause=pause)
+    return found
+
+
+def cached_fund_house_id(conn: sqlite3.Connection, amc_name: str) -> int | None:
+    row = conn.execute("SELECT value_json FROM settings WHERE key=?", (f"amfi.mf_id:{amc_name.strip().lower()}",))
+    hit = row.fetchone()
+    return int(hit["value_json"]) if hit else None
+
+
+def probe_fund_house_ids(
+    conn: sqlite3.Connection, fetcher: Fetcher, amc_name: str, probe_day: date, ids: range,
+    pause: Callable[[float], object] | None = None, stop: Callable[[], bool] | None = None,
+) -> tuple[int | None, int]:  # fmt: skip
+    """Probe ``ids`` in order; every AMC seen is cached. Returns (the AMC's id or None, the next id to probe).
+    ``stop`` (hosted, resumable) is checked AFTER each probe, so every call makes progress."""
+    wanted = amc_name.strip().lower()
+    for mf_id in ids:
         try:
             payload = fetcher.fetch(navhistory_request(mf_id=mf_id, tp=1, from_date=probe_day, to_date=probe_day))
             res = parse_navhistory(payload)
         except (FetchError, DataError):
-            continue
+            res = None
         finally:
             if pause is not None:
                 pause(1.0)
-        amcs = {(r.amc or "").strip().lower() for r in res.records}
+        amcs = {(r.amc or "").strip().lower() for r in res.records} if res is not None else set()
         for name in amcs:
             if name:
                 conn.execute(
                     "INSERT INTO settings(key, value_json) VALUES (?, ?) ON CONFLICT(key) DO NOTHING",
                     (f"amfi.mf_id:{name}", str(mf_id)),
                 )
-        if amc_name.strip().lower() in amcs:
-            return mf_id
-    return None
+        if wanted in amcs:
+            return mf_id, mf_id + 1
+        if stop is not None and stop():
+            return None, mf_id + 1
+    return None, ids.stop
 
 
 def backfill_history(
@@ -372,21 +403,194 @@ def backfill_history(
     with _failing_run(conn, run_id, now):
         while window_end >= start:
             window_start = max(start, window_end - timedelta(days=MAX_HISTORY_WINDOW_DAYS))
-            try:
-                request = navhistory_request(mf_id=mf_id, tp=1, from_date=window_start, to_date=window_end)
-                res = parse_navhistory(fetcher.fetch(request))
-                ok += res.report.rows_ok
-                rej += res.report.rows_rejected
-                mine = [o for o in res.observations if int(o.entity_key) == scheme_code]
-                stored += _store_observations(conn, _validated_list(mine), run_id, lambda _c: True)
-            except (FetchError, DataError) as exc:
-                errors.append(f"{window_start}..{window_end}: {type(exc).__name__}")
+            w_ok, w_rej, w_stored, err = _fetch_window(
+                conn, fetcher, scheme_code, mf_id, window_start, window_end, run_id
+            )
+            ok, rej, stored = ok + w_ok, rej + w_rej, stored + w_stored
+            if err:
+                errors.append(err)
             if pause is not None:
                 pause(1.0)
             window_end = window_start - timedelta(days=1)
+    return _finish_backfill(conn, run_id, now, ok, rej, stored, errors)
+
+
+def _fetch_window(
+    conn: sqlite3.Connection, fetcher: Fetcher, scheme_code: int, mf_id: int, window_start: date, window_end: date,
+    run_id: str,
+) -> tuple[int, int, int, str | None]:  # fmt: skip
+    """One ≤ 90-day NAV-history request; keeps ONLY this scheme's rows. Returns (ok, rejected, stored, error)."""
+    try:
+        request = navhistory_request(mf_id=mf_id, tp=1, from_date=window_start, to_date=window_end)
+        res = parse_navhistory(fetcher.fetch(request))
+    except (FetchError, DataError) as exc:
+        return 0, 0, 0, f"{window_start}..{window_end}: {type(exc).__name__}"
+    mine = [o for o in res.observations if int(o.entity_key) == scheme_code]
+    stored = _store_observations(conn, _validated_list(mine), run_id, lambda _c: True)
+    return res.report.rows_ok, res.report.rows_rejected, stored, None
+
+
+def _finish_backfill(
+    conn: sqlite3.Connection, run_id: str, now: Callable[[], datetime], ok: int, rej: int, stored: int,
+    errors: list[str],
+) -> RunSummary:  # fmt: skip
     status = "ok" if not errors and rej == 0 else ("partial" if stored else "failed")
     _finish_run(conn, run_id, now(), status, ok, rej, None, "; ".join(errors[:5]))
-    return RunSummary(run_id, source, status, ok, rej, stored, "; ".join(errors[:5]) or "complete")
+    return RunSummary(run_id, "amfi.navhistory", status, ok, rej, stored, "; ".join(errors[:5]) or "complete")
+
+
+# ----------------------------------------------------------------------------- hosted: resumable jobs (ADR-0013)
+# A serverless function has a hard time limit (Vercel Hobby: 300 s). A job does a bounded amount of work per call,
+# stores its progress in job_progress after every unit of work, and the client calls again until ``done``. Every call
+# makes progress: the time budget is checked only AFTER at least one unit, so a stalled loop is impossible.
+
+
+class FundHouseNotFound(Exception):
+    """Every candidate id was probed and none lists the AMC (the job is cleared; nothing is guessed)."""
+
+
+def backfill_job_key(scheme_code: int) -> str:
+    return f"backfill:{scheme_code}"
+
+
+def _window_count(start: date, end: date) -> int:
+    n, window_end = 0, end
+    while window_end >= start:
+        window_end = max(start, window_end - timedelta(days=MAX_HISTORY_WINDOW_DAYS)) - timedelta(days=1)
+        n += 1
+    return n
+
+
+def backfill_resumable(
+    conn: sqlite3.Connection, fetcher: Fetcher, *, scheme_code: int, amc_name: str, start: date, end: date,
+    now: Callable[[], datetime], pause: Callable[[float], object] | None, stop: Callable[[], bool],
+    max_id: int = 80,
+) -> dict[str, object]:  # fmt: skip
+    """One bounded step of a NAV-history backfill (same windows, filtering and storage as :func:`backfill_history`).
+
+    Phases: ``discovering`` (probe AMFI fund-house ids, unless cached) → ``fetching`` (newest window first) →
+    ``complete`` (run finished, progress row cleared). Returns the progress, plus the run summary when complete."""
+    key = backfill_job_key(scheme_code)
+    state = load_job(conn, key)
+    if state is None:
+        state = {
+            "run_id": _start_run(conn, "amfi.navhistory", now()), "scheme_code": scheme_code,
+            "start": start.isoformat(), "next_end": end.isoformat(), "mf_id": cached_fund_house_id(conn, amc_name),
+            "next_probe_id": 1, "probe_day": end.replace(day=1).isoformat(),
+            "windows_total": _window_count(start, end), "windows_done": 0,
+            "ok": 0, "rej": 0, "stored": 0, "errors": [],
+        }  # fmt: skip
+        save_job(conn, key, state, now().isoformat())
+    run_id = str(state["run_id"])
+    with _failing_run(conn, run_id, now):
+        if state["mf_id"] is None:
+            found, next_id = probe_fund_house_ids(
+                conn, fetcher, amc_name, date.fromisoformat(str(state["probe_day"])),
+                range(int(state["next_probe_id"]), max_id + 1), pause=pause, stop=stop,
+            )  # fmt: skip
+            state["mf_id"], state["next_probe_id"] = found, next_id
+            save_job(conn, key, state, now().isoformat())
+            if found is None and next_id > max_id:
+                clear_job(conn, key)
+                _finish_run(conn, run_id, now(), "failed", 0, 0, None, "fund-house id not found")
+                raise FundHouseNotFound(amc_name)
+            if found is None:
+                return _progress(state, "discovering")
+            if stop():
+                return _progress(state, "fetching")
+        first, start_d = True, date.fromisoformat(str(state["start"]))
+        while (window_end := date.fromisoformat(str(state["next_end"]))) >= start_d and (first or not stop()):
+            first = False
+            window_start = max(start_d, window_end - timedelta(days=MAX_HISTORY_WINDOW_DAYS))
+            w_ok, w_rej, w_stored, err = _fetch_window(
+                conn, fetcher, scheme_code, int(str(state["mf_id"])), window_start, window_end, run_id
+            )
+            errors = list(state["errors"])
+            if err:
+                errors.append(err)
+            state.update(
+                ok=int(state["ok"]) + w_ok, rej=int(state["rej"]) + w_rej, stored=int(state["stored"]) + w_stored,
+                errors=errors, windows_done=int(state["windows_done"]) + 1,
+                next_end=(window_start - timedelta(days=1)).isoformat(),
+            )  # fmt: skip
+            save_job(conn, key, state, now().isoformat())
+            if pause is not None:
+                pause(1.0)
+    if date.fromisoformat(str(state["next_end"])) >= start_d:
+        return _progress(state, "fetching")
+    clear_job(conn, key)
+    summary = _finish_backfill(
+        conn, run_id, now, int(state["ok"]), int(state["rej"]), int(state["stored"]),
+        [str(e) for e in state["errors"]],
+    )  # fmt: skip
+    return {**_progress(state, "complete"), **summary.__dict__}
+
+
+NAVALL_JOB = "navall"
+NAVALL_CHUNK = 200  # schemes stored per transaction in hosted mode (each remote statement is a network round trip)
+
+
+def ingest_navall_resumable(
+    conn: sqlite3.Connection, fetcher: Fetcher, now: Callable[[], datetime], stop: Callable[[], bool],
+    chunk: int = NAVALL_CHUNK,
+) -> dict[str, object]:  # fmt: skip
+    """Hosted NAVAll ingestion in bounded steps: the same scope, validation and storage as :func:`ingest_navall`,
+    stored in scheme-code order, ``chunk`` schemes per transaction, progress saved after each chunk.
+
+    The file is fetched again on each continuation (it cannot be kept between calls without storing AMFI data beyond
+    the minimised scope). Storage is idempotent, so a scheme whose NAV changed between two fetches is simply
+    corrected; the run records the SHA-256 of the last file read."""
+    state = load_job(conn, NAVALL_JOB)
+    if state is None:
+        state = {"run_id": _start_run(conn, "amfi.navall", now()), "next_code": 0, "stored": 0}
+        save_job(conn, NAVALL_JOB, state, now().isoformat())
+    run_id = str(state["run_id"])
+    try:
+        payload = fetcher.fetch(navall_request())
+        result = parse_navall(payload)
+    except (FetchError, DataError) as exc:
+        clear_job(conn, NAVALL_JOB)
+        _finish_run(conn, run_id, now(), "failed", 0, 0, None, f"{type(exc).__name__}: {exc}")
+        summary = RunSummary(run_id, "amfi.navall", "failed", 0, 0, 0, f"{type(exc).__name__}: {exc}")
+        return {"done": True, "phase": "complete", "schemes_done": 0, "schemes_total": 0, **summary.__dict__}
+    with _failing_run(conn, run_id, now):
+        tracked = tracked_scheme_codes(conn)
+        scope = sorted({r.scheme_code for r in result.records if in_minimised_scope(r, tracked)})
+        by_code: dict[int, list[Observation]] = {}
+        for o in _validated(result):
+            by_code.setdefault(int(o.entity_key), []).append(o)
+        records = {r.scheme_code: r for r in result.records}
+        first = True
+        while (todo := [c for c in scope if c > int(str(state["next_code"]))]) and (first or not stop()):
+            first = False
+            part = todo[:chunk]
+            with write_tx(conn):
+                _store_schemes(conn, (records[c] for c in part), payload.retrieved_at)
+            wanted = set(part)
+            obs = [o for c in part for o in by_code.get(c, [])]
+            stored = _store_observations(conn, obs, run_id, wanted.__contains__)
+            state.update(next_code=part[-1], stored=int(str(state["stored"])) + stored)
+            save_job(conn, NAVALL_JOB, state, now().isoformat())
+        done_count = len([c for c in scope if c <= int(str(state["next_code"]))])
+        if done_count < len(scope):
+            return {"done": False, "phase": "storing", "schemes_done": done_count, "schemes_total": len(scope)}
+        pruned = prune_untracked_history(conn, tracked)
+    clear_job(conn, NAVALL_JOB)
+    rep = result.report
+    status = "ok" if rep.rows_rejected == 0 else "partial"
+    _finish_run(conn, run_id, now(), status, rep.rows_ok, rep.rows_rejected, payload.sha256, "")
+    detail = f"{len(scope)} schemes in the minimised scope; {pruned} older NAVs of untracked schemes pruned"
+    summary = RunSummary(run_id, "amfi.navall", status, rep.rows_ok, rep.rows_rejected, int(str(state["stored"])),
+                         detail)  # fmt: skip
+    return {"done": True, "phase": "complete", "schemes_done": len(scope), "schemes_total": len(scope),
+            **summary.__dict__}  # fmt: skip
+
+
+def _progress(state: dict[str, object], phase: str) -> dict[str, object]:
+    return {
+        "done": phase == "complete", "phase": phase,
+        "windows_done": state["windows_done"], "windows_total": state["windows_total"],
+    }  # fmt: skip
 
 
 def _validated_list(observations: list[Observation]) -> list[Observation]:

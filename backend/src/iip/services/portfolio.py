@@ -41,7 +41,7 @@ from iip.services import ingestion
 from iip.services.explain import source_ref
 from iip.services.instruments import TBILL_STALE_DAYS, _slug
 from iip.store.db import backup as db_backup
-from iip.store.db import current_version, write_tx
+from iip.store.db import current_version, is_remote, write_tx
 
 log = logging.getLogger("iip.portfolio")
 
@@ -62,7 +62,10 @@ LADDER_BUCKETS: tuple[tuple[str, int, int | None], ...] = (
 )
 LADDER_SPECIAL = ("matured or overdue", "unknown")
 SENSITIVITY_SHOCK = Decimal("0.05")
-USER_TABLES = ("transactions", "portfolios", "watchlist", "alerts", "runs", "audit_events", "settings", "profiles")
+USER_TABLES = (
+    "transactions", "portfolios", "watchlist", "alerts", "runs", "audit_events", "settings", "profiles",
+    "import_snapshots",
+)  # fmt: skip
 assert all(t.isidentifier() for t in USER_TABLES)
 PUBLIC_TABLES = (
     "sources",
@@ -1381,10 +1384,15 @@ def inventory(conn: sqlite3.Connection, data_dir: Path) -> dict[str, Any]:
     user = {t: int(conn.execute(_COUNT_SQL[t]).fetchone()[0]) for t in USER_TABLES}
     public = {t: int(conn.execute(_COUNT_SQL[t]).fetchone()[0]) for t in PUBLIC_TABLES}
     pending = len([b for b in _batches(conn) if b["status"] == "previewed"])
+    backups = (
+        {"count": 0, "note": HOSTED_RETENTION_NOTE}  # hosted: no local files; the provider keeps its own copies
+        if is_remote(conn)
+        else {"count": len(_backup_files(data_dir)), "note": "backups may contain user data"}
+    )
     return {
         "user_data": {"tables": user, "pending_import_previews": pending},
         "public_market_data_kept_on_erase": {"tables": public},
-        "backups": {"count": len(_backup_files(data_dir)), "note": "backups may contain user data"},
+        "backups": backups,
         "note": "Counts only; no amounts or names.",
     }
 
@@ -1440,6 +1448,8 @@ def erase(conn: sqlite3.Connection, data_dir: Path, *, delete_backups: bool) -> 
     """Delete every user row (SEC-81), with ``secure_delete`` on, then VACUUM and truncate the WAL so the bytes
     are gone from the database files. Public market data and the schema are kept."""
     counts = {t: int(conn.execute(_COUNT_SQL[t]).fetchone()[0]) for t in USER_TABLES}
+    if is_remote(conn):
+        return _erase_hosted(conn, counts)
     previous = int(conn.execute("PRAGMA secure_delete").fetchone()[0])
     conn.execute("PRAGMA secure_delete=ON")
     try:
@@ -1465,7 +1475,64 @@ def erase(conn: sqlite3.Connection, data_dir: Path, *, delete_backups: bool) -> 
     }
 
 
+HOSTED_RETENTION_NOTE = (
+    "Hosted database (ADR-0013): every user row is deleted. The database provider (Turso) keeps its own"
+    " point-in-time backups for the retention period of your plan, and those copies still contain the deleted rows"
+    " until they expire; delete the database in the Turso dashboard to remove them at once."
+)
+
+
+def _erase_hosted(conn: sqlite3.Connection, counts: dict[str, int]) -> dict[str, Any]:
+    """Hosted erase: the same rows are deleted in one transaction, plus the web sessions. VACUUM, WAL and
+    secure_delete are file-level controls that belong to the provider, and there are no local backup files."""
+    with write_tx(conn):
+        for t in USER_TABLES:
+            conn.execute(_DELETE_SQL[t])
+        conn.execute("DELETE FROM job_progress")
+    log.info("user data erased tables=%d (hosted)", len(counts))
+    return {
+        "status": "erased",
+        "deleted_rows": counts,
+        "backups_deleted": 0,
+        "backups_remaining": 0,
+        "kept": "public market data (instruments, observations, sources, ingestion runs) and the schema",
+        "provider_retention": HOSTED_RETENTION_NOTE,
+    }
+
+
+SNAPSHOTS_KEPT = 20
+
+
+def snapshot_transactions(conn: sqlite3.Connection, now: datetime, *, tag: str) -> dict[str, Any]:
+    """Hosted substitute for the pre-import FILE backup (reliability-design §7.1, ADR-0013): every transaction row as
+    it was before the import, stored in ``import_snapshots`` (user data: erased with everything else). The import
+    itself still applies in ONE transaction, so a failed import changes nothing; the snapshot guards against a
+    WRONG import that succeeded. The newest ``SNAPSHOTS_KEPT`` are kept."""
+    rows = [dict(r) for r in conn.execute("SELECT * FROM transactions ORDER BY portfolio_id, txn_date, txn_id")]
+    snapshot_id = f"snap_{now.strftime('%Y%m%dT%H%M%SZ')}_{secrets.token_hex(4)}"
+    with write_tx(conn):
+        conn.execute(
+            "INSERT INTO import_snapshots(snapshot_id, portfolio_id, tag, taken_at, row_count, rows_json)"
+            " VALUES (?, '*', ?, ?, ?, ?)",
+            (snapshot_id, tag, now.isoformat(), len(rows), json.dumps(rows, sort_keys=True)),
+        )
+        conn.execute(
+            "DELETE FROM import_snapshots WHERE snapshot_id NOT IN"
+            " (SELECT snapshot_id FROM import_snapshots ORDER BY taken_at DESC, snapshot_id DESC LIMIT ?)",
+            (SNAPSHOTS_KEPT,),
+        )
+    log.info("pre-import snapshot rows=%d", len(rows))
+    return {"snapshot_id": snapshot_id, "rows": len(rows)}
+
+
 def make_backup(conn: sqlite3.Connection, data_dir: Path, now: datetime, *, tag: str = "") -> dict[str, Any]:
+    if is_remote(conn):
+        raise PortfolioError(
+            "BACKUP_NOT_AVAILABLE_HOSTED",
+            "File backups are not available when hosted; use your database provider's backups (Turso point-in-time"
+            " restore) or export your data from Settings.",
+            409,
+        )
     d = backups_dir(data_dir)
     d.mkdir(parents=True, exist_ok=True)
     os.chmod(d, 0o700)

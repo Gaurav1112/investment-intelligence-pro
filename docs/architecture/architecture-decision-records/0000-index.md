@@ -17,3 +17,4 @@ Each ADR was decided only after the Phase 1–3 research documents were complete
 | 0010 | Forecasting: baselines first, promotion gate |
 | 0011 | Independent test oracles kept out of the runtime |
 | 0012 | Storage, migrations and reproducible run records |
+| 0013 | Hosted mode on Vercel: single user, Turso (libSQL), DB-backed sessions and limits, resumable jobs |

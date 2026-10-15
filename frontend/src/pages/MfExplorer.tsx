@@ -51,6 +51,12 @@ function NavFreshness({ row, today }: { row: InstrumentListItem; today: string }
 
 type Activity = { key: string; tone: "ok" | "warn"; text: string };
 
+function jobErrorText(e: unknown): string {
+  return e instanceof Error && e.message === "JOB_DID_NOT_FINISH"
+    ? "the job did not finish after many steps; its progress is saved, so starting it again continues where it stopped."
+    : errorText(e);
+}
+
 function runText(what: string, s: RunSummary): Activity {
   const ok = s.status === "ok";
   return {
@@ -62,6 +68,36 @@ function runText(what: string, s: RunSummary): Activity {
       (ok ? "" : ` — the run did not complete cleanly; not all data was stored.`) +
       ` (run ${s.run_id})`,
   };
+}
+
+/** Hosted mode (ADR-0013) answers long jobs in bounded steps: `done: false` plus progress counts from the server.
+ * Locally the server answers once with the run summary (no `done` field), so the loop ends after one call. */
+export type JobStep = Partial<RunSummary> & {
+  done?: boolean;
+  phase?: "discovering" | "fetching" | "storing" | "complete";
+  windows_done?: number;
+  windows_total?: number;
+  schemes_done?: number;
+  schemes_total?: number;
+};
+
+export const MAX_JOB_STEPS = 200;
+
+/** Plain-English progress for one step (counts are the server's; nothing is computed here). */
+export function stepText(s: JobStep): string {
+  if (s.phase === "discovering") return "finding AMFI's fund-house id…";
+  if (s.phase === "storing") return `stored ${s.schemes_done ?? 0} of ${s.schemes_total ?? 0} schemes…`;
+  return `fetched ${s.windows_done ?? 0} of ${s.windows_total ?? 0} date windows…`;
+}
+
+/** Call `step` until the server says the job is done; report each unfinished step. Bounded, never endless. */
+export async function runUntilDone(step: () => Promise<JobStep>, onProgress: (s: JobStep) => void): Promise<RunSummary> {
+  for (let i = 0; i < MAX_JOB_STEPS; i++) {
+    const s = await step();
+    if (s.done !== false) return s as RunSummary;
+    onProgress(s);
+  }
+  throw new Error("JOB_DID_NOT_FINISH");
 }
 
 function ExitLoadForm({ row, onDone, onCancel }: { row: InstrumentListItem; onDone: (msg: string) => void; onCancel: () => void }) {
@@ -139,6 +175,7 @@ export default function MfExplorer() {
   const [activity, setActivity] = useState<Activity[]>([]);
   const [busy, setBusy] = useState<Record<string, boolean>>({});
   const [navPending, setNavPending] = useState(false);
+  const [progress, setProgress] = useState("");
   const [editing, setEditing] = useState<InstrumentListItem | null>(null);
   const today = todayIst();
 
@@ -153,27 +190,36 @@ export default function MfExplorer() {
   async function fetchNavAll() {
     setNavPending(true);
     try {
-      const s = await api<RunSummary>("/api/ingestion/amfi-navall", { method: "POST" });
+      const s = await runUntilDone(
+        () => api<JobStep>("/api/ingestion/amfi-navall", { method: "POST" }),
+        (p) => setProgress(`AMFI latest NAV fetch: ${stepText(p)}`),
+      );
       log(runText("AMFI latest NAV fetch", s));
       list.reload();
     } catch (e) {
-      log({ key: `navall-${Date.now()}`, tone: "warn", text: `AMFI latest NAV fetch failed: ${errorText(e)}` });
+      log({ key: `navall-${Date.now()}`, tone: "warn", text: `AMFI latest NAV fetch failed: ${jobErrorText(e)}` });
     } finally {
       setNavPending(false);
+      setProgress("");
     }
   }
 
   async function backfill(row: InstrumentListItem) {
     if (!row.amfi_code) return;
+    const code = row.amfi_code;
     setBusy((b) => ({ ...b, [row.instrument_id]: true }));
     try {
-      const s = await api<RunSummary>(`/api/ingestion/backfill/${encodeURIComponent(row.amfi_code)}`, { method: "POST", body: {} });
+      const s = await runUntilDone(
+        () => api<JobStep>(`/api/ingestion/backfill/${encodeURIComponent(code)}`, { method: "POST", body: {} }),
+        (p) => setProgress(`History backfill for ${row.name}: ${stepText(p)}`),
+      );
       log(runText(`History backfill for ${row.name}`, s));
       list.reload();
     } catch (e) {
-      log({ key: `bf-${row.instrument_id}-${Date.now()}`, tone: "warn", text: `History backfill for ${row.name} failed: ${errorText(e)}` });
+      log({ key: `bf-${row.instrument_id}-${Date.now()}`, tone: "warn", text: `History backfill for ${row.name} failed: ${jobErrorText(e)}` });
     } finally {
       setBusy((b) => ({ ...b, [row.instrument_id]: false }));
+      setProgress("");
     }
   }
 
@@ -299,6 +345,9 @@ export default function MfExplorer() {
         <span className="topbar__spacer" />
         {list.data && list.data.items.length > 0 ? fetchButton : null}
       </div>
+      <p role="status" className="small muted" hidden={!progress}>
+        {progress ? `In progress — ${progress} Keep this page open; each step continues where the last one stopped.` : ""}
+      </p>
       <div id="mf-activity" tabIndex={-1} aria-live="polite" aria-label="Recent actions">
         {activity.length ? (
           <ul className="activity">

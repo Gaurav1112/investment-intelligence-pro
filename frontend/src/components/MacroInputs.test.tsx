@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import type { DataHealthResponse } from "../lib/types";
@@ -120,5 +120,59 @@ describe("Data health → Macro inputs", () => {
       method: "POST",
       body: { yield_fraction: "0.057281", citation: { url: "https://www.rbi.org.in/pr", as_of: "2026-10-14", note: "PR 2026-2027/1325" } },
     });
+  });
+});
+
+describe("Data health → Fetch CPI from MoSPI", () => {
+  function stubMospi(status: MospiStatus, fetchResult: () => Response) {
+    const calls: Call[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        const method = init?.method ?? "GET";
+        calls.push({ url, method, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+        if (url === "/api/inputs/mospi/fetch") return fetchResult();
+        if (url === "/api/data-health") return json(HEALTH);
+        if (url === "/api/inputs/mospi/status") return json(status);
+        if (url === "/api/inputs/cpi") return json(CPI);
+        if (url === "/api/inputs/riskfree") return json(RF);
+        return json({ code: "NOT_FOUND" }, 404);
+      }),
+    );
+    return calls;
+  }
+  const CONFIGURED: MospiStatus = { ...MOSPI, status: "CONFIGURED", method: "token", message: "Credentials found in the environment." };
+
+  it("offers no fetch button while MoSPI is not configured, and says why", async () => {
+    stubMospi(MOSPI, () => json({}, 500));
+    renderPage();
+    expect(await screen.findByText(/Fetching from MoSPI is unavailable until it is configured \(REQUIRES CONFIGURATION\)/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Fetch CPI from MoSPI" })).not.toBeInTheDocument();
+  });
+
+  it("fetches a month when configured, says NOT VERIFIED and reloads the CPI list", async () => {
+    const calls = stubMospi(CONFIGURED, () =>
+      json({ status: "stored", series_id: "cpi:all-india:base2024", outcome: "inserted", month: "2026-09", verified: false }),
+    );
+    const user = userEvent.setup();
+    renderPage();
+    const form = await screen.findByRole("form", { name: "Fetch CPI from MoSPI" });
+    await user.click(within(form).getByRole("button", { name: "Fetch CPI from MoSPI" }));
+    expect(within(form).getByLabelText("Reference month")).toHaveAttribute("aria-invalid", "true");
+    await user.type(within(form).getByLabelText("Reference month"), "2026-09");
+    await user.click(within(form).getByRole("button", { name: "Fetch CPI from MoSPI" }));
+    expect(await within(form).findByRole("status")).toHaveTextContent(/CPI for 2026-09 \(base 2024\) fetched from MoSPI\. NOT VERIFIED/);
+    expect(calls.find((c) => c.method === "POST")?.body).toEqual({ base_year: 2024, year: 2026, month: 9 });
+    await waitFor(() => expect(calls.filter((c) => c.url === "/api/inputs/cpi" && c.method === "GET").length).toBeGreaterThanOrEqual(2));
+  });
+
+  it("shows the server's refusal in words and says nothing was stored", async () => {
+    stubMospi(CONFIGURED, () => json({ detail: { code: "LOGIN_RESPONSE_UNRECOGNISED", message: "login response is not JSON" } }, 409));
+    const user = userEvent.setup();
+    renderPage();
+    const form = await screen.findByRole("form", { name: "Fetch CPI from MoSPI" });
+    await user.type(within(form).getByLabelText("Reference month"), "2026-09");
+    await user.click(within(form).getByRole("button", { name: "Fetch CPI from MoSPI" }));
+    expect(await within(form).findByRole("alert")).toHaveTextContent("login response is not JSON (LOGIN_RESPONSE_UNRECOGNISED). Nothing was stored.");
   });
 });

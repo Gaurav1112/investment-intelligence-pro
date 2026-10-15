@@ -98,7 +98,8 @@ def router() -> APIRouter:
     # ------------------------------------------------------------------ FD card-rate tables
     @r.get("/fd-rates")
     def list_fd_rates(request: Request) -> dict[str, Any]:
-        return inputs.list_fd_rate_tables(_state(request).conn)
+        st = _state(request)
+        return inputs.list_fd_rate_tables(st.conn, st.clock().date())
 
     @r.post("/fd-rates")
     def add_fd_rates(body: inputs.FDRateTableIn, request: Request) -> dict[str, Any]:

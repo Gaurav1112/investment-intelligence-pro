@@ -223,8 +223,10 @@ describe("FixedIncome — fixed deposits and bonds", () => {
     fireEvent.change(screen.getByLabelText("Tenure (days)"), { target: { value: "365" } });
     fireEvent.change(screen.getByLabelText(/Premature-withdrawal penalty/), { target: { value: "1" } });
     fireEvent.change(screen.getByLabelText(/Deposits you already hold/), { target: { value: "2,50,000" } });
-    fireEvent.change(screen.getByLabelText("Official page URL"), { target: { value: "https://bank.example.in/rates" } });
-    fireEvent.change(screen.getByLabelText("Value applies as of"), { target: { value: "2026-10-10" } });
+    // The FD tab also holds the card-rate form, which has its own citation fields.
+    const fdForm = screen.getByRole("form", { name: "Add a fixed deposit" });
+    fireEvent.change(within(fdForm).getByLabelText("Official page URL"), { target: { value: "https://bank.example.in/rates" } });
+    fireEvent.change(within(fdForm).getByLabelText("Value applies as of"), { target: { value: "2026-10-10" } });
     await userEvent.click(screen.getByRole("button", { name: "Save fixed deposit" }));
     await waitFor(() => expect(calls.some((c) => c.method === "POST")).toBe(true));
     const post = calls.find((c) => c.method === "POST")!;
@@ -248,8 +250,9 @@ describe("FixedIncome — fixed deposits and bonds", () => {
     fireEvent.change(screen.getByLabelText("Institution"), { target: { value: "Example Bank" } });
     fireEvent.change(screen.getByLabelText("Interest rate (% a year)"), { target: { value: "7" } });
     fireEvent.change(screen.getByLabelText("Tenure (days)"), { target: { value: "180" } });
-    fireEvent.change(screen.getByLabelText("Official page URL"), { target: { value: "https://bank.example.in/rates" } });
-    fireEvent.change(screen.getByLabelText("Value applies as of"), { target: { value: "2026-10-10" } });
+    const fdForm = screen.getByRole("form", { name: "Add a fixed deposit" });
+    fireEvent.change(within(fdForm).getByLabelText("Official page URL"), { target: { value: "https://bank.example.in/rates" } });
+    fireEvent.change(within(fdForm).getByLabelText("Value applies as of"), { target: { value: "2026-10-10" } });
     await userEvent.click(screen.getByRole("button", { name: "Save fixed deposit" }));
     await waitFor(() => expect(calls.some((c) => c.method === "POST")).toBe(true));
     const body = calls.find((c) => c.method === "POST")!.body as Record<string, unknown>;

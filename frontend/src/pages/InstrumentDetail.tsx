@@ -11,7 +11,20 @@ import { dateLabel, inr, utcStamp } from "../lib/format";
 import type { ExitLoad, Freshness, InstrumentDetailResponse, SeriesPoint } from "../lib/types";
 import { useApi } from "../lib/useApi";
 import { exitLoadText } from "./MfExplorer";
-import { FD_RATE_STALE_DAYS, ManualAge, navLabel, OriginBadge, ratePct, TBILL_FRESH_DAYS } from "./FixedIncome";
+import type { BondList } from "../lib/types-bonds";
+import {
+  CiteLink,
+  errorText,
+  FD_RATE_STALE_DAYS,
+  ManualAge,
+  navLabel,
+  OriginBadge,
+  QuoteAge,
+  QuoteCell,
+  ratePct,
+  RatingCell,
+  TBILL_FRESH_DAYS,
+} from "./FixedIncome";
 
 const KIND_LABEL: Record<string, string> = {
   mf_scheme: "Mutual fund scheme",
@@ -273,6 +286,58 @@ function SeriesSection({ kind, points, fixture }: { kind: SeriesKind; points: Se
   );
 }
 
+const BOND_KINDS = new Set(["gsec", "sdl", "corp_bond"]);
+
+/** Latest cited price or yield, its freshness, the rating and the stored terms, from the same list the Fixed income page
+ * uses (GET /api/bonds). A new quote is recorded by entering the bond again with the same ISIN. */
+function BondQuotePanel({ instrumentId }: { instrumentId: string }) {
+  const res = useApi<BondList>("/api/bonds");
+  let body: ReactNode;
+  if (res.loading) body = <p className="small subtle">Loading the latest quote…</p>;
+  else if (res.error) body = <p className="small field-error">The latest quote could not be loaded: {errorText(res.error)}</p>;
+  else {
+    const item = res.data?.items.find((b) => b.instrument_id === instrumentId);
+    if (!item) body = <p className="small subtle">No stored terms or quote were found for this bond.</p>;
+    else {
+      const t = item.terms;
+      body = (
+        <Kv
+          rows={[
+            ["Price or yield", <QuoteCell key="q" item={item} />],
+            ["Quote date and freshness", <QuoteAge key="a" item={item} />],
+            ["Quote source", <CiteLink key="c" url={item.quote?.citation_url} />],
+            ["Credit", <RatingCell key="r" item={item} />],
+            ["Issuer", t?.issuer ?? <span className="subtle">not stored</span>],
+            [
+              "Trading spread",
+              t?.transaction_spread ? ratePct(t.transaction_spread) : <span className="subtle">not entered (flagged as unknown)</span>,
+            ],
+            [
+              "Call dates",
+              t && t.calls.length ? (
+                t.calls.map((c) => `${dateLabel(c.call_date)} at ${c.call_price} per ₹100`).join("; ")
+              ) : (
+                <span className="subtle">none</span>
+              ),
+            ],
+          ]}
+        />
+      );
+    }
+  }
+  return (
+    <section aria-labelledby="bond-quote-h">
+      <h2 id="bond-quote-h">Latest price or yield</h2>
+      {body}
+      <p className="small subtle">
+        To record a newer price or yield, enter this bond again with the same ISIN on <Link to="/fi">Fixed income</Link> (Bonds tab) with
+        the new quote and its citation. The latest quote dated on or before today is used; one older than{" "}
+        {res.data?.quote_stale_after_days ?? 7} days is excluded.
+      </p>
+    </section>
+  );
+}
+
 function safeStamp(iso: string): string {
   try {
     return utcStamp(iso);
@@ -346,6 +411,7 @@ export default function InstrumentDetail() {
       <h2>Terms</h2>
       <Terms d={d} />
       {i.kind === "mf_scheme" ? <FundFactsPanel instrumentId={i.instrument_id} /> : null}
+      {BOND_KINDS.has(i.kind) ? <BondQuotePanel instrumentId={i.instrument_id} /> : null}
       {d.deposit_terms && !d.series.points.length ? (
         <p className="small subtle">Fixed-deposit rates are stored as terms, not as a dated series; there is no history to chart.</p>
       ) : (

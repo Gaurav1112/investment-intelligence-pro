@@ -25,6 +25,7 @@ from iip.engine.deposits import CardRateBucket, PrematureRateBasis, validate_car
 from iip.engine.errors import InvalidInput
 from iip.engine.macro import RISK_FREE_MAX_AGE_DAYS, CpiPoint
 from iip.engine.ranking import CREDIT_SCALE
+from iip.services.explain import MANUAL_MAX_DAYS, badge
 from iip.services.instruments import TBILL_FRESH_DAYS, TBILL_STALE_DAYS, Citation
 from iip.store.db import write_tx
 from iip.store.observations import ObservationRow, UpsertOutcome, upsert_observation
@@ -444,11 +445,26 @@ def _table_out(conn: sqlite3.Connection, t: sqlite3.Row) -> dict[str, Any]:
     }  # fmt: skip
 
 
-def list_fd_rate_tables(conn: sqlite3.Connection) -> dict[str, Any]:
+def list_fd_rate_tables(conn: sqlite3.Connection, as_of: date | None = None) -> dict[str, Any]:
+    """All stored card-rate tables, newest first per bank. With ``as_of``, each table also carries its age, its
+    freshness badge (source ``bank.fd``: MANUAL within 30 days, else STALE) and whether it is the table analysis
+    uses for that bank on ``as_of`` (the latest dated on or before it)."""
     rows = conn.execute(
         "SELECT * FROM fd_card_rate_tables ORDER BY institution_key, as_of DESC, entered_at DESC, table_id DESC"
     ).fetchall()
-    return {"tables": [_table_out(conn, t) for t in rows]}
+    tables = [_table_out(conn, t) for t in rows]
+    if as_of is None:
+        return {"tables": tables}
+    seen: set[str] = set()
+    for t in tables:
+        dated = date.fromisoformat(t["as_of"])
+        t["age_days"] = (as_of - dated).days
+        t["freshness"] = badge({"source_id": "bank.fd", "observation_date": t["as_of"], "quality_status": "manual"},
+                               as_of)  # fmt: skip
+        t["current"] = dated <= as_of and t["institution_key"] not in seen
+        if t["current"]:
+            seen.add(t["institution_key"])
+    return {"as_of": as_of.isoformat(), "stale_after_days": MANUAL_MAX_DAYS["bank.fd"], "tables": tables}
 
 
 def latest_fd_rate_table(conn: sqlite3.Connection, institution: str, as_of: date) -> dict[str, Any] | None:

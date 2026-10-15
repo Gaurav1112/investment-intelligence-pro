@@ -112,6 +112,65 @@ export interface RiskFreeIn {
   citation: CitationIn;
 }
 
+// ------------------------------------------------------------------ FD card-rate tables (/api/inputs/fd-rates)
+
+export type PrematureRateBasis = "period_card" | "min(booked,period_card)";
+
+export interface FdRateBucket {
+  min_days: number;
+  max_days: number;
+  rate: string; // fraction
+}
+
+export interface FdRateTable {
+  table_id: number;
+  institution: string;
+  institution_key: string;
+  as_of: string;
+  premature_rate_basis: PrematureRateBasis;
+  citation_url: string;
+  citation_note: string;
+  entered_at: string;
+  buckets: FdRateBucket[];
+  age_days: number;
+  freshness: "MANUAL" | "STALE" | "UNKNOWN";
+  current: boolean; // the table analysis uses for this bank today
+}
+
+export interface FdRatesResponse {
+  as_of: string;
+  stale_after_days: number;
+  tables: FdRateTable[];
+}
+
+export interface FdRateTableIn {
+  institution: string;
+  buckets: FdRateBucket[];
+  premature_rate_basis: PrematureRateBasis;
+  citation: CitationIn;
+}
+
+export interface FdRateTableOut {
+  table_id: number;
+  institution_key: string;
+}
+
+// ------------------------------------------------------------------ MoSPI
+
+export interface MospiFetchIn {
+  base_year: 2012 | 2024;
+  year: number;
+  month: number;
+}
+
+export interface MospiFetchOut {
+  status: "stored";
+  series_id: string;
+  outcome: UpsertOutcome;
+  month: string; // YYYY-MM
+  verified: false;
+}
+
 export interface MospiStatus {
   source_id: string;
   status: "REQUIRES_CONFIGURATION" | "CONFIGURED";
@@ -135,5 +194,7 @@ export const isCpiResponse = (x: unknown): x is CpiResponse =>
   typeof x === "object" && x !== null && Array.isArray((x as CpiResponse).series);
 export const isRiskFreeResponse = (x: unknown): x is RiskFreeResponse =>
   typeof x === "object" && x !== null && Array.isArray((x as RiskFreeResponse).points) && "freshness" in x;
+export const isFdRatesResponse = (x: unknown): x is FdRatesResponse =>
+  typeof x === "object" && x !== null && Array.isArray((x as FdRatesResponse).tables) && typeof (x as FdRatesResponse).as_of === "string";
 export const isMospiStatus = (x: unknown): x is MospiStatus =>
   typeof x === "object" && x !== null && typeof (x as MospiStatus).status === "string" && Array.isArray((x as MospiStatus).env_vars);

@@ -2,6 +2,7 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import type { InstrumentDetailResponse, SeriesPoint } from "../lib/types";
+import type { BondList } from "../lib/types-bonds";
 import InstrumentDetail from "./InstrumentDetail";
 
 const json = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { "Content-Type": "application/json" } });
@@ -122,6 +123,46 @@ describe("InstrumentDetail", () => {
     expect(screen.getByText("13-Jan-2027")).toBeInTheDocument();
     expect(screen.getAllByText("6.54 %").length).toBeGreaterThan(0);
     expect(screen.getAllByText(/MANUAL ENTRY/).length).toBeGreaterThan(0);
+  });
+
+  it("shows a corporate bond's latest quote, freshness, citation, rating and how to record a newer quote", async () => {
+    // Fictional bond (fixture.invalid citations).
+    const id = "corp_bond:INFIXCORP018";
+    const d: InstrumentDetailResponse = {
+      instrument: { instrument_id: id, kind: "corp_bond", name: "FIXTURE Finance Ltd 9 % 2029-10-15", issuer_id: "fixture-finance", isin: "INFIXCORP018", amfi_code: null, currency: "INR", origin: "manual", created_at: "2026-10-01T00:00:00+00:00" },
+      bond_terms: { instrument_id: id, face_value: "10000", coupon_rate: "0.09", coupon_freq: 1, issue_date: "2024-10-15", maturity_date: "2029-10-15", daycount: "ACT/ACT-SEBI", listed: 1, call_schedule_json: null, credit_rating: "AA+", rating_agency: "ICRA", rating_date: "2025-09-01" },
+      series: { series_id: `bondyield:${id}`, points: [] },
+    };
+    const list: BondList = {
+      as_of: "2026-10-15", quote_stale_after_days: 7, rating_stale_after_days: 365,
+      items: [{
+        instrument_id: id, kind: "corp_bond", name: d.instrument.name, isin: "INFIXCORP018", origin: "manual", fixture: false,
+        quote: { kind: "ytm", value: "0.0812", convention: "ytm; compounding=annual", quote_date: "2026-10-01", age_days: 14, freshness: "STALE", citation_url: "https://fixture.invalid/corp", source_id: "bond.quote" },
+        quote_problem: null,
+        terms: { issuer: "FIXTURE Finance Ltd", coupon_rate: "0.09", frequency: 1, issue_date: "2024-10-15", maturity: "2029-10-15", face_value: "10000", listed: true, secured: true, record_date_days: 15, calls: [{ call_date: "2027-10-15", call_price: "100" }], transaction_spread: "0.001", day_count: "ACT/ACT-SEBI" },
+        rating: { rating: "AA+", agency: "ICRA", rating_date: "2025-09-01", age_days: 409, stale: true, citation_url: "https://fixture.invalid/rating" },
+      }],
+    }; // prettier-ignore
+    const urls = stub((url) => (url === "/api/bonds" ? json(list) : json(d)));
+    renderAt(id);
+    const panel = await screen.findByRole("region", { name: "Latest price or yield" });
+    expect(await within(panel).findByText("8.12 % YTM")).toBeInTheDocument();
+    expect(within(panel).getByText(/older than 7 days: excluded/)).toBeInTheDocument();
+    const hrefs = within(panel).getAllByRole("link", { name: "fixture.invalid" }).map((a) => a.getAttribute("href"));
+    expect(hrefs).toEqual(["https://fixture.invalid/corp", "https://fixture.invalid/rating"]); // quote source, rating rationale
+    expect(within(panel).getByText("AA+")).toBeInTheDocument();
+    expect(within(panel).getByText("15-Oct-2027 at 100 per ₹100")).toBeInTheDocument();
+    expect(within(panel).getByText("0.10 %")).toBeInTheDocument();
+    expect(within(panel).getByRole("link", { name: "Fixed income" })).toHaveAttribute("href", "/fi");
+    expect(urls).toContain("/api/bonds");
+  });
+
+  it("does not load bond quotes for a mutual fund", async () => {
+    const urls = stub(() => json(mf("source", navPoints(3, "ok"))));
+    renderAt("mf:119551");
+    await screen.findByText("Example Mutual Fund");
+    expect(urls).not.toContain("/api/bonds");
+    expect(screen.queryByRole("region", { name: "Latest price or yield" })).not.toBeInTheDocument();
   });
 
   it("shows a not-found state on 404 and an error state otherwise", async () => {

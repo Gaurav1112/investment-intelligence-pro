@@ -1,0 +1,18 @@
+# SYNTHETIC FIXTURE - not AMFI data. Byte layout, delimiters, CRLF line endings, section/AMC structure and
+# edge cases follow the AMFI scheme-master CSV captured on 2026-10-15 (see docs/data/probes/README.md); every AMC name,
+# scheme name, scheme code, ISIN and NAV is FICTIONAL. Real responses are not redistributed (AMFI terms).
+# Format source: https://portal.amfiindia.com/DownloadSchemeData_Po.aspx?mf=0
+# Test loaders strip everything up to and including the '# ---' line.
+# ---
+AMC,Code,Scheme Name,Scheme Type,Scheme Category,Scheme NAV Name,Scheme Minimum Amount,Launch Date, Closure Date,ISIN Div Payout/ ISIN GrowthISIN Div Reinvestment
+Aurora Bay AMC Limited,932448,Aurora Bay Large & Mid Cap Fund,Open Ended,Equity Scheme - Large & Mid Cap Fund,Aurora Bay Large & Mid Cap Fund - Regular Growth,5000,24-Feb-1995,24-Feb-1995,INFZ17K01164
+Aurora Bay AMC Limited,902834,Aurora Bay Large & Mid Cap Fund,Open Ended,Equity Scheme - Large & Mid Cap Fund,Aurora Bay Large & Mid Cap Fund -Regular - IDCW,5000,24-Feb-1995,24-Feb-1995,INFZ17K01156INFZ17K01CE4
+Aurora Bay AMC Limited,948418,Aurora Bay Large & Mid Cap Fund,Open Ended,Equity Scheme - Large & Mid Cap Fund,Aurora Bay Large & Mid Cap Fund -Direct - IDCW,5000,24-Feb-1995,24-Feb-1995,INFZ17K01VG9INFZ17K01VI5
+Aurora Bay AMC Limited,978492,Aurora Bay Large & Mid Cap Fund,Open Ended,Equity Scheme - Large & Mid Cap Fund,Aurora Bay Large & Mid Cap Fund - Growth - Direct Plan,5000,24-Feb-1995,24-Feb-1995,INFZ17K01VH7
+Aurora Bay AMC Limited,977697,Aurora Bay Medium to Long Term Fund,Open Ended,Income/Debt Oriented Schemes - Medium to Long Term Fund,Aurora Bay Medium to Long Term Fund - Regular - Quarterly IDCW,5000,01-Jan-1994,01-Jan-1994,INFZ17K01586INFZ17K01CY2
+Aurora Bay AMC Limited,988263,Aurora Bay Medium to Long Term Fund,Open Ended,Income/Debt Oriented Schemes - Medium to Long Term Fund,Aurora Bay Medium to Long Term Fund - Growth - Regular Plan,5000,01-Jan-1994,01-Jan-1994,INFZ17K01578
+Aurora Bay AMC Limited,971781,Aurora Bay Medium to Long Term Fund,Open Ended,Income/Debt Oriented Schemes - Medium to Long Term Fund,Aurora Income Plus-Institutional (Growth),5000,01-Jan-1994,01-Jan-1994,
+Aurora Bay AMC Limited,900109,Aurora Bay Medium to Long Term Fund,Open Ended,Income/Debt Oriented Schemes - Medium to Long Term Fund,Aurora Income Plus-Institutional (Dividend),5000,01-Jan-1994,01-Jan-1994,
+Aurora Bay AMC Limited,901837,Aurora Bay Medium to Long Term Fund,Open Ended,Income/Debt Oriented Schemes - Medium to Long Term Fund,Aurora Bay Medium to Long Term Fund - Direct - IDCW,5000,01-Jan-1994,01-Jan-1994,INFZ17KA1WL7INFZ17KA1WM5
+Aurora Bay AMC Limited,941067,Aurora Bay Medium to Long Term Fund,Open Ended,Income/Debt Oriented Schemes - Medium to Long Term Fund,Aurora Bay Medium to Long Term Fund - Direct - Quarterly IDCW,5000,01-Jan-1994,01-Jan-1994,INFZ17K01R18INFZ17K01WZ7
+Aurora Bay AMC Limited,942605,Aurora Bay Medium to Long Term Fund,Open Ended,Income/Debt Oriented Schemes - Medium to Long Term Fund,Aurora Bay Medium to Long Term Fund - Growth - Direct Plan,5000,01-Jan-1994,01-Jan-1994,INFZ17K01WY0

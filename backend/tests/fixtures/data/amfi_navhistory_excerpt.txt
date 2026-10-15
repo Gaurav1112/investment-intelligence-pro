@@ -1,0 +1,33 @@
+# SYNTHETIC FIXTURE - not AMFI data. Byte layout, delimiters, CRLF line endings, section/AMC structure and
+# edge cases follow the AMFI NAV-history report captured on 2026-10-15 (see docs/data/probes/README.md); every AMC name,
+# scheme name, scheme code, ISIN and NAV is FICTIONAL. Real responses are not redistributed (AMFI terms).
+# Format source: https://portal.amfiindia.com/DownloadNAVHistoryReport_Po.aspx
+# Test loaders strip everything up to and including the '# ---' line.
+# ---
+Scheme Code;NAV Name;Plan;Option;ISIN Div Payout/ISIN Growth;ISIN Div Reinvestment;Net Asset Value;Date
+
+Open Ended Schemes ( Equity Scheme - Multi Cap Fund )
+
+
+Halcyon Mutual Fund
+913088;Halcyon Multi Cap Fund - Growth Option;Regular Plan;Growth Option;INFZ12KC1BV3;;13.173;13-Oct-2026
+913088;Halcyon Multi Cap Fund - Growth Option;Regular Plan;Growth Option;INFZ12KC1BV3;;13.141;14-Oct-2026
+971181;Halcyon Multi Cap Fund - Growth Option - Direct Plan;Direct Plan;Growth Option;INFZ12KC1BS9;;18.135;13-Oct-2026
+971181;Halcyon Multi Cap Fund - Growth Option - Direct Plan;Direct Plan;Growth Option;INFZ12KC1BS9;;18.092;14-Oct-2026
+905026;Halcyon Multi Cap Fund - IDCW Option;Regular Plan;IDCW Option;INFZ12KC1BW1;INFZ12KC1BX9;19.220;13-Oct-2026
+905026;Halcyon Multi Cap Fund - IDCW Option;Regular Plan;IDCW Option;INFZ12KC1BW1;INFZ12KC1BX9;19.174;14-Oct-2026
+945700;Halcyon Multi Cap Fund - IDCW Option - Direct Plan;Direct Plan;IDCW Option;INFZ12KC1BT7;INFZ12KC1BU5;21.425;13-Oct-2026
+945700;Halcyon Multi Cap Fund - IDCW Option - Direct Plan;Direct Plan;IDCW Option;INFZ12KC1BT7;INFZ12KC1BU5;21.373;14-Oct-2026
+
+Open Ended Schemes ( Equity Scheme - Large Cap Fund )
+
+
+Halcyon Mutual Fund
+928470;Halcyon Large Cap Fund - Growth Option - Direct Plan;Direct Plan;Growth Option;INFZ12K01YV3;;1393.087;13-Oct-2026
+928470;Halcyon Large Cap Fund - Growth Option - Direct Plan;Direct Plan;Growth Option;INFZ12K01YV3;;1385.402;14-Oct-2026
+972505;Halcyon Large Cap Fund - Growth Option - Regular Plan;Regular Plan;Growth Option;INFZ12K01BE7;;870.312;13-Oct-2026
+972505;Halcyon Large Cap Fund - Growth Option - Regular Plan;Regular Plan;Growth Option;INFZ12K01BE7;;865.499;14-Oct-2026
+976078;Halcyon Large Cap Fund - IDCW Option - Direct Plan;Direct Plan;IDCW Option;INFZ12K01YT7;INFZ12K01YU5;61.514;13-Oct-2026
+976078;Halcyon Large Cap Fund - IDCW Option - Direct Plan;Direct Plan;IDCW Option;INFZ12K01YT7;INFZ12K01YU5;61.175;14-Oct-2026
+916018;Halcyon Large Cap Fund - IDCW Option - Regular Plan;Regular Plan;IDCW Option;INFZ12K01BC1;INFZ12K01BD9;63.001;13-Oct-2026
+916018;Halcyon Large Cap Fund - IDCW Option - Regular Plan;Regular Plan;IDCW Option;INFZ12K01BC1;INFZ12K01BD9;62.652;14-Oct-2026

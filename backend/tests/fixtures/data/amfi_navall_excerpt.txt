@@ -1,0 +1,70 @@
+# SYNTHETIC FIXTURE - not AMFI data. Byte layout, delimiters, CRLF line endings, section/AMC structure and
+# edge cases follow the AMFI NAVAll.txt response captured on 2026-10-15 (see docs/data/probes/README.md); every AMC name,
+# scheme name, scheme code, ISIN and NAV is FICTIONAL. Real responses are not redistributed (AMFI terms).
+# Format source: https://www.amfiindia.com/spages/NAVAll.txt
+# Test loaders strip everything up to and including the '# ---' line.
+# ---
+Scheme Code;ISIN Div Payout/ ISIN Growth;ISIN Div Reinvestment;Scheme Name;Plan;Option;Net Asset Value;Date
+ 
+Open Ended Schemes(Children’s Fund - Childrens' Fund)
+ 
+Asteria Mutual Fund
+ 
+954298;INFZ11K01WO4;-;Asteria Children's Fund;Direct Plan;Growth Option;20.2971;14-Oct-2026
+975136;INFZ11K01WP1;-;Asteria Children's Fund;Direct Plan;IDCW Option;21.0043;14-Oct-2026
+954460;INFZ11K01WJ4;-;Asteria Children's Fund;Regular Plan;Growth Option;21.9460;14-Oct-2026
+924454;INFZ11K01WK2;-;Asteria Children's Fund;Regular Plan;IDCW Option;27.5648;14-Oct-2026
+979444;INFZ11K01WR7;-;Asteria Children's Fund;Direct Plan;Growth Option;18.8156;14-Oct-2026
+916617;INFZ11K01WS5;INFZ11K01WQ9;Asteria Children's Fund;Direct Plan;IDCW Option;18.8401;14-Oct-2026
+907841;INFZ11K01WM8;-;Asteria Children's Fund;Regular Plan;Growth Option;40.2125;14-Oct-2026
+939668;INFZ11K01WN6;INFZ11K01WL0;Asteria Children's Fund;Regular Plan;IDCW Option;35.9490;14-Oct-2026
+ 
+Open Ended Schemes(Debt Scheme - Banking and PSU Fund)
+ 
+Fenwick Tern Mutual Fund
+ 
+912151;INFZ13I01KR2;-;Fenwick India Banking & PSU Debt Fund;Direct Plan;Growth;28.0939;14-Oct-2026
+931213;INFZ13I01KO9;-;Fenwick India Banking & PSU Debt Fund;Regular Plan;Growth;24.9074;14-Oct-2026
+989265;INFZ13I01KS0;INFZ13I01KT8;Fenwick India Banking & PSU Debt Fund;Direct Plan;IDCW;15.0950;14-Oct-2026
+914444;INFZ13I01KP6;INFZ13I01KQ4;Fenwick India Banking & PSU Debt Fund;Regular Plan;IDCW;6.8806;14-Oct-2026
+ 
+Halcyon Mutual Fund
+ 
+946464;INFZ12KA1JC8;-;Halcyon Banking and PSU Debt Fund;Regular Plan;Growth Option;29.3668;14-Oct-2026
+934256;INFZ12KA1IZ1;-;Halcyon Banking and PSU Debt Fund;Direct Plan;Growth Option;25.9504;14-Oct-2026
+908795;INFZ12KA1JD6;INFZ12KA1JE4;Halcyon Banking and PSU Debt Fund;Regular Plan;IDCW Option;7.8619;14-Oct-2026
+936122;INFZ12KA1JA2;INFZ12KA1JB0;Halcyon Banking and PSU Debt Fund;Direct Plan;IDCW Option;10.4619;14-Oct-2026
+ 
+Ithaca Mutual Fund
+ 
+943225;INFZ14X01867;-;Ithaca Banking & PSU Debt Fund;Direct Plan;Growth Option;10.0576;14-Oct-2026
+978416;INFZ14X01875;INFZ14X01883;Ithaca Banking & PSU Debt Fund;Direct Plan;IDCW Option;18.6620;14-Oct-2026
+965624;INFZ14X01834;-;Ithaca Banking & PSU Debt Fund;Regular Plan;Growth Option;14.2907;14-Oct-2026
+907465;INFZ14X01842;INFZ14X01859;Ithaca Banking & PSU Debt Fund;Regular Plan;IDCW Option;18.3674;14-Oct-2026
+ 
+Kestrel Meadow Mutual Fund
+ 
+940609;INFZ15K01FO0;-;Kestrel Banking and PSU Debt Fund;Regular Plan;Growth;44.5396;14-Oct-2026
+979634;INFZ15K01FQ5;INFZ15K01FP7;Kestrel Banking and PSU Debt Fund;Regular Plan;Payout of Income Distribution cum capital withdrawal option- Direct;16.3712;14-Oct-2026
+989190;INFZ15K01KI2;INFZ15K01KJ0;Kestrel Banking and PSU Debt Fund;Direct Plan;Annual Dividend;11.9827;15-Sep-2017
+923637;INFZ15K01KH4;-;Kestrel Banking and PSU Debt Fund;Direct Plan;Growth;82.4871;14-Oct-2026
+976294;INFZ15K01KK8;INFZ15K01KL6;Kestrel Banking and PSU Debt Fund;Direct Plan;Monthly Payout of Income Distribution cum capital withdrawal option;7.7311;14-Oct-2026
+Open Ended Schemes(Debt Scheme - Corporate Bond Fund)
+ 
+Ilex Prudent Mutual Fund
+ 
+950443;INFZ16KA1I83;-;Ilex Prudent Corporate Bond Fund;;;10.4248;24-Apr-2020
+987783;INFZ16K01CR8;-;Ilex Prudent Corporate Bond Fund;;;9.2677;16-Sep-2022
+967160;INFZ16K013B3;-;Ilex Prudent Corporate Bond Fund;;;6.7069;16-Sep-2022
+981050;INFZ16K014B1;INFZ16K015B8;Ilex Prudent Corporate Bond Fund;;;10.6217;16-Sep-2022
+970235;INFZ16K016B6;-;Ilex Prudent Corporate Bond Fund;Direct Plan;Growth;22.7347;14-Oct-2026
+986000;INFZ16KA1N37;INFZ16KA1N29;Ilex Prudent Corporate Bond Fund;;;9.9712;16-Sep-2022
+957427;INFZ16K017B4;INFZ16K018B2;Ilex Prudent Corporate Bond Fund;Direct Plan;Monthly IDCW;14.2325;14-Oct-2026
+975951;INFZ16K019B0;INFZ16K012C3;Ilex Prudent Corporate Bond Fund;Direct Plan;Quarterly IDCW;17.0729;14-Oct-2026
+912722;INFZ16K010C7;INFZ16K011C5;Ilex Prudent Corporate Bond Fund;;;10.9700;16-Sep-2022
+970580;INFZ16K01SJ1;INFZ16K01CS6;Ilex Prudent Corporate Bond Fund;;;8.5475;16-Sep-2022
+930889;INFZ16K01CQ0;-;Ilex Prudent Corporate Bond Fund;Regular Plan;Growth;21.5165;14-Oct-2026
+919118;INFZ16KA1N11;INFZ16KA1N03;Ilex Prudent Corporate Bond Fund;;;9.7194;16-Sep-2022
+940842;INFZ16K01SK9;INFZ16K01CT4;Ilex Prudent Corporate Bond Fund;Regular Plan;Monthly IDCW;11.2638;14-Oct-2026
+926832;INFZ16K01CL1;-;Ilex Prudent Corporate Bond Fund;;;14.0288;24-Apr-2020
+932567;INFZ16K01CO5;-;Ilex Prudent Corporate Bond Fund;;;15.5790;04-Aug-2015

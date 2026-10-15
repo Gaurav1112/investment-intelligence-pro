@@ -328,7 +328,7 @@ def mf_tax_class_from_category(category: str) -> MfTaxClass:
     c = category.lower()
     if "fund of funds" in c or "fof" in c or "overseas" in c or "international" in c or "gold" in c:
         return MfTaxClass.UNKNOWN
-    if "solution oriented" in c or "other scheme" in c:
+    if any(k in c for k in ("solution oriented", "children", "retirement", "other scheme")):
         # e.g. "Other Scheme - Index Funds" holds both equity AND debt index funds: cannot be inferred.
         return MfTaxClass.UNKNOWN
     if "arbitrage" in c or c.startswith("equity scheme") or "elss" in c:
@@ -343,7 +343,9 @@ def mf_lock_in_days(category: str) -> int:
     c = category.lower()
     if "elss" in c:
         return 3 * 365
-    if "solution oriented" in c:
+    if any(k in c for k in ("solution oriented", "children", "retirement")):
+        # SEBI: solution-oriented schemes lock in for 5 years (or until retirement / the child's majority).
+        # AMFI's NAVAll labels these "Children's Fund" / "Retirement Fund" without the SEBI prefix.
         return 5 * 365
     return 0
 

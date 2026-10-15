@@ -213,6 +213,12 @@ def test_elss_lock_in_and_index_fund_tax_class() -> None:
     assert any(r.startswith("TAX_CLASS_UNKNOWN") for r in idx.ineligible_reasons)
 
 
+def test_amfi_childrens_fund_label_gets_lock_in() -> None:
+    # Real NAVAll label (probe 2026-10-15): "Children’s Fund - Childrens' Fund" — no "Solution Oriented" prefix.
+    b = _liquid(category="Children’s Fund - Childrens' Fund", exit_load=cb.ExitLoadSpec(0, D("0"), "SID FIXTURE"))
+    assert any(r.startswith("HORIZON_MISMATCH") for r in b.ineligible_reasons)
+
+
 def test_short_history_is_refused_not_extrapolated() -> None:
     ds, ns = _series(date(2024, 1, 1), 1015, "0.00025")
     b = _liquid(nav_dates=ds, navs=ns)

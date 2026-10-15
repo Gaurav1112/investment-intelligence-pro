@@ -37,12 +37,12 @@ token-rotate:    ## Replace the access token (all sessions end at next restart)
 	rm -f "$(IIP_DATA_DIR)/secrets/access-token" && echo "Token removed; a new one is created at next start."
 
 test:            ## Backend + frontend tests
-	cd $(BACKEND) && .venv/bin/pytest -q -p no:warnings
+	cd $(BACKEND) && .venv/bin/pytest -p no:warnings  # addopts already has -q; a second -q hides the pass count
 	cd $(FRONTEND) && node --run test
 
 test-browser: build  ## Real-browser security tests SEC-16/SEC-23 (Playwright + Chromium, ~150 MB on first run)
 	cd $(BACKEND) && .venv/bin/playwright install chromium
-	cd $(BACKEND) && IIP_BROWSER_TESTS=1 .venv/bin/pytest -q -p no:warnings -m browser tests/browser
+	cd $(BACKEND) && IIP_BROWSER_TESTS=1 .venv/bin/pytest -p no:warnings -m browser tests/browser
 
 lockcheck:       ## SEC-85: lockfiles in sync with manifests; pnpm supply-chain policy present
 	cd $(BACKEND) && uv lock --check

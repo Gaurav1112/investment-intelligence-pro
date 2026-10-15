@@ -8,8 +8,9 @@ Status labels: **VERIFIED** (executed, with evidence) · **IMPLEMENTED, NOT VERI
 
 | Suite | Result |
 |---|---|
-| Backend `pytest` (unit, property, oracle, data, services, API, security, red-team) | **VERIFIED — 1,231 passed, 1 skipped (opt-in live-network test)** |
-| Backend `ruff check` / `ruff format --check` / `mypy --strict` (69 source files) | **VERIFIED — ruff clean, 134 files formatted, mypy --strict: no issues in 69 source files** |
+| Backend `pytest` (unit, property, oracle, data, services, API, security, red-team) | **VERIFIED — 1,298 passed, 6 skipped (5 opt-in browser tests, 1 opt-in live-network test)** (track 5 re-run, 2026-10-15; was 1,231) |
+| Backend real-browser tests (`IIP_BROWSER_TESTS=1`, `make test-browser`, Chromium) | **VERIFIED — 5 passed** (SEC-16 ×4, SEC-23 ×1) |
+| Backend `ruff check` / `ruff format --check` / `mypy --strict` (70 source files) | **VERIFIED — ruff clean, 148 files formatted, mypy --strict: no issues in 70 source files** |
 | Frontend `vitest` | **VERIFIED — 208 passed (23 files)** |
 | Frontend `tsc` type-check and production build | **VERIFIED — tsc OK; Vite production build OK** |
 | Dependency audit (`pip-audit --strict`, `pnpm audit --prod`) | **VERIFIED — no known vulnerabilities (Python and npm) on 2026-10-15** |
@@ -32,7 +33,7 @@ Status labels: **VERIFIED** (executed, with evidence) · **IMPLEMENTED, NOT VERI
 | Explained-number contract across 8 API flows | `tests/api/test_explained_contract.py` | — |
 | Concurrency | `tests/api/test_concurrency.py` (80 parallel requests) | — |
 | Security (threat-model SEC-xx) | `tests/security/*` — see §3 | — |
-| Red-team reproductions | `tests/redteam/*` — 53 tests; **40 fail on the pre-fix code** (verified by stashing the fixes) | — |
+| Red-team reproductions | `tests/redteam/*` — 53 tests; **40 fail on the pre-fix code** (verified by stashing the fixes). Track 5 added 50 more (RT-17/22/24/26/27/28): against the pre-fix source 22 fail and 3 modules fail at import; see the report's "Resolution of open findings" | — |
 
 ## 2. Live verification (real network, real data; personal use within AMFI's terms)
 
@@ -45,7 +46,7 @@ Status labels: **VERIFIED** (executed, with evidence) · **IMPLEMENTED, NOT VERI
 | Return-target feasibility on live data | **VERIFIED** | ≥ 20 % p.a. over 1 y: 0 of 60 windows; ≥ 6.5 %: 30 of 60; 3-year question refused (1 independent period) |
 | All 16 pages in a real browser (CSP active) | **VERIFIED** | Screenshots in `docs/screenshots/` and `docs/screenshots/ux/`; no console errors after fixes |
 | Backup + restore drill | **VERIFIED** | `make backup`, `make restore-drill` against the live-data DB |
-| Clean-machine `make setup` from an empty checkout | **IMPLEMENTED, NOT VERIFIED** | Toolchain was already present on this machine |
+| Clean-checkout `make setup` + `make check` + `make test-browser` | **VERIFIED (2026-10-15)** | Fresh clone in a temp dir: all pass. Toolchain and package caches were already present (a bare machine is NOT VERIFIED). See `docs/operations/deployment.md` |
 
 ### Defects found only by live verification (all fixed, each with a regression test)
 
@@ -77,11 +78,11 @@ Status labels: **VERIFIED** (executed, with evidence) · **IMPLEMENTED, NOT VERI
 | File permissions 0700/0600 | VERIFIED | SEC-82 (found and fixed default permissions) |
 | Manual refresh rate limit | VERIFIED | SEC-86 (found and fixed: no limit existed) |
 | Dependency audit | VERIFIED | SEC-84 via `make audit` (found pytest PYSEC-2026-1845 → upgraded) |
-| Cross-origin page attack (Playwright, second origin) | IMPLEMENTED, NOT VERIFIED | SEC-16 — covered at the API level by the CSRF/Origin tests; browser-level test not automated |
-| XSS through imported names rendered in the UI | IMPLEMENTED, NOT VERIFIED (browser) | SEC-23 — React text rendering + CSP; `dangerouslySetInnerHTML` banned by test (SEC-24); no Playwright test |
+| Cross-origin page attack (Playwright, second origin) | **VERIFIED (real Chromium, 2026-10-15)** | SEC-16 — `tests/browser/test_sec16_cross_origin.py` (`make test-browser`): the real server (prod mode, auth on) plus an attacker page on another port of 127.0.0.1 (same site: the SameSite=Strict cookie IS sent) and on `localhost` (cross site). Credentialed JSON fetches die at the preflight (OPTIONS → 405, no CORS); no-cors "simple" POSTs reach the app and get 403 (same site) / 401 (cross site); reading `/api/profile` is blocked by CORS; an auto-submitted `text/plain` form crafted to parse as JSON gets 403 `CSRF_REJECTED`. Instruments and profile unchanged; a same-origin control call succeeds. Observed via CDP network events. |
+| XSS through imported names rendered in the UI | **VERIFIED (real Chromium, 2026-10-15)** | SEC-23 — `tests/browser/test_sec23_xss.py`: a T-bill named `<img src=x onerror=alert(1)>` and an FD institution `<svg onload=alert(2)>Bank` created through the API render literally on Fixed income (both tabs) and both detail pages; no dialog, no `img[src=x]`/`svg[onload]`/`[onerror]` element, no `securitypolicyviolation` event, no console error. Mutation check: rendering the name with `dangerouslySetInnerHTML` makes the test fail (reverted). Also SEC-24 (static ban). |
 | LLM adapter controls (prompt contents, loopback endpoint, timeouts) | N/A in v1 | SEC-73…76 — the optional LLM adapter is not built |
-| Encrypted backups | N/A in v1 | SEC-83 — optional feature not built |
-| Supply-chain pinning policy (`minimumReleaseAge`, `onlyBuiltDependencies`) | Open | SEC-85 — lockfiles present and frozen in `make setup`; the pnpm policy settings are not configured |
+| Encrypted backups | **VERIFIED** | SEC-83 — `iip.store.encrypted_backup` (AES-256-GCM, scrypt n=2¹⁷ r=8 p=1, header authenticated as AAD; plaintext never on disk; restore verifies in memory then renames atomically, never overwrites). `make backup-encrypted` / `make restore-encrypted` (passphrase from `IIP_BACKUP_PASSPHRASE` or prompted). `tests/security/test_encrypted_backup.py` (10): round-trip, wrong passphrase → clean failure, one flipped bit in ciphertext / tag / header → authentication failure, truncated/foreign files, no partial restore, no overwrite, CLI round-trip. |
+| Supply-chain pinning policy (`minimumReleaseAge`, `onlyBuiltDependencies`) | **VERIFIED** | SEC-85 — `frontend/pnpm-workspace.yaml`: `onlyBuiltDependencies: []` (no locked package needs a build step; `node --run build` works), `minimumReleaseAge: 10080` (7 days). Enforcement checked on pnpm 10.28.2: with an age of 100 years pnpm refused every version of a test package. `make check` now runs `make lockcheck` (`uv lock --check`, `pnpm install --frozen-lockfile --lockfile-only`, policy greps). `tests/security/test_supply_chain.py` (5). |
 
 ## 4. Determinism guarantees
 
@@ -99,15 +100,19 @@ Status labels: **VERIFIED** (executed, with evidence) · **IMPLEMENTED, NOT VERI
   on the pre-fix code; open items triaged; two product decisions (RT-19, RT-20) made by the user and implemented as
   `ranking_policy@1.1.0`.
 
-## 6. Command log (final run)
+## 6. Command log (final run — track 5, 2026-10-15)
 
 ```
-$ cd backend && .venv/bin/pytest -q -p no:warnings
-1231 passed, 1 skipped in 83.13s (0:01:23)
+$ cd backend && .venv/bin/pytest -p no:warnings
+1298 passed, 6 skipped in 206.54s (0:03:26)
+$ IIP_BROWSER_TESTS=1 .venv/bin/pytest -p no:warnings -m browser tests/browser
+5 passed in 10.31s
 $ ruff check src tests && ruff format --check src tests && mypy
 All checks passed!
-134 files already formatted
-Success: no issues found in 69 source files
+148 files already formatted
+Success: no issues found in 70 source files
+$ make lockcheck
+lockcheck: OK
 $ cd frontend && node --run typecheck && node --run test && node --run build
 typecheck: OK
  Test Files  23 passed (23)

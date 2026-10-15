@@ -58,8 +58,14 @@ def router() -> APIRouter:  # noqa: PLR0915 - route table
 
     # ------------------------------------------------------------------ discovery
     @r.post("/discover")
-    def discover(body: DiscoverIn, request: Request) -> dict[str, Any]:
+    def discover(body: DiscoverIn, request: Request) -> Any:
         st = _state(request)
+        if body.include_fixtures and st.settings.env not in {"dev", "test"}:
+            # RT-27: synthetic fixtures may never enter a ranking in production, even badged.
+            return JSONResponse(
+                {"code": "FIXTURES_NOT_ALLOWED", "detail": "include_fixtures is only accepted in dev/test"},
+                status_code=400,
+            )
         as_of = st.clock().date()
         status = profile_svc.evaluate(profile_svc.load(st.conn), as_of)
         out = discovery.discover(st.conn, status, as_of=as_of, ruleset=tax_rules(),

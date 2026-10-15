@@ -8,7 +8,8 @@ IIP_DATA_DIR ?= $(HOME)/.iip
 IIP_PORT ?= 8741
 export IIP_DATA_DIR IIP_PORT
 
-.PHONY: help setup build run dev open token-rotate test check audit backup restore-drill clean
+.PHONY: help setup build run dev open token-rotate test test-browser check lockcheck audit backup backup-encrypted \
+	restore-encrypted restore-drill clean
 
 help:            ## Show targets
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed 's/:.*##/\t/'
@@ -39,7 +40,18 @@ test:            ## Backend + frontend tests
 	cd $(BACKEND) && .venv/bin/pytest -q -p no:warnings
 	cd $(FRONTEND) && node --run test
 
-check: test      ## Full gate: tests, lint, types, build, dependency audit
+test-browser: build  ## Real-browser security tests SEC-16/SEC-23 (Playwright + Chromium, ~150 MB on first run)
+	cd $(BACKEND) && .venv/bin/playwright install chromium
+	cd $(BACKEND) && IIP_BROWSER_TESTS=1 .venv/bin/pytest -q -p no:warnings -m browser tests/browser
+
+lockcheck:       ## SEC-85: lockfiles in sync with manifests; pnpm supply-chain policy present
+	cd $(BACKEND) && uv lock --check
+	cd $(FRONTEND) && pnpm install --frozen-lockfile --lockfile-only
+	@grep -qE '^onlyBuiltDependencies: \[\]$$' $(FRONTEND)/pnpm-workspace.yaml || { echo "SEC-85: onlyBuiltDependencies must be [] in frontend/pnpm-workspace.yaml"; exit 1; }
+	@grep -qE '^minimumReleaseAge: [1-9][0-9]*$$' $(FRONTEND)/pnpm-workspace.yaml || { echo "SEC-85: minimumReleaseAge must be set in frontend/pnpm-workspace.yaml"; exit 1; }
+	@echo "lockcheck: OK"
+
+check: test lockcheck  ## Full gate: tests, lockfiles, lint, types, build, dependency audit
 	cd $(BACKEND) && .venv/bin/ruff check src tests && .venv/bin/ruff format --check src tests && .venv/bin/mypy
 	cd $(FRONTEND) && node --run typecheck && node --run build
 	$(MAKE) audit
@@ -50,6 +62,12 @@ audit:           ## Known-vulnerability scan of locked dependencies
 
 backup:          ## Verified online backup of the database into $(IIP_DATA_DIR)/backups
 	$(PY) -c "import os,pathlib,datetime as d;from iip.store.db import connect,backup;p=pathlib.Path(os.environ['IIP_DATA_DIR']);print(backup(connect(p/'iip.db'),p/'backups'/f'iip-{d.datetime.now(d.UTC):%Y%m%dT%H%M%SZ}.db'))"
+
+backup-encrypted: ## SEC-83: AES-256-GCM backup (scrypt key from IIP_BACKUP_PASSPHRASE, or prompted) into $(IIP_DATA_DIR)/backups
+	$(PY) -m iip.store.encrypted_backup backup --data-dir "$(IIP_DATA_DIR)"
+
+restore-encrypted: ## Decrypt + verify the newest (or BACKUP=…) into a NEW file (or DEST=…); never touches the live DB
+	$(PY) -m iip.store.encrypted_backup restore --data-dir "$(IIP_DATA_DIR)" $(if $(BACKUP),--backup "$(BACKUP)") $(if $(DEST),--dest "$(DEST)")
 
 restore-drill:   ## Prove the newest backup restores (REL-40) into a temp file — never touches the live DB
 	$(PY) -c "import os,pathlib,tempfile;from iip.store.db import restore,connect,integrity_ok;b=sorted((pathlib.Path(os.environ['IIP_DATA_DIR'])/'backups').glob('iip-*'))[-1];t=pathlib.Path(tempfile.mkdtemp())/'r.db';restore(b,t);print('restore OK' if integrity_ok(connect(t)) else 'RESTORE FAILED',b)"

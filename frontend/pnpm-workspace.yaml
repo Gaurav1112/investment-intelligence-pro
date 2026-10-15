@@ -1,0 +1,10 @@
+# Supply-chain policy (threat-model C-17 / SEC-85; reliability-design §9). Settings only — this is a single package.
+#
+# pnpm 10 runs no dependency lifecycle (install/postinstall) scripts unless the package is listed here. The list MUST
+# stay empty: Vite 8 ships rolldown/lightningcss as prebuilt platform binaries (optional dependencies, no build step),
+# and `node --run build` works without any install script. Adding an entry needs a security review.
+onlyBuiltDependencies: []
+
+# Refuse to resolve any version published less than 7 days ago (minutes; pnpm ≥ 10.16). Blunts freshly published
+# malicious releases. Applies when the lockfile is (re)resolved; frozen installs use the already-vetted lockfile.
+minimumReleaseAge: 10080

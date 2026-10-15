@@ -43,6 +43,7 @@ W_UNVERIFIED = "UNVERIFIED_TAX_ASSUMPTION"
 W_REBATE_NOT_APPLIED = "REBATE_NOT_APPLIED"
 W_SURCHARGE_MARGINAL_RELIEF = "SURCHARGE_MARGINAL_RELIEF_NOT_MODELLED"
 W_LOSS_SETOFF = "LOSS_SET_OFF_NOT_MODELLED"
+W_RATES_ASSUMED_UNCHANGED = "RATES_ASSUMED_UNCHANGED"  # priced under the law of an earlier date (rates_as_of)
 
 
 class Act(StrEnum):
@@ -474,15 +475,23 @@ def classify_holding(acquired: date, transferred: date, threshold_months: int) -
     return GainType.LTCG if transferred > add_months(acquired, threshold_months) else GainType.STCG
 
 
-def select_rule(ruleset: TaxRuleSet, d: Disposal) -> TaxRule:
-    """The unique rule for this disposal on its transfer date, or RuleNotFound / AmbiguousRule."""
-    if d.transfer_date > ruleset.coverage_to:
-        raise RuleNotFound(
-            f"lot {d.lot_id}: transfer {d.transfer_date} is beyond the rule-table coverage ({ruleset.coverage_to})"
-        )
+def select_rule(ruleset: TaxRuleSet, d: Disposal, *, rates_as_of: date | None = None) -> TaxRule:
+    """The unique rule for this disposal on its transfer date, or RuleNotFound / AmbiguousRule.
+
+    ``rates_as_of`` (RT-17): select the rule rows in force on that date instead of on the transfer date — i.e. "the
+    law as it stands on ``rates_as_of``, assumed unchanged until the transfer".  Only the *rule-row selection* moves:
+    the holding period is still classified from the ACTUAL acquisition and transfer dates, and acquisition-date
+    conditions (debt-MF 1-Apr-2023 cut, grandfathering) still see the actual acquisition date, so no lot is moved
+    across a boundary.  It must not be after the transfer date (that would apply law the transfer never saw).
+    """
+    on = d.transfer_date if rates_as_of is None else rates_as_of
+    if rates_as_of is not None and rates_as_of > d.transfer_date:
+        raise InvalidInput(f"lot {d.lot_id}: rates_as_of {rates_as_of} is after the transfer {d.transfer_date}")
+    if on > ruleset.coverage_to:
+        raise RuleNotFound(f"lot {d.lot_id}: transfer {on} is beyond the rule-table coverage ({ruleset.coverage_to})")
     hits: list[TaxRule] = []
     for rule in ruleset.rules:
-        if rule.instrument_class != d.instrument_class or not rule.covers(d.transfer_date):
+        if rule.instrument_class != d.instrument_class or not rule.covers(on):
             continue
         if not rule.conditions.matches(rule.rule_id, d):
             continue
@@ -552,8 +561,10 @@ def compute_levy(levy: TransactionLevy, amount_inr: Decimal, on: date, *, inclus
 # --- computation -------------------------------------------------------------------------------
 
 
-def _classify(ruleset: TaxRuleSet, disposals: Sequence[Disposal]) -> tuple[list[ClassifiedDisposal], list[TaxRule]]:
-    rules = [select_rule(ruleset, d) for d in disposals]
+def _classify(
+    ruleset: TaxRuleSet, disposals: Sequence[Disposal], rates_as_of: date | None = None
+) -> tuple[list[ClassifiedDisposal], list[TaxRule]]:
+    rules = [select_rule(ruleset, d, rates_as_of=rates_as_of) for d in disposals]
     exempt = _allocate_exemptions(disposals, rules)
     out: list[ClassifiedDisposal] = []
     with engine_context():
@@ -751,22 +762,39 @@ def _scenario(
     )
 
 
-def compute_tax(disposals: Sequence[Disposal], ruleset: TaxRuleSet, profile: TaxProfile | None) -> TaxReport:
-    """Tax on one financial year's disposals.  ``profile=None`` → labelled illustrative profiles only."""
+def compute_tax(
+    disposals: Sequence[Disposal],
+    ruleset: TaxRuleSet,
+    profile: TaxProfile | None,
+    *,
+    rates_as_of: date | None = None,
+) -> TaxReport:
+    """Tax on one financial year's disposals.  ``profile=None`` → labelled illustrative profiles only.
+
+    ``rates_as_of`` (RT-17): price the disposals under the law in force on that date (rule rows, Act, slab table,
+    surcharge and cess of its financial year), assumed unchanged until the actual transfer dates.  Holding periods and
+    acquisition-date conditions always use the actual dates (see ``select_rule``).  The report carries
+    ``W_RATES_ASSUMED_UNCHANGED`` and ``financial_year`` is the rates' year.  ``None`` (default) = the transfer date's
+    own law, exactly as before.
+    """
     if not disposals:
         raise InvalidInput("no disposals")
     fy_starts = {financial_year_start(d.transfer_date) for d in disposals}
     if len(fy_starts) > 1:
         raise InvalidInput("disposals span more than one financial year; call once per financial year")
     fy_start = fy_starts.pop()
+    if rates_as_of is not None:
+        fy_start = financial_year_start(rates_as_of)
     act = act_on(ruleset.acts, fy_start)
 
-    classified, rules = _classify(ruleset, disposals)
+    classified, rules = _classify(ruleset, disposals, rates_as_of)
     for r in rules:
         if r.act is not act:
             raise RuleNotFound(f"rule {r.rule_id} belongs to {r.act}, but {fy_start} falls under {act}")
 
     warnings: list[str] = []
+    if rates_as_of is not None:
+        warnings.append(W_RATES_ASSUMED_UNCHANGED)
     if any(c.loss is not None for c in classified):
         warnings.append(W_LOSS_SETOFF)
     illustrative = profile is None

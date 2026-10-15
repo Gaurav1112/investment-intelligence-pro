@@ -1,0 +1,79 @@
+# Compliance Guard copy rules — versioned (ADR-0009). Source: docs/security/regulatory-readiness.md §7.
+version: "compliance_phrases@1.0.0"
+source: docs/security/regulatory-readiness.md#7-copy-rules-for-the-compliance-guard-deterministic
+block:
+  guarantees:
+    - '\bguarantee(d|s)?\b'
+    - '\bassured returns?\b'
+    - '\bsure[- ]shot\b'
+    - '\bcertain returns?\b'
+    - '\bfixed returns?\b'
+    - '\bcapital protect(ion|ed)\b'
+    - '\bno[- ]loss\b'
+    - '\bcan(not|''t) lose\b'
+    - '\bzero risk\b'
+  risk_denial:
+    - '\brisk[- ]free\b'
+    - '\bsafe investments?\b'
+    - '\b100% safe\b'
+    - '\btotally safe\b'
+    - '\bno risk\b'
+    - '\bwithout risk\b'
+  endorsement:
+    - '\bbest (fund|stock|scheme|investment|pick)s?\b'
+    - '\btop picks?\b'
+    - '\bmust[- ]buy\b'
+    - '\bmust[- ]have\b'
+    - '\bwinners?\b'
+    - '\bstar (fund|stock)s?\b'
+    - '\bhot (stock|tip|fund)s?\b'
+  directives:
+    - '\byou should (buy|sell|invest|switch|exit|hold)\b'
+    - '\b(buy|sell|switch|exit) now\b'
+    - '\binvest now\b'
+    - '\bbook profits?\b'
+    - '\brecommended (fund|stock|for you)\b'
+    - '\bwe recommend\b'
+    - '\bour recommendation\b'
+    - '\bstrong (buy|sell)\b'
+    - '\baccumulate\b'
+    - '\btarget price\b'
+    - '\bstop[- ]?loss\b'
+  forecast_certainty:
+    - '\bwill (return|give|earn|double|grow)\b'
+    - '\bexpected to (return|double)\b'
+    - '\bwill beat\b'
+    - '\bdouble your money\b'
+    - '\bmultibagger\b'
+    - '\d+(\.\d+)?% returns? (assured|guaranteed)'
+    - '\bprobability of success\b'
+    - '\bon track\b'
+  urgency:
+    - '\bdon''t miss\b'
+    - '\blast chance\b'
+    - '\blimited time\b'
+    - '\bbefore it''s too late\b'
+    - '\bact now\b'
+  status_claims:
+    - '\b(sebi|amfi|rbi)[- ](approved|registered|certified)\b'
+    - '\bgovernment[- ]backed\b'
+  advisory_self_description:
+    - '\binvestment advi(ce|ser|sor)s?\b'
+    - '\bfinancial advi(ce|ser|sor)s?\b'
+    - '\bresearch analysts?\b'
+    - '\bportfolio managers?\b'
+    - '\bwealth managers?\b'
+warn:
+  - '\boutperform(ed|s)?\b'
+  - '\bbeats? the (index|benchmark)\b'
+  - '\btop \d+\b'
+  - '\brank #\d+\b'
+  - '\blow risk\b'
+  - '\b(projected|estimated)\b'
+  - '\btax[- ]free\b'
+required:
+  past_performance: "Past performance may or may not be sustained in future and is not a guarantee of future returns."
+  ranking: "Ordered by the criteria and weights you set."
+  projection: "Hypothetical illustration based on your assumptions; not a forecast."
+  footer: "Personal research tool. Not investment advice. Not registered with SEBI as an Investment Adviser or Research Analyst."
+  ai_disclosure: "AI-generated wording. Every number comes from the deterministic engine or a dated source."

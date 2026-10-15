@@ -46,7 +46,7 @@ addopts = "-q --strict-markers"
 markers = ["oracle: cross-check against an independent library", "network: requires internet (skipped by default)"]
 
 [tool.ruff]
-line-length = 110
+line-length = 120
 target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "S", "PL", "RUF"]

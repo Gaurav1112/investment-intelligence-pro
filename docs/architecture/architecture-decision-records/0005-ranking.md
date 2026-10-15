@@ -1,28 +1,25 @@
 # ADR-0005: Ranking without a composite score
 
 ## Decision
-The pipeline has four steps, versioned as `ranking_policy@1.0.0`:
-1. **Hard eligibility:**
-   - Horizon fit: maturity, lock-in and exit load fit inside the horizon.
-   - Capital-preservation constraint: for the preservation objective, the instrument's certainty tier must be ≤ T2, **or** its historical frequency of loss at this horizon must be within the user's loss budget, with sufficient data.
-   - Liquidity: days-to-cash and exit cost.
-   - Credit floor.
-   - Data sufficiency and freshness.
-   - Exclusions set by the user.
-   Each rejection records its reason code.
-2. **Comparable outcomes:** for the same amount and horizon, compute a rupee outcome band (p5 / p50 / p95 where it is defined, or a contractual amount) **after costs and assumed tax**.
-3. **Certainty tiers:**
-   - T1: contractual, sovereign, held to maturity.
-   - T2: contractual, insured deposit within the DICGC limit.
-   - T3: low-duration market-linked (overnight/liquid/money-market).
-   - T4: other debt market-linked.
-   - T5: equity, hybrid and gold.
-4. **Ordering by objective:**
-   - A (preservation): tier, then p5 outcome descending.
-   - B (income): tier, then outcome dispersion, then median.
-   - C (liquidity): days-to-cash, then exit cost, then p5.
-   - D (growth): p5 subject to the loss budget, then median.
-   - E (aggressive): median subject to the explicit loss budget, with drawdown shown.
+The pipeline has four steps, versioned as `ranking_policy@1.0.0` (revised 2026-10-15 to match risk-methodology.md §9 exactly: four tiers, ε = 1 %, x = 0 %):
+1. **Hard eligibility** (each check is a boolean with a reason code; risk-methodology.md §9 Step 1):
+   - Horizon fit: maturity, lock-in and exit-load window fit inside H, or a modelled early exit is available.
+   - Capital preservation (objectives A, B, C): historical loss frequency at H ≤ ε (default **1 %**) **and** q05 ≥ −x (default
+     **0 %**). A market-dependent candidate whose loss frequency is unknown fails (`MISSING_LOSS_EVIDENCE`). It is never assumed safe.
+   - Liquidity: days-to-cash ≤ the user's need; exit cost ≤ the user's maximum.
+   - Credit floor, minimum ticket size, user exclusions, data sufficiency and freshness.
+   - Objectives D and E require q05 ≥ −L, where L is the user-entered loss budget. Objective E **requires** L (otherwise ABSTAIN).
+2. **Horizon-matched ₹ outcome bands** after costs and assumed tax (contractual = point; market = q05/q50/q95).
+3. **Certainty tiers** (spec §9 Step 3):
+   - T1 contractual sovereign (T-bill, G-sec held to maturity);
+   - T2 contractual non-sovereign (FD within DICGC, AAA bond held to maturity);
+   - T3 market-dependent, bounded (overnight/liquid/money-market funds; bonds with an early exit);
+   - T4 market-dependent, unbounded (duration/credit funds, hybrid, equity, gold).
+4. **Lexicographic ordering by objective:**
+   - A (preservation): tier ↑, then q05 ↓, then days-to-cash ↑, then cost ↑. A higher median never compensates for a worse lower band.
+   - B (income/maturity): tier ↑, then band width (q95 − q05) ↑, then q50 ↓.
+   - C (liquidity): days-to-cash ↑, then exit cost ↑, then q05 ↓.
+   - D/E (growth): certainty-equivalent `CE = q50 − λ(q50 − q05)` ↓ (λ from the user, default 0.5), then tier ↑.
 - Ties are broken by data quality, then by instrument ID (deterministic).
 - An empty eligible set returns **"No suitable candidate found under the current constraints."**
 - Weights and policy are published in the Methodology page and attached to every result.

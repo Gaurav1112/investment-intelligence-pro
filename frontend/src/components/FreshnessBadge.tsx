@@ -15,6 +15,16 @@ const META: Record<Freshness, { glyph: string; word: string; cls: string }> = {
   UNKNOWN: { glyph: "?", word: "FRESHNESS UNKNOWN", cls: "stale" },
 };
 
+/** The badge word for a freshness, e.g. for an accessible name ("STALE", "FRESHNESS UNKNOWN"). */
+export function freshnessWord(freshness: Freshness): string {
+  return META[freshness].word;
+}
+
+/** Freshness values that are NOT a current market or user value: assistive tech must hear the word (WCAG 1.3.1). */
+export const NOT_CURRENT: ReadonlySet<Freshness> = new Set<Freshness>([
+  "STALE", "DELAYED", "FIXTURE", "ILLUSTRATIVE", "UNAVAILABLE", "UNKNOWN",
+]);
+
 /** Glyph + word + date: never colour alone (ux-design §4.4). */
 export function FreshnessBadge({ freshness, date, title }: { freshness: Freshness; date?: string | null; title?: string }) {
   const m = META[freshness];

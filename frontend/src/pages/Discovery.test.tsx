@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import type { DiscoveryResult, DiscoveryRow, Explained } from "../lib/types";
@@ -118,5 +118,36 @@ describe("Discovery", () => {
     expect(screen.getByText("MISSING: withdrawal date")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Review objectives" })).toHaveAttribute("href", "/onboarding");
     expect(screen.getByRole("link", { name: "Data health" })).toHaveAttribute("href", "/data-health");
+  });
+});
+
+describe("Discovery stale responses (R-02)", () => {
+  it("a slower, older response never overwrites the newer one (fixtures toggled on then off)", async () => {
+    const named = (name: string) => result({ contains_fixtures: true, ranked: [row({ instrument_id: "mf:1", rank: 1, outcome: OUTCOME, name })] });
+    const bodies: unknown[] = [];
+    let releaseSlow: (() => void) | null = null;
+    // The mock deliberately ignores the abort signal, so the page's own guard is what is tested.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((_url: string, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body)) as { include_fixtures: boolean };
+        bodies.push(body);
+        if (bodies.length === 2) return new Promise<Response>((resolve) => (releaseSlow = () => resolve(json(named("STALE include=true result")))));
+        return Promise.resolve(json(named(bodies.length === 1 ? "FIRST result" : "NEWEST include=false result")));
+      }),
+    );
+    renderPage();
+    expect((await screen.findAllByText("FIRST result")).length).toBeGreaterThan(0);
+    const box = screen.getByRole("checkbox", { name: /Include fixtures/ });
+    await userEvent.click(box); // request 2: include=true, slow
+    await userEvent.click(box); // request 3: include=false, fast
+    expect((await screen.findAllByText("NEWEST include=false result")).length).toBeGreaterThan(0);
+    await act(async () => {
+      releaseSlow?.();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(bodies).toEqual([{ include_fixtures: false }, { include_fixtures: true }, { include_fixtures: false }]);
+    expect(screen.getAllByText("NEWEST include=false result").length).toBeGreaterThan(0);
+    expect(screen.queryByText("STALE include=true result")).not.toBeInTheDocument();
   });
 });

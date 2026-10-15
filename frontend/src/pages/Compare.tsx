@@ -8,6 +8,7 @@ import { PageFooter, PageHeader } from "../components/PageHeader";
 import { Empty, Loading } from "../components/States";
 import { TierLabel } from "../components/Tier";
 import { useApi } from "../lib/useApi";
+import { useFocusAfter } from "../lib/useFocusAfter";
 import { api, ApiError } from "../lib/api";
 import { compareDecimals, dateLabel, inrCompact } from "../lib/format";
 import type {
@@ -176,6 +177,7 @@ export function InstrumentPicker({
   const [results, setResults] = useState<InstrumentList | null>(null);
   const [pending, setPending] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const focusAfter = useFocusAfter();
 
   async function search() {
     const term = q.trim();
@@ -238,6 +240,9 @@ export function InstrumentPicker({
                   onPick(pickedFrom(it));
                   setResults(null);
                   setQ("");
+                  // The Select button disappears with the results: return focus to the search box (when the picker
+                  // itself is replaced, e.g. SinglePicker, it unmounts and the parent moves focus instead).
+                  focusAfter(`${idPrefix}-q`);
                 }}
                 aria-label={`Select ${it.name}`}
               >
@@ -263,7 +268,17 @@ export function SinglePicker({ idPrefix, selected, onChange }: { idPrefix: strin
   );
   const name = selected?.name || detail.data?.instrument.name || null;
   const fixture = selected?.fixture || detail.data?.instrument.origin === "fixture";
-  if (!selected) return <InstrumentPicker idPrefix={idPrefix} onPick={onChange} />;
+  const focusAfter = useFocusAfter();
+  if (!selected)
+    return (
+      <InstrumentPicker
+        idPrefix={idPrefix}
+        onPick={(p) => {
+          onChange(p);
+          focusAfter(`${idPrefix}-change`); // the picker is replaced by the Selected view
+        }}
+      />
+    );
   return (
     <div className="field">
       <span className="label-like">Instrument</span>
@@ -272,7 +287,15 @@ export function SinglePicker({ idPrefix, selected, onChange }: { idPrefix: strin
           Selected: {name ? <strong>{name}</strong> : null} <span className="mono small">{selected.instrument_id}</span>
         </span>
         {fixture ? <FreshnessBadge freshness="FIXTURE" /> : null}
-        <button type="button" className="btn btn--ghost" onClick={() => onChange(null)}>
+        <button
+          type="button"
+          id={`${idPrefix}-change`}
+          className="btn btn--ghost"
+          onClick={() => {
+            onChange(null);
+            focusAfter(`${idPrefix}-q`); // the button is replaced by the search box
+          }}
+        >
           Change instrument
         </button>
       </div>
@@ -365,6 +388,23 @@ export function BandCell({ band, onExplain, contractual }: { band: Band<Analysis
       <Ex item={band.q95} onExplain={onExplain} />
     </span>
   );
+}
+
+/** CPI-adjusted band, or the engine's refusal in words (the backend refuses all three points together, e.g. CPI_STALE). */
+export function RealReturnCell({
+  band,
+  onExplain,
+  contractual,
+}: {
+  band: Band<AnalysisExplained | Refusal> | undefined;
+  onExplain: OnExplain;
+  contractual?: boolean;
+}) {
+  if (!band) return <span className="subtle">—</span>;
+  const refused = WHICH.map((w) => band[w]).find(isRefusal);
+  if (refused) return <RefusalNote r={refused} />;
+  const { q05, q50, q95 } = band as Band<AnalysisExplained>;
+  return <BandCell band={{ q05, q50, q95 }} contractual={contractual} onExplain={onExplain} />;
 }
 
 // ------------------------------------------------------------------ compare page
@@ -537,6 +577,15 @@ function rowsFor(res: CompareResponse, onExplain: OnExplain): RowDef[] {
         ),
     },
     { key: "exit", label: "Exit cost (ranking measure)", cell: (r) => <Metric value={r.exit_cost} onExplain={onExplain} /> },
+    {
+      key: "real",
+      label: (
+        <>
+          Real return after inflation<div className="small subtle">low – middle – high; adjusted for CPI over the same period</div>
+        </>
+      ),
+      cell: (r) => <RealReturnCell band={r.real_return} contractual={r.contractual} onExplain={onExplain} />,
+    },
     { key: "loss", label: "Loss history", cell: (r) => (r.loss_frequency ? (r.loss_frequency.display) : <span className="subtle">—</span>) },
     {
       key: "flags",
@@ -620,7 +669,8 @@ export default function Compare() {
   const [pending, setPending] = useState(false);
   const { open, drawer } = useExplain();
   const seq = useRef(0);
-  const key = `${ids.join(",")}|${urlAmount}|${urlDate}`;
+  const focusAfter = useFocusAfter();
+  const key =`${ids.join(",")}|${urlAmount}|${urlDate}`;
 
   const setUrl = (nextIds: string[], a: string, d: string) => {
     const p = new URLSearchParams();
@@ -681,13 +731,23 @@ export default function Compare() {
         <h2 className="h-inline">Instruments ({ids.length} of {MAX})</h2>
         {ids.length ? (
           <ul className="plain-list" aria-label="Instruments to compare">
-            {ids.map((id) => (
+            {ids.map((id, i) => (
               <li key={id} className="row-tight">
                 <span className="inst-name" title={label(id)}>
                   {label(id)}
                 </span>
                 <span className="small subtle mono">{id}</span>
-                <button type="button" className="btn btn--ghost" onClick={() => setUrl(ids.filter((x) => x !== id), urlAmount, urlDate)} aria-label={`Remove ${label(id)}`}>
+                <button
+                  type="button"
+                  id={`cmp-remove-${i}`}
+                  className="btn btn--ghost"
+                  onClick={() => {
+                    setUrl(ids.filter((x) => x !== id), urlAmount, urlDate);
+                    // Focus the Remove button that takes this row's place, else the previous one, else the search box.
+                    focusAfter(`cmp-remove-${i}`, `cmp-remove-${i - 1}`, "cmp-q");
+                  }}
+                  aria-label={`Remove ${label(id)}`}
+                >
                   Remove
                 </button>
               </li>

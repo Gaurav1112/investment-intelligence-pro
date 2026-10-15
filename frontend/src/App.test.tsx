@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
-import { Shell } from "./App";
+import { pageTitle, Shell } from "./App";
 import { ProfileProvider } from "./lib/profile";
 
 const json = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { "Content-Type": "application/json" } });
@@ -30,6 +30,38 @@ function renderShell() {
     </MemoryRouter>,
   );
 }
+
+describe("page titles and route focus (A11Y-3)", () => {
+  it("pageTitle names every nav page and the link-only pages", () => {
+    expect(pageTitle("/")).toBe("Overview");
+    expect(pageTitle("/discover")).toBe("Discovery");
+    expect(pageTitle("/data-health")).toBe("Data health");
+    expect(pageTitle("/settings")).toBe("Settings");
+    expect(pageTitle("/i/mf:900001")).toBe("Instrument detail");
+    expect(pageTitle("/evidence/42")).toBe("Evidence");
+  });
+
+  it("sets document.title per route and moves focus to the main landmark on navigation (not on first load)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => json({ code: "NOT_FOUND" }, 404)),
+    );
+    render(
+      <MemoryRouter initialEntries={["/discover"]}>
+        <ProfileProvider>
+          <Shell>
+            <p>page</p>
+          </Shell>
+        </ProfileProvider>
+      </MemoryRouter>,
+    );
+    expect(document.title).toBe("Discovery · Investment Intelligence Pro");
+    expect(screen.getByRole("main")).not.toHaveFocus();
+    await userEvent.click(screen.getByRole("link", { name: "Risk" }));
+    expect(document.title).toBe("Risk · Investment Intelligence Pro");
+    expect(screen.getByRole("main")).toHaveFocus();
+  });
+});
 
 describe("App shell", () => {
   it("has a skip link to the main landmark and labelled landmarks", () => {

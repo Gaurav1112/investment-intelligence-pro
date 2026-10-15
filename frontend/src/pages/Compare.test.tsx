@@ -2,7 +2,8 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { COMPARE, COMPARE_INELIGIBLE, COMPARE_LONG, ERR_COMPARE_404, INSTRUMENTS } from "../test/analysisFixtures";
-import Compare, { analysisError, parseIds } from "./Compare";
+import { useState } from "react";
+import Compare, { analysisError, parseIds, SinglePicker, type Picked } from "./Compare";
 import { ApiError } from "../lib/api";
 
 type Call = { url: string; method: string; body: unknown };
@@ -178,5 +179,89 @@ describe("Compare — eligibility row", () => {
     expect(within(row).getByText("Evaluated")).toBeInTheDocument();
     expect(within(row).getByText(/Does not fit your withdrawal date/)).toBeInTheDocument();
     expect(within(row).getByText("HORIZON_MISMATCH: matures after your withdrawal date")).toHaveClass("code-suffix");
+  });
+});
+
+describe("real return after inflation (TS-1)", () => {
+  const base = COMPARE.rows.find((r) => r.evaluable && r.net_proceeds)!;
+  const ex = base.net_proceeds!.q50;
+  const real = (which: string, display: string) => ({ ...ex, id: `${base.instrument_id}.real_return.${which}`, label: `Real return (${which})`, display });
+  const refused = (which: string) => ({
+    id: `${base.instrument_id}.real_return.${which}`,
+    label: `Real return (${which})`,
+    status: "refused" as const,
+    code: "CPI_STALE",
+    reason: "the latest CPI print you entered is too old; enter the current one",
+    value: null,
+  });
+  const withReal = (rr: unknown) => ({
+    ...COMPARE,
+    rows: COMPARE.rows.map((r) => (r.instrument_id === base.instrument_id ? { ...r, contractual: false, real_return: rr } : r)),
+  });
+
+  it("renders the engine's CPI-adjusted band as explainable numbers", async () => {
+    stubFetch(() => json(withReal({ q05: real("q05", "-1.25%"), q50: real("q50", "0.40%"), q95: real("q95", "2.10%") })));
+    renderAt(`/compare?ids=${encodeURIComponent(IDS)}`);
+    expect(await screen.findByText("Real return after inflation")).toBeInTheDocument();
+    for (const [w, d] of [["q05", "-1.25%"], ["q50", "0.40%"], ["q95", "2.10%"]] as const)
+      // (the fixture row's values are FIXTURE, so the accessible name also carries that word — A11Y-5)
+      expect(screen.getByRole("button", { name: new RegExp(`^Real return \\(${w}\\): ${d.replace(".", "\\.")}[ .]`) })).toBeInTheDocument();
+  });
+
+  it("shows the refusal in words, never a number", async () => {
+    stubFetch(() => json(withReal({ q05: refused("q05"), q50: refused("q50"), q95: refused("q95") })));
+    renderAt(`/compare?ids=${encodeURIComponent(IDS)}`);
+    await screen.findByText("Real return after inflation");
+    expect(screen.getByText(/Not shown: the latest CPI print you entered is too old/)).toBeInTheDocument();
+    expect(screen.getByText("(CPI_STALE)")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Real return/ })).not.toBeInTheDocument();
+  });
+});
+
+describe("focus management (A11Y-2)", () => {
+  it("Remove moves focus to the Remove button that takes its place, then the previous one, then the search box", async () => {
+    stubFetch(() => json(COMPARE));
+    renderAt(`/compare?ids=${encodeURIComponent(IDS)}`);
+    await screen.findByText("Net proceeds on one axis");
+    const list = screen.getByRole("list", { name: "Instruments to compare" });
+    const removes = () => within(screen.getByRole("list", { name: "Instruments to compare" })).getAllByRole("button", { name: /^Remove / });
+    expect(within(list).getAllByRole("button", { name: /^Remove / })).toHaveLength(3);
+    await userEvent.click(removes()[0]!);
+    await waitFor(() => expect(removes()).toHaveLength(2));
+    await waitFor(() => expect(removes()[0]).toHaveFocus());
+    await userEvent.click(removes()[1]!);
+    await waitFor(() => expect(removes()).toHaveLength(1));
+    await waitFor(() => expect(removes()[0]).toHaveFocus());
+    await userEvent.click(removes()[0]!);
+    await waitFor(() => expect(screen.getByLabelText("Add an instrument")).toHaveFocus());
+  });
+
+  it("Select returns focus to the search box instead of the page body", async () => {
+    stubFetch((url) => (url.startsWith("/api/instruments") ? json(INSTRUMENTS) : json(COMPARE)));
+    renderAt("/compare?ids=mf:900001");
+    await userEvent.type(screen.getByLabelText("Add an instrument"), "FIXTURE");
+    await userEvent.click(screen.getByRole("button", { name: "Search" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Select FIXTURE 182-day T-bill" }));
+    await waitFor(() => expect(screen.getByLabelText("Add an instrument")).toHaveFocus());
+  });
+
+  it("SinglePicker: Select focuses 'Change instrument'; 'Change instrument' focuses the search box", async () => {
+    stubFetch(() => json(INSTRUMENTS));
+    function Host() {
+      const [sel, setSel] = useState<Picked | null>(null);
+      return <SinglePicker idPrefix="t" selected={sel} onChange={setSel} />;
+    }
+    render(
+      <MemoryRouter>
+        <Host />
+      </MemoryRouter>,
+    );
+    await userEvent.type(screen.getByLabelText("Find instrument by name"), "FIXTURE");
+    await userEvent.click(screen.getByRole("button", { name: "Search" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Select FIXTURE 182-day T-bill" }));
+    const change = await screen.findByRole("button", { name: "Change instrument" });
+    await waitFor(() => expect(change).toHaveFocus());
+    await userEvent.click(change);
+    await waitFor(() => expect(screen.getByLabelText("Find instrument by name")).toHaveFocus());
   });
 });

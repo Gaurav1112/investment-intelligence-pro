@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { Explained } from "../lib/types";
 import { utcStamp, dateLabel } from "../lib/format";
-import { FreshnessBadge } from "./FreshnessBadge";
+import { FreshnessBadge, NOT_CURRENT, freshnessWord } from "./FreshnessBadge";
 
 /** "Explain this number" — native <dialog> (ADR-0006 amendment). Sections in the order mandated by ux-design §5.1. */
 export function ExplainDrawer({ item, onClose }: { item: Explained | null; onClose: () => void }) {
@@ -106,7 +106,9 @@ export function ExplainedNumber({ item, onExplain }: { item: Explained; onExplai
       onKeyDown={(e) => {
         if (e.key === "e" || e.key === "E") onExplain(item);
       }}
-      aria-label={`${item.label}: ${item.display}. Press to explain.`}
+      aria-label={`${item.label}: ${item.display}${
+        NOT_CURRENT.has(item.freshness) ? ` (${freshnessWord(item.freshness)})` : ""
+      }. Press to explain.`}
     >
       {item.display}
       <span className="explainable__i" aria-hidden="true">

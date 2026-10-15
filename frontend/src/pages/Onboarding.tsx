@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ApiError } from "../lib/api";
 import { OBJECTIVES, useProfile } from "../lib/profile";
@@ -23,6 +23,14 @@ const EMPTY: Profile = {
 
 const STEPS = ["Amount", "Withdrawal date", "Objective", "Loss & early need", "Liquidity & extras", "Review"] as const;
 const DECIMAL = /^\d+(\.\d+)?$/;
+const PCT_HELP = "enter a number only, for example 10 or 12.5 (no % sign, no comma).";
+
+interface FieldError {
+  /** id of the input; its visible message has the id `${field}-error`. */
+  field: string;
+  step: number;
+  message: string;
+}
 
 export default function Onboarding() {
   const { status, reload } = useProfile();
@@ -33,8 +41,14 @@ export default function Onboarding() {
   const [slabPct, setSlabPct] = useState("");
   const [aspPct, setAspPct] = useState("");
   const [result, setResult] = useState<ProfileStatus | null>(null);
+  const [summaryKey, setSummaryKey] = useState(0);
+  const [focusField, setFocusField] = useState<string | null>(null);
+  const summaryRef = useRef<HTMLDivElement>(null);
   const save = useMutation<Profile, ProfileStatus>("PUT", "/api/profile");
 
+  useEffect(() => {
+    document.title = "Your objectives · Investment Intelligence Pro"; // outside the Shell, so it sets its own (2.4.2)
+  }, []);
   useEffect(() => {
     if (status) {
       setP(status.profile);
@@ -49,16 +63,51 @@ export default function Onboarding() {
   const lossFr = pctToFraction(lossPct);
   const slabFr = pctToFraction(slabPct);
   const aspFr = pctToFraction(aspPct);
-  const invalid = !amountValid || lossFr === "invalid" || slabFr === "invalid" || aspFr === "invalid";
+  // Save stays enabled; problems are listed on submit (WCAG 3.3.1/3.3.3). The loss limit only counts while its input is
+  // shown ("Yes, up to a limit"): a leftover invalid value behind "No" used to block Save with nothing visible.
+  const errors: FieldError[] = [
+    ...(!amountValid ? [{ field: "amount", step: 0, message: "Investable amount: digits only, for example 500000." }] : []),
+    ...(p.loss_acceptable === true && lossFr === "invalid"
+      ? [{ field: "loss", step: 3, message: `Largest loss you would accept: ${PCT_HELP}` }]
+      : []),
+    ...(slabFr === "invalid" ? [{ field: "slab", step: 4, message: `Income-tax slab: ${PCT_HELP}` }] : []),
+    ...(aspFr === "invalid" ? [{ field: "asp", step: 4, message: `Return you are hoping for: ${PCT_HELP}` }] : []),
+  ];
+  const errorFor = (field: string) => errors.find((x) => x.field === field);
+  const showSummary = summaryKey > 0 && errors.length > 0;
+
+  useEffect(() => {
+    if (summaryKey > 0) summaryRef.current?.focus();
+  }, [summaryKey]);
+  useEffect(() => {
+    if (focusField === null) return;
+    document.getElementById(focusField)?.focus();
+    setFocusField(null);
+  }, [focusField, step]);
+
+  const describedBy = (field: string, hint: string) => (errorFor(field) ? `${hint} ${field}-error` : hint);
+  const fieldError = (field: string) => {
+    const err = errorFor(field);
+    return err ? (
+      <div id={`${field}-error`} className="hint field-error">
+        {err.message}
+      </div>
+    ) : null;
+  };
 
   async function submit(e: FormEvent) {
     e.preventDefault();
-    if (invalid) return;
+    if (errors.length) {
+      setSummaryKey((k) => k + 1); // re-focus (and re-announce) the summary on every failed attempt
+      return;
+    }
+    setSummaryKey(0);
+    const loss = lossFr === "invalid" ? null : lossFr;
     const body: Profile = {
       ...p,
-      max_loss_fraction: p.loss_acceptable ? lossFr : p.loss_acceptable === false ? null : lossFr,
-      slab_rate: slabFr,
-      return_aspiration: aspFr,
+      max_loss_fraction: p.loss_acceptable === false ? null : loss,
+      slab_rate: slabFr === "invalid" ? null : slabFr,
+      return_aspiration: aspFr === "invalid" ? null : aspFr,
     };
     const out = await save.run(body);
     if (out) {
@@ -90,6 +139,36 @@ export default function Onboarding() {
         ))}
       </ol>
       <form onSubmit={submit} className="card" noValidate>
+        {showSummary ? (
+          <div
+            key={summaryKey}
+            className="callout callout--stale"
+            role="alert"
+            tabIndex={-1}
+            ref={summaryRef}
+            aria-labelledby="onb-errors-title"
+          >
+            <p id="onb-errors-title">
+              <strong>Not saved yet. Please correct {errors.length === 1 ? "this value" : "these values"}:</strong>
+            </p>
+            <ul>
+              {errors.map((x) => (
+                <li key={x.field}>
+                  <a
+                    href={`#${x.field}`}
+                    onClick={(ev) => {
+                      ev.preventDefault();
+                      setStep(x.step);
+                      setFocusField(x.field);
+                    }}
+                  >
+                    {x.message} (step {x.step + 1}, {STEPS[x.step]})
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
         {step === 0 && (
           <div className="field">
             <label htmlFor="amount">Investable amount (₹)</label>
@@ -99,12 +178,13 @@ export default function Onboarding() {
               value={p.amount ?? ""}
               onChange={(e) => set("amount", e.target.value.replace(/[,\s₹]/g, "") || null)}
               aria-invalid={!amountValid}
-              aria-describedby="amount-hint"
+              aria-describedby={describedBy("amount", "amount-hint")}
             />
             </span>
             <div id="amount-hint" className="hint">
               {p.amount && amountValid ? inr(p.amount) : "Digits only, e.g. 500000"}
             </div>
+            {fieldError("amount")}
           </div>
         )}
         {step === 1 && (
@@ -144,9 +224,19 @@ export default function Onboarding() {
               <div className="field">
                 <label htmlFor="loss">Largest loss you would accept (% of the amount)</label>
                 <span className="pct">
-                <input id="loss" inputMode="decimal" value={lossPct} onChange={(e) => setLossPct(e.target.value)} aria-invalid={lossFr === "invalid"} />
+                <input
+                  id="loss"
+                  inputMode="decimal"
+                  value={lossPct}
+                  onChange={(e) => setLossPct(e.target.value)}
+                  aria-invalid={Boolean(errorFor("loss"))}
+                  aria-describedby={describedBy("loss", "loss-hint")}
+                />
                 </span>
-                <div className="hint">{growth ? "Required for growth objectives." : "Used as your loss budget."}</div>
+                <div id="loss-hint" className="hint">
+                  {growth ? "Required for growth objectives." : "Used as your loss budget."} A number only, for example 10.
+                </div>
+                {fieldError("loss")}
               </div>
             ) : null}
             <fieldset className="field">
@@ -183,9 +273,17 @@ export default function Onboarding() {
             <div className="field">
               <label htmlFor="slab">Your marginal income-tax slab (%, new regime) — optional</label>
               <span className="pct">
-              <input id="slab" inputMode="decimal" value={slabPct} onChange={(e) => setSlabPct(e.target.value)} />
+              <input
+                id="slab"
+                inputMode="decimal"
+                value={slabPct}
+                onChange={(e) => setSlabPct(e.target.value)}
+                aria-invalid={Boolean(errorFor("slab"))}
+                aria-describedby={describedBy("slab", "slab-hint")}
+              />
               </span>
-              <div className="hint">If empty, after-tax figures use a labelled illustrative 30 % slab, not yours.</div>
+              <div id="slab-hint" className="hint">If empty, after-tax figures use a labelled illustrative 30 % slab, not yours.</div>
+              {fieldError("slab")}
             </div>
             <div className="field">
               <label htmlFor="surcharge">Surcharge band (only if your total income exceeds ₹50 lakh) — optional</label>
@@ -204,12 +302,20 @@ export default function Onboarding() {
             <div className="field">
               <label htmlFor="asp">Return you are hoping for (% a year) — optional</label>
               <span className="pct">
-              <input id="asp" inputMode="decimal" value={aspPct} onChange={(e) => setAspPct(e.target.value)} />
+              <input
+                id="asp"
+                inputMode="decimal"
+                value={aspPct}
+                onChange={(e) => setAspPct(e.target.value)}
+                aria-invalid={Boolean(errorFor("asp"))}
+                aria-describedby={describedBy("asp", "asp-hint")}
+              />
               </span>
-              <div className="hint">
+              <div id="asp-hint" className="hint">
                 Recorded as an aspiration only. It is never used to rank options; see Return-target feasibility for how often
                 it happened historically.
               </div>
+              {fieldError("asp")}
             </div>
           </>
         )}
@@ -227,6 +333,10 @@ export default function Onboarding() {
               <dd>{p.loss_acceptable === null ? "not given" : p.loss_acceptable ? `yes, up to ${lossPct || "?"} %` : "no"}</dd>
               <dt>Early need</dt>
               <dd>{p.early_need ?? "not given"}</dd>
+              <dt>Income-tax slab</dt>
+              <dd>{slabPct ? `${slabPct} %` : "not given"}</dd>
+              <dt>Return you are hoping for</dt>
+              <dd>{aspPct ? `${aspPct} % a year` : "not given"}</dd>
             </dl>
           </div>
         )}
@@ -263,7 +373,7 @@ export default function Onboarding() {
               Next
             </button>
           ) : null}
-          <button type="submit" className="btn btn--primary" disabled={save.pending || invalid}>
+          <button type="submit" className="btn btn--primary" disabled={save.pending}>
             {save.pending ? "Saving…" : "Save"}
           </button>
         </div>

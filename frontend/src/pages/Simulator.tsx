@@ -5,6 +5,7 @@ import { FreshnessBadge } from "../components/FreshnessBadge";
 import { Loading } from "../components/States";
 import { TierLabel } from "../components/Tier";
 import { api } from "../lib/api";
+import { useFocusAfter } from "../lib/useFocusAfter";
 import { compareDecimals, dateLabel, inr, percentToFraction, shiftPoint, sumDecimals } from "../lib/format";
 import type { SimMaturity, SimulateIn, SimulateResponse } from "../lib/types";
 import {
@@ -76,9 +77,10 @@ export default function Simulator() {
   const [rows, setRows] = useState<AllocRow[]>(() =>
     initialId ? [{ pick: { instrument_id: initialId, name: null, fixture: null }, weightPct: "100" }] : [],
   );
+  const focusAfter = useFocusAfter();
   const [amount, setAmount] = useState("");
   const [date, setDate] = useState("");
-  const [problems, setProblems] = useState<Record<string, string>>({});
+  const [problems,setProblems] = useState<Record<string, string>>({});
   const [result, setResult] = useState<SimulateResponse | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [pending, setPending] = useState(false);
@@ -158,8 +160,13 @@ export default function Simulator() {
                     <td>
                       <button
                         type="button"
+                        id={`sim-remove-${i}`}
                         className="btn btn--ghost"
-                        onClick={() => setRows((rs) => rs.filter((_, j) => j !== i))}
+                        onClick={() => {
+                          setRows((rs) => rs.filter((_, j) => j !== i));
+                          // Focus the row that takes this one's place, else the previous row, else the search box (2.4.3).
+                          focusAfter(`sim-remove-${i}`, `sim-remove-${i - 1}`, "sim-q");
+                        }}
                         aria-label={`Remove ${r.pick.name ?? r.pick.instrument_id}`}
                       >
                         Remove

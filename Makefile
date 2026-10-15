@@ -8,7 +8,7 @@ IIP_DATA_DIR ?= $(HOME)/.iip
 IIP_PORT ?= 8741
 export IIP_DATA_DIR IIP_PORT
 
-.PHONY: help setup build run dev open token-rotate test test-browser check lockcheck audit backup backup-encrypted requirements deploy-check \
+.PHONY: help setup build run dev open open-hosted token-rotate test test-browser check lockcheck audit backup backup-encrypted requirements deploy-check \
 	restore-encrypted restore-drill clean
 
 help:            ## Show targets
@@ -32,6 +32,10 @@ dev:             ## Backend in dev mode (fixtures allowed) + Vite dev server on 
 open:            ## Open the app in your browser with the one-time login link (token stays in the URL fragment)
 	@test -f "$(IIP_DATA_DIR)/secrets/access-token" || { echo "Start the app once (make run) to create the token."; exit 1; }
 	@open "http://127.0.0.1:$(IIP_PORT)/#login=$$(cat "$(IIP_DATA_DIR)/secrets/access-token")"
+
+open-hosted:     ## Open the hosted (Vercel) app with the login link; token from ~/.iip-hosted-access-token (fragment only)
+	@test -f "$(HOME)/.iip-hosted-access-token" || { echo "No hosted token at ~/.iip-hosted-access-token (see deployment.md, Hosted on Vercel)."; exit 1; }
+	@open "$${IIP_PUBLIC_ORIGIN:-https://investment-intelligence-pro.vercel.app}/#login=$$(cat "$(HOME)/.iip-hosted-access-token")"
 
 token-rotate:    ## Replace the access token (all sessions end at next restart)
 	rm -f "$(IIP_DATA_DIR)/secrets/access-token" && echo "Token removed; a new one is created at next start."

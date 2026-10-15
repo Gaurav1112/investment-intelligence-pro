@@ -9,7 +9,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from iip.api import routes_llm
 from iip.data.registry import REGISTRY, SourceMode
@@ -91,6 +91,62 @@ class DiscoverIn(BaseModel):
 class BackfillIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     years: int = Field(default=10, ge=1, le=20)
+
+
+class BatchBackfillIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    amfi_codes: list[int] = Field(min_length=1, max_length=ingestion.BATCH_MAX_SCHEMES)
+    years: int = Field(default=10, ge=1, le=20)
+
+    @field_validator("amfi_codes")
+    @classmethod
+    def _unique_positive(cls, v: list[int]) -> list[int]:
+        if len(set(v)) != len(v):
+            raise ValueError("amfi_codes must be unique")
+        if any(c <= 0 for c in v):
+            raise ValueError("amfi_codes must be positive AMFI scheme codes")
+        return v
+
+
+_BACKFILL_BUSY = {"code": "BACKFILL_IN_PROGRESS", "retry_after_s": 60}
+
+
+def _backfill_busy() -> JSONResponse:
+    return JSONResponse(_BACKFILL_BUSY, status_code=429, headers={"Retry-After": "60"})
+
+
+def _backfill_batch(st: Any, body: BatchBackfillIn, amcs: dict[int, str]) -> Any:
+    """Selected schemes, one pass per fund house (the caller holds the backfill lock). A job already in progress is
+    continued when the same schemes are asked for again (hosted steps); a different selection waits for it."""
+    job = coordination.load_job(st.conn, ingestion.BATCH_JOB)
+    if job is not None:
+        if sorted(c for g in job["groups"] for c in g["codes"]) != sorted(c for c in body.amfi_codes if c in amcs):
+            return _backfill_busy()
+    else:
+        if ingestion.backfill_in_progress(st.conn):  # a hosted single-scheme job is unfinished
+            return _backfill_busy()
+        # The per-scheme 15-minute limit (C-16) applies to every scheme: recent ones are skipped and reported.
+        groups: dict[str, list[int]] = {}
+        skipped: list[dict[str, int]] = []
+        for code in sorted(body.amfi_codes):
+            if (wait := st.claim_refresh(f"amfi.navhistory:{code}")) is not None:
+                skipped.append({"amfi_code": code, "retry_after_s": wait})
+            else:
+                groups.setdefault(amcs[code], []).append(code)
+        if not groups:
+            return ingestion.skipped_only_result(skipped)
+        today = st.clock().date()
+        ingestion.sync_sources(st.conn)  # the run row references the source registry (as the NAVAll route does)
+        ingestion.start_batch_backfill(
+            st.conn, groups=groups, skipped=skipped, start=date(today.year - body.years, today.month, 1), end=today,
+            now=st.clock,
+        )  # fmt: skip
+    if st.hosted:
+        deadline = st.monotonic() + st.job_budget_s
+        return ingestion.backfill_batch_step(
+            st.conn, st.fetcher(), now=st.clock, pause=st.pause, stop=lambda: st.monotonic() >= deadline
+        )
+    return ingestion.run_batch_backfill_locally(st.conn, st.fetcher(), now=st.clock, pause=st.pause)
 
 
 def _state(request: Request) -> Any:
@@ -222,9 +278,10 @@ def router() -> APIRouter:  # noqa: PLR0915 - route table
         # requests and uses the process-wide circuit breaker. Limit (user decision 2026-10-15): once per SCHEME per
         # 15 min, and only one backfill at a time, so several schemes can be filled back to back at the paced rate.
         if not st.backfill_lock.acquire(blocking=False):
-            return JSONResponse({"code": "BACKFILL_IN_PROGRESS", "retry_after_s": 60}, status_code=429,
-                                headers={"Retry-After": "60"})  # fmt: skip
+            return _backfill_busy()
         try:
+            if coordination.load_job(st.conn, ingestion.BATCH_JOB) is not None:  # a batch is part-way through
+                return _backfill_busy()
             if st.hosted:
                 return _backfill_hosted(st, amfi_code, str(row["amc"]), body.years)
             if (wait := st.claim_refresh(f"amfi.navhistory:{amfi_code}")) is not None:
@@ -239,6 +296,28 @@ def router() -> APIRouter:  # noqa: PLR0915 - route table
                 start=date(today.year - body.years, today.month, 1), end=today, now=st.clock, pause=st.pause,
             )  # fmt: skip
             return summary.__dict__
+        finally:
+            st.backfill_lock.release()
+
+    @r.post("/ingestion/backfill-batch")
+    def backfill_batch(body: BatchBackfillIn, request: Request) -> Any:
+        """NAV history for up to 100 selected schemes, grouped by fund house (AMFI returns a whole fund house per
+        request; only the selected schemes' rows are stored). Same lock, pacing and breaker as a single backfill."""
+        st = _state(request)
+        rows = st.conn.execute(
+            "SELECT i.amfi_code, m.amc FROM instruments i JOIN mf_schemes m USING(instrument_id)"
+            " WHERE i.origin != 'fixture' AND i.amfi_code IN (SELECT value FROM json_each(?))",
+            (json.dumps([str(c) for c in body.amfi_codes]),),
+        ).fetchall()
+        amcs = {int(r["amfi_code"]): str(r["amc"]) for r in rows}
+        unknown = [c for c in body.amfi_codes if c not in amcs]
+        if unknown:
+            raise HTTPException(404, {"code": "UNKNOWN_SCHEMES", "unknown": unknown,
+                                      "message": "not stored schemes; run the AMFI NAV ingestion first"})  # fmt: skip
+        if not st.backfill_lock.acquire(blocking=False):
+            return _backfill_busy()
+        try:
+            return _backfill_batch(st, body, amcs)
         finally:
             st.backfill_lock.release()
 

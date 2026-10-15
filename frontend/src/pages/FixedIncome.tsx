@@ -75,6 +75,12 @@ export function errorText(e: unknown): string {
     if (e.code === "RATE_LIMITED") return `This was fetched recently; to be polite to the source, try again ${later}.`;
     const d = (e.detail as { detail?: unknown } | undefined)?.detail;
     if (typeof d === "string") return `${d} (HTTP ${e.status})`;
+    // Structured refusals, e.g. the batch backfill's {code: "UNKNOWN_SCHEMES", unknown: [...], message}.
+    const o = d as { message?: unknown; unknown?: unknown } | undefined;
+    if (o && typeof o.message === "string") {
+      const list = Array.isArray(o.unknown) && o.unknown.length ? ` (${o.unknown.join(", ")})` : "";
+      return `${o.message}${list} (HTTP ${e.status})`;
+    }
     return `The request failed (HTTP ${e.status}, ${e.code}).`;
   }
   return "The request failed (network error).";

@@ -34,8 +34,12 @@ make open           # in a second terminal: opens the browser with the one-time 
 
 1. **Mutual funds → Fetch latest AMFI NAVs.** Downloads AMFI's `NAVAll.txt` once and keeps only Direct-plan Growth schemes plus
    anything you hold or watch (data minimisation, per AMFI's terms of use).
-2. **Mutual funds → Backfill history** for each scheme you want evaluated. This makes polite, rate-limited 90-day requests and keeps
-   only that scheme's rows. Discovery needs enough history for at least 10 independent windows at your horizon. For example, a 6-month
+2. **Mutual funds → tick the schemes you want evaluated → Backfill history for N selected** (up to 100 at a time; the
+   per-row **Backfill history** button still does one scheme). AMFI's history report covers a whole fund house per request,
+   so the selection is grouped by fund house and AMFI is asked once per fund house and 90-day window, paced 1 s apart; only
+   the ticked schemes' rows are stored. Example: 40 schemes from 3 fund houses over 10 years is about 3 × 41 = 123 history
+   requests (plus a one-time fund-house id probe of up to 120 requests if the ids are not yet known), instead of
+   40 × 41 = 1,640 one scheme at a time. Schemes backfilled in the last 15 minutes are skipped and listed. Discovery needs enough history for at least 10 independent windows at your horizon. For example, a 6-month
    horizon needs about 5 years of history; with less, the scheme is excluded and the reason is shown.
 3. **Mutual funds → Enter exit load** for non-liquid funds, from the scheme's SID/KIM, with a citation. No public source publishes exit loads, so
    until you enter one, the fund is excluded (`EXIT_LOAD_UNKNOWN`) rather than assumed load-free.

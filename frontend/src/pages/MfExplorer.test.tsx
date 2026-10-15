@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import type { InstrumentList, RunSummary } from "../lib/types";
-import MfExplorer, { MAX_JOB_STEPS, runUntilDone, stepText, type JobStep } from "./MfExplorer";
+import MfExplorer, { batchResultLines, batchStepText, MAX_JOB_STEPS, runUntilDone, stepText, type JobStep } from "./MfExplorer";
 
 type Call = { url: string; method: string; body: unknown };
 const json = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { "Content-Type": "application/json" } });
@@ -257,5 +257,76 @@ describe("MfExplorer deep link (walkthrough 2026-10-15)", () => {
     expect(await screen.findByRole("heading", { name: `Exit load for ${first.name}` })).toBeInTheDocument();
     expect(calls.some((u) => u.includes("q=Example"))).toBe(true);
     vi.unstubAllGlobals();
+  });
+});
+
+describe("MfExplorer batch backfill (walkthrough 2026-10-15)", () => {
+  it("selects only real schemes, sends their codes once, and reports per fund house after hosted steps", async () => {
+    let posts = 0;
+    const calls = stubFetch((_url, method) => {
+      if (method !== "POST") return json(LIST);
+      posts += 1;
+      if (posts === 1)
+        return json({ done: false, phase: "fetching", amcs_done: 0, amcs_total: 2, windows_done: 1, windows_total: 6, stored: 2 });
+      return json({
+        done: true, phase: "complete", amcs_done: 2, amcs_total: 2, windows_done: 6, windows_total: 6, stored: 4,
+        run_id: "run_b", source_id: "amfi.navhistory", status: "ok", rows_ok: 40, rows_rejected: 0,
+        detail: "1 scheme(s) across 2 fund house(s), one pass per fund house",
+        fund_houses: [{ amc: "Example Mutual Fund", status: "done", error: null, schemes: [{ amfi_code: 900551, stored: 4 }] }],
+        skipped: [{ amfi_code: 120000, retry_after_s: 301 }],
+      });
+    });
+    renderPage();
+    await screen.findByRole("table");
+    expect(screen.queryByRole("checkbox", { name: /Select FIXTURE/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Backfill history for 0 selected" })).toBeDisabled();
+
+    await userEvent.click(screen.getByRole("button", { name: "Select all shown" }));
+    expect(screen.getByRole("checkbox", { name: /Select Example Liquid/ })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: /Select Sample Flexi/ })).toBeChecked();
+    await userEvent.click(screen.getByRole("button", { name: "Backfill history for 2 selected" }));
+
+    await screen.findByText(/Example Mutual Fund: Example Liquid Fund — Direct Plan · Growth \(AMFI 900551\): 4 NAVs stored\./);
+    const batch = calls.filter((c) => c.url === "/api/ingestion/backfill-batch");
+    expect(batch).toHaveLength(2); // one unfinished hosted step, then the final answer
+    expect(batch[0]?.body).toEqual({ amfi_codes: [900551, 120000], years: 10 });
+    expect(batch[1]?.body).toEqual(batch[0]?.body); // the same selection continues the job
+    expect(screen.getByText(/Skipped, because they were backfilled in the last 15 minutes: Sample Flexi Cap Fund/)).toHaveTextContent(
+      "Try them again in about 6 minutes.",
+    );
+    expect(screen.getByText(/History backfill for the selected schemes: status OK/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Backfill history for 0 selected" })).toBeDisabled(); // selection cleared
+  });
+
+  it("refuses an invalid number of years before sending anything", async () => {
+    const calls = stubFetch(() => json(LIST));
+    renderPage();
+    await screen.findByRole("table");
+    await userEvent.click(screen.getByRole("checkbox", { name: /Select Example Liquid/ }));
+    const years = screen.getByLabelText("Years of history");
+    await userEvent.clear(years);
+    await userEvent.type(years, "25");
+    expect(screen.getByRole("button", { name: "Backfill history for 1 selected" })).toBeDisabled();
+    expect(years).toHaveAccessibleDescription("Years of history: a whole number from 1 to 20.");
+    expect(calls.filter((c) => c.method === "POST")).toHaveLength(0);
+  });
+
+  it("describes batch progress only with the server's counts", () => {
+    expect(batchStepText({ done: false, phase: "discovering", amc: "Example Mutual Fund" })).toBe(
+      "finding AMFI's fund-house id for Example Mutual Fund…",
+    );
+    expect(
+      batchStepText({ done: false, phase: "fetching", amcs_done: 1, amcs_total: 3, windows_done: 50, windows_total: 123, stored: 900 }),
+    ).toBe("1 of 3 fund houses done · fetched 50 of 123 date windows · 900 NAVs stored…");
+  });
+
+  it("an all-skipped answer says so without a run summary", () => {
+    const lines = batchResultLines(
+      { done: true, status: "skipped", fund_houses: [], skipped: [{ amfi_code: 1, retry_after_s: 30 }] },
+      (c) => `Scheme ${c}`,
+    );
+    expect(lines.map((l) => l.text)).toEqual([
+      "Skipped, because they were backfilled in the last 15 minutes: Scheme 1. Try them again in about 1 minute.",
+    ]);
   });
 });

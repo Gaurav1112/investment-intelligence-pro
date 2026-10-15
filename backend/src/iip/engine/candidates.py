@@ -539,7 +539,7 @@ def mf_candidate(  # noqa: PLR0915 - one linear, auditable pipeline; splitting h
             ("horizon_days", str(horizon_days)),
             ("nav_observations", str(len(navs))),
             ("history", f"{nav_dates[0].isoformat()} → {nav_dates[-1].isoformat()}"),
-            ("exit_load", f"{load.rate} within {load.days} days ({load.citation})"),
+            ("exit_load", f"{(load.rate * 100).normalize()} % if redeemed within {load.days} days ({load.citation})"),
             ("loss_windows", f"{losses} of {len(windows)}"),
         ),
         assumptions=(

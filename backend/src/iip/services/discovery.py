@@ -19,7 +19,7 @@ from typing import Any
 from iip.engine import candidates as cb
 from iip.engine import tax as tx
 from iip.engine.determinism import canonical_json, content_hash
-from iip.engine.money import D, format_inr, money, pct
+from iip.engine.money import D, format_inr, money, pct, quantize
 from iip.engine.ranking import (
     POLICY_VERSION,
     Objective,
@@ -311,9 +311,9 @@ def explained_outcome(
             ),
         }[ev.formula_id],
         "substituted": f"gross {format_inr(value + tax)} − tax {format_inr(tax)} = {format_inr(value)}",
-        "inputs": [f"{k}: {v}" for k, v in ev.inputs]
+        "inputs": [_input_line(k, v) for k, v in ev.inputs]
         + [f"tax basis: {ev.tax_basis.value}"]
-        + [f"cost {k}: {v}" for k, v in ev.costs],
+        + [_cost_line(k, v) for k, v in ev.costs],
         "sources": sources,
         "observed": prov.get("observation_date"),
         "freshness": freshness,
@@ -328,6 +328,30 @@ def explained_outcome(
         "engine_version": cb.ENGINE_VERSION,
         "hash": content_hash(payload),
     }
+
+
+_MONEY_KEYS = {"amount", "dicgc_exposure_at_bank"}
+_RATE_KEYS = {"quoted_yield", "rate"}
+
+
+def _input_line(key: str, raw: str) -> str:
+    """Display formatting only — internal precision never reaches the screen."""
+    try:
+        if key in _MONEY_KEYS:
+            return f"{key}: {format_inr(Decimal(raw))}"
+        if key in _RATE_KEYS:
+            return f"{key}: {pct(Decimal(raw))}"
+        if key == "price_per_100":
+            return f"{key}: {quantize(Decimal(raw), Decimal('0.0001'))}"
+    except (ArithmeticError, ValueError):
+        pass
+    return f"{key}: {raw}"
+
+
+def _cost_line(key: str, value: Decimal) -> str:
+    if key.endswith("_rate"):
+        return f"cost {key}: {pct(value)}"
+    return f"cost {key}: {format_inr(value)}"
 
 
 # ----------------------------------------------------------------------------- workers (deterministic)
@@ -630,7 +654,14 @@ def discover(  # noqa: PLR0915 - one auditable orchestration sequence
         )
 
     workers = _workers(ranking, universe, facts) if ranking else []
-    disclosure_keys: tuple[str, ...] = ("ranking", "projection", "past_performance") if ranking else ()
+    ordered = ranking is not None and ranking.status is RankStatus.RANKED and personalised
+    disclosure_keys: tuple[str, ...] = (
+        ("ranking", "projection", "past_performance")
+        if ordered
+        else ("projection", "past_performance")
+        if ranking
+        else ()
+    )
     sup: SupervisorResult = run(
         manifest=MANIFEST,
         context=context,
@@ -757,10 +788,14 @@ def discover(  # noqa: PLR0915 - one auditable orchestration sequence
 
 def _loss_display(b: cb.BuiltCandidate) -> dict[str, str] | None:
     c = b.candidate
-    if c.loss_frequency is None or b.evidence is None:
+    if b.evidence is None:
         return None
     if c.outcome.is_contractual:
+        if c.loss_frequency is None:
+            return {"value": "n/a", "display": "contractual; uninsured part carries the institution's credit risk"}
         return {"value": "0", "display": "none (contractual)"}
+    if c.loss_frequency is None:
+        return None
     return {"value": str(c.loss_frequency), "display": f"{_count(b)} of {b.evidence.n_windows} historical windows"}
 
 

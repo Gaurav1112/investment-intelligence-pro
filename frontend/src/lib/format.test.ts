@@ -1,4 +1,4 @@
-import { dateLabel, groupIndian, inr, inrCompact, pct, roundHalfUp, utcStamp } from "./format";
+import { dateLabel, fractionToPercent, groupIndian, inr, inrCompact, pct, percentToFraction, roundHalfUp, utcStamp } from "./format";
 
 describe("roundHalfUp (string arithmetic, mirrors backend money())", () => {
   it.each([
@@ -71,5 +71,31 @@ describe("dates", () => {
     expect(dateLabel("2027-04-15")).toBe("15-Apr-2027");
     expect(utcStamp("2026-10-15T05:34:19Z")).toBe("15-Oct-2026 05:34 UTC");
     expect(() => dateLabel("15/04/2027")).toThrow();
+  });
+});
+
+describe("percent ↔ fraction (exact)", () => {
+  it.each([
+    ["20", "0.2"],
+    ["12.5", "0.125"],
+    ["5", "0.05"],
+    ["0.5", "0.005"],
+    ["100", "1"],
+    ["0", "0"],
+    ["007.50", "0.075"],
+  ])("%s %% → %s", (p, f) => expect(percentToFraction(p)).toBe(f));
+  it("rejects garbage and keeps empty as null", () => {
+    expect(percentToFraction("1e2")).toBe("invalid");
+    expect(percentToFraction("-5")).toBe("invalid");
+    expect(percentToFraction("  ")).toBeNull();
+  });
+  it.each([
+    ["0.2", "20"],
+    ["0.125", "12.5"],
+    ["0.0001", "0.01"],
+    ["1", "100"],
+  ])("%s → %s %%", (f, p) => expect(fractionToPercent(f)).toBe(p));
+  it("round-trips", () => {
+    for (const p of ["0", "1", "12.5", "33.333", "250"]) expect(fractionToPercent(percentToFraction(p))).toBe(p);
   });
 });

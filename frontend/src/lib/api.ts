@@ -12,6 +12,7 @@ export class ApiError extends Error {
 }
 
 let csrf: string | null = null;
+export const UNAUTHORIZED_EVENT = "iip:unauthorized";
 
 export function readLoginFragment(loc: Location = window.location, hist: History = window.history): string | null {
   const m = /(?:^#|&)login=([A-Za-z0-9_-]{20,256})/.exec(loc.hash);
@@ -63,6 +64,10 @@ export async function api<T>(path: string, init: { method?: string; body?: unkno
   });
   if (!res.ok) {
     const body = await safeJson(res);
+    if (res.status === 401) {
+      csrf = null;
+      window.dispatchEvent(new Event(UNAUTHORIZED_EVENT)); // session gone → lock the app; never show stale data
+    }
     throw new ApiError(res.status, body?.code ?? "REQUEST_FAILED", body);
   }
   return (await res.json()) as T;

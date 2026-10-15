@@ -35,7 +35,7 @@ describe("DataTable", () => {
     );
     const btn = screen.getByRole("button", { name: /Value/ });
     await userEvent.click(btn);
-    const names = () => within(screen.getByRole("table")).getAllByRole("row").slice(1).map((r) => r.cells[0]?.textContent);
+    const names = () => within(screen.getByRole("table")).getAllByRole("row").slice(1).map((r) => (r as HTMLTableRowElement).cells[0]?.textContent);
     expect(names()).toEqual(["Alpha", "Beta", "Gamma"]);
     expect(btn.closest("th")).toHaveAttribute("aria-sort", "ascending");
     await userEvent.click(btn);

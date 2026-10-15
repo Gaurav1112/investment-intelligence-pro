@@ -113,3 +113,40 @@ export function utcStamp(iso: string): string {
   const p = (x: number) => String(x).padStart(2, "0");
   return `${p(t.getUTCDate())}-${MONTHS[t.getUTCMonth()]}-${t.getUTCFullYear()} ${p(t.getUTCHours())}:${p(t.getUTCMinutes())} UTC`;
 }
+
+/** Exact decimal-point shift on a non-negative decimal string, normalised ("012.500" → "12.5"). */
+export function shiftPoint(value: string, k: number): string {
+  const t = value.trim();
+  if (!/^\d+(\.\d+)?$/.test(t)) throw new Error(`not a non-negative decimal string: ${value}`);
+  const [i = "0", f = ""] = t.split(".");
+  const digits = i + f;
+  const point = i.length + k;
+  let whole: string;
+  let frac: string;
+  if (point <= 0) {
+    whole = "0";
+    frac = "0".repeat(-point) + digits;
+  } else if (point >= digits.length) {
+    whole = digits + "0".repeat(point - digits.length);
+    frac = "";
+  } else {
+    whole = digits.slice(0, point);
+    frac = digits.slice(point);
+  }
+  whole = whole.replace(/^0+(?=\d)/, "");
+  frac = frac.replace(/0+$/, "");
+  return frac ? `${whole}.${frac}` : whole;
+}
+
+/** "20" (%) → "0.2"; returns null for empty input and "invalid" for non-decimal text. */
+export function percentToFraction(text: string): string | null {
+  const t = text.trim();
+  if (!t) return null;
+  if (!/^\d+(\.\d+)?$/.test(t)) return "invalid";
+  return shiftPoint(t, -2);
+}
+
+/** "0.125" → "12.5" (for editing a stored fraction as a percentage). */
+export function fractionToPercent(fraction: string | null): string {
+  return fraction ? shiftPoint(fraction, 2) : "";
+}

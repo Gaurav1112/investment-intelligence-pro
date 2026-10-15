@@ -12,7 +12,7 @@ it("frontend disclosures match the backend compliance rule table verbatim", () =
 it("no component uses dangerouslySetInnerHTML (threat-model SEC-24)", async () => {
   const { readdirSync, statSync } = await import("node:fs");
   const walk = (dir: string): string[] =>
-    readdirSync(dir).flatMap((f) => {
+    readdirSync(dir).flatMap((f: string) => {
       const p = resolve(dir, f);
       return statSync(p).isDirectory() ? walk(p) : [p];
     });

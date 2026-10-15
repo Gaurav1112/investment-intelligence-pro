@@ -131,3 +131,15 @@ def test_identical_inputs_give_identical_result_hash(conn) -> None:  # type: ign
     assert (
         conn.execute("SELECT output_hash FROM runs WHERE run_id=?", (run_id,)).fetchone()[0] == a["run"]["result_hash"]
     )
+
+
+def test_explanations_never_leak_internal_precision(conn) -> None:  # type: ignore[no-untyped-def]
+    import re
+
+    out = go(conn, profile(), allow_fixtures=True)
+    long_decimal = re.compile(r"\d+\.\d{9,}")
+    for r in out["ranked"]:
+        for k in ("q05", "q50", "q95"):
+            e = r["outcome"][k]
+            for line in [*e["inputs"], e["substituted"], e["display"]]:
+                assert not long_decimal.search(line), line

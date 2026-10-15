@@ -65,9 +65,64 @@ export interface ProfileStatus {
   mode: "PERSONALISED" | "EXPLORATION";
   missing: string[];
   horizon_days: number | null;
+  conflicts: string[];
 }
 
 export interface Disclosures {
   footer: string;
   items: string[];
+}
+
+export interface MoneyDelta {
+  value: string;
+  display: string;
+  pct: string;
+}
+
+export interface DiscoveryRow {
+  instrument_id: string;
+  name: string;
+  kind: string | null;
+  tier: "T1" | "T2" | "T3" | "T4";
+  rank: number | null;
+  flags: string[];
+  reasons: string[];
+  exclusion_codes: string[];
+  days_to_cash: number;
+  contractual: boolean;
+  loss_frequency: { value: string; display: string } | null;
+  fixture: boolean;
+  observed: string | null;
+  outcome: { q05: Explained; q50: Explained; q95: Explained; gain_q50: MoneyDelta; gain_q05: MoneyDelta } | null;
+}
+
+export interface DiscoveryResult {
+  status: "RANKED" | "NO_SUITABLE_CANDIDATE" | "ABSTAIN" | "EXPLORATION";
+  mode: "PERSONALISED" | "EXPLORATION";
+  as_of: string;
+  context: {
+    amount: string;
+    amount_value: string;
+    horizon_days: number;
+    withdrawal_date: string;
+    objective: string;
+    illustrative: boolean;
+    tax_basis: string;
+  };
+  message: string | null;
+  abstain_reasons: string[];
+  policy: Record<string, string> | null;
+  criteria: string[];
+  ranked: DiscoveryRow[];
+  excluded: DiscoveryRow[];
+  skipped_no_history: number;
+  contains_fixtures: boolean;
+  report: {
+    narrative: string;
+    writer: string;
+    sections: { worker: string; subject: string; topic: string; stance: string; text: string }[];
+    disclosures: string[];
+  } | null;
+  conflicts: { subject: string; topic: string; supporting: string[]; challenging: string[]; material: boolean }[];
+  run: { input_hash: string; output_hash: string; result_hash: string; run_id?: string; versions: Record<string, string> };
 }

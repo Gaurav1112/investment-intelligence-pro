@@ -17,3 +17,4 @@ data/cache/
 coverage/
 htmlcov/
 .DS_Store
+.claude/

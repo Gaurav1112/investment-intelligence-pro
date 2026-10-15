@@ -63,7 +63,10 @@ def _migration_files() -> list[tuple[int, str, str]]:
 
 
 def current_version(conn: sqlite3.Connection) -> int:
-    conn.execute(_SCHEMA_VERSION_DDL)
+    """Read-only (SEC-10: GET routes must never write, not even DDL). migrate() creates the table."""
+    exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'").fetchone()
+    if exists is None:
+        return 0
     row = conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()
     return int(row["v"] or 0)
 
@@ -71,6 +74,7 @@ def current_version(conn: sqlite3.Connection) -> int:
 def migrate(conn: sqlite3.Connection, applied_at: str) -> list[str]:
     """Apply pending migrations in order, each in its own transaction. Returns names applied."""
     applied: list[str] = []
+    conn.execute(_SCHEMA_VERSION_DDL)
     have = current_version(conn)
     for version, name, sql in _migration_files():
         if version <= have:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hmac
 import logging
+import os
 import secrets
 import sqlite3
 import threading
@@ -45,11 +46,13 @@ class AppState:
         self.sessions = SessionStore()
         self.login_limiter = RateLimiter(limit=10, window_s=60)
         self.settings.data_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(self.settings.data_dir, 0o700)  # SEC-82: private financial data
         self.token = ensure_access_token(settings) if settings.auth else ""
         self._local = threading.local()
         self._all: list[sqlite3.Connection] = []
         self._lock = threading.Lock()
         migrate(self.conn, clock().isoformat())
+        _restrict_db_files(self.settings.db_path)
 
     @property
     def conn(self) -> sqlite3.Connection:
@@ -66,6 +69,13 @@ class AppState:
             for c in self._all:
                 c.close()
             self._all.clear()
+
+
+def _restrict_db_files(db: Path) -> None:
+    """SEC-82: the database and its WAL/SHM side files are readable only by the owner."""
+    for p in (db, db.with_name(db.name + "-wal"), db.with_name(db.name + "-shm")):
+        if p.exists():
+            os.chmod(p, 0o600)
 
 
 def create_app(

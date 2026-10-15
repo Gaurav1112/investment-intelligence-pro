@@ -502,3 +502,16 @@ def test_logs_never_contain_amounts_holdings_or_names(
     text = caplog.text
     for s in ("SENTINEL", "98765432", "9,87,65,432", "7654.321", "TEST Liquid", "12.3456", "1234.56"):
         assert s not in text, s
+
+
+def test_erase_with_backups_removes_both_backup_naming_schemes(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    """Regression (final review): `make backup` writes iip-*.db while the API writes iip-*.sqlite3; erase with
+    delete_backups must remove every copy, or "erase everything" silently leaves data behind."""
+    from iip.services import portfolio as pf
+
+    bdir = pf.backups_dir(tmp_path)
+    bdir.mkdir(parents=True)
+    (bdir / "iip-20261015T000000Z.db").write_bytes(b"x")
+    (bdir / "iip-20261015T000001Z.sqlite3").write_bytes(b"y")
+    pf.erase(conn, tmp_path, delete_backups=True)
+    assert list(bdir.glob("iip-*")) == []

@@ -52,7 +52,7 @@ backup:          ## Verified online backup of the database into $(IIP_DATA_DIR)/
 	$(PY) -c "import os,pathlib,datetime as d;from iip.store.db import connect,backup;p=pathlib.Path(os.environ['IIP_DATA_DIR']);print(backup(connect(p/'iip.db'),p/'backups'/f'iip-{d.datetime.now(d.UTC):%Y%m%dT%H%M%SZ}.db'))"
 
 restore-drill:   ## Prove the newest backup restores (REL-40) into a temp file — never touches the live DB
-	$(PY) -c "import os,pathlib,tempfile;from iip.store.db import restore,connect,integrity_ok;b=sorted((pathlib.Path(os.environ['IIP_DATA_DIR'])/'backups').glob('*.db'))[-1];t=pathlib.Path(tempfile.mkdtemp())/'r.db';restore(b,t);print('restore OK' if integrity_ok(connect(t)) else 'RESTORE FAILED',b)"
+	$(PY) -c "import os,pathlib,tempfile;from iip.store.db import restore,connect,integrity_ok;b=sorted((pathlib.Path(os.environ['IIP_DATA_DIR'])/'backups').glob('iip-*'))[-1];t=pathlib.Path(tempfile.mkdtemp())/'r.db';restore(b,t);print('restore OK' if integrity_ok(connect(t)) else 'RESTORE FAILED',b)"
 
 clean:           ## Remove build artefacts (never touches $(IIP_DATA_DIR))
 	rm -rf $(FRONTEND)/dist $(BACKEND)/.pytest_cache $(BACKEND)/.mypy_cache $(BACKEND)/.ruff_cache

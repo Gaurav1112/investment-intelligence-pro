@@ -63,6 +63,7 @@ LADDER_BUCKETS: tuple[tuple[str, int, int | None], ...] = (
 LADDER_SPECIAL = ("matured or overdue", "unknown")
 SENSITIVITY_SHOCK = Decimal("0.05")
 USER_TABLES = ("transactions", "portfolios", "watchlist", "alerts", "runs", "audit_events", "settings", "profiles")
+assert all(t.isidentifier() for t in USER_TABLES)
 PUBLIC_TABLES = (
     "sources",
     "ingestion_runs",
@@ -1285,12 +1286,19 @@ def backups_dir(data_dir: Path) -> Path:
 
 def _backup_files(data_dir: Path) -> list[Path]:
     d = backups_dir(data_dir)
-    return sorted(d.glob("iip-*.sqlite3")) if d.exists() else []
+    # Both naming schemes: the API writes iip-*.sqlite3, `make backup` writes iip-*.db. Erase must find every copy.
+    return sorted([*d.glob("iip-*.sqlite3"), *d.glob("iip-*.db")]) if d.exists() else []
+
+
+assert all(t.isidentifier() for t in PUBLIC_TABLES)
+# Precomputed from identifier-checked constants: no SQL is ever built from runtime values (SEC-65).
+_COUNT_SQL = {t: "SELECT COUNT(*) FROM " + t for t in (*USER_TABLES, *PUBLIC_TABLES)}  # noqa: S608 - identifier-asserted constants
+_DELETE_SQL = {t: "DELETE FROM " + t for t in USER_TABLES}  # noqa: S608 - identifier-asserted constants
 
 
 def inventory(conn: sqlite3.Connection, data_dir: Path) -> dict[str, Any]:
-    user = {t: int(conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]) for t in USER_TABLES}  # noqa: S608
-    public = {t: int(conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]) for t in PUBLIC_TABLES}  # noqa: S608
+    user = {t: int(conn.execute(_COUNT_SQL[t]).fetchone()[0]) for t in USER_TABLES}
+    public = {t: int(conn.execute(_COUNT_SQL[t]).fetchone()[0]) for t in PUBLIC_TABLES}
     pending = len([b for b in _batches(conn) if b["status"] == "previewed"])
     return {
         "user_data": {"tables": user, "pending_import_previews": pending},
@@ -1350,17 +1358,17 @@ def export_transactions_csv(conn: sqlite3.Connection) -> bytes:
 def erase(conn: sqlite3.Connection, data_dir: Path, *, delete_backups: bool) -> dict[str, Any]:
     """Delete every user row (SEC-81), with ``secure_delete`` on, then VACUUM and truncate the WAL so the bytes
     are gone from the database files. Public market data and the schema are kept."""
-    counts = {t: int(conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]) for t in USER_TABLES}  # noqa: S608
+    counts = {t: int(conn.execute(_COUNT_SQL[t]).fetchone()[0]) for t in USER_TABLES}
     previous = int(conn.execute("PRAGMA secure_delete").fetchone()[0])
     conn.execute("PRAGMA secure_delete=ON")
     try:
         with write_tx(conn):
             for t in USER_TABLES:
-                conn.execute(f"DELETE FROM {t}")  # noqa: S608 - constant table names
+                conn.execute(_DELETE_SQL[t])
         conn.execute("VACUUM")
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     finally:
-        conn.execute(f"PRAGMA secure_delete={previous}")
+        conn.execute("PRAGMA secure_delete=ON" if previous else "PRAGMA secure_delete=OFF")
     removed = 0
     if delete_backups:
         for f in _backup_files(data_dir):

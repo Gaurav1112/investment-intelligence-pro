@@ -8,6 +8,7 @@ from functools import lru_cache
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from iip.data.fetch import Fetcher
@@ -27,6 +28,15 @@ def tax_rules() -> tx.TaxRuleSet | None:
         return load_tax_rules()
     except Exception:  # a broken rule file must ABSTAIN, not crash the API
         return None
+
+
+REFRESH_MIN_INTERVAL_S = 15 * 60
+
+_TERMS_QUERIES = (
+    ("mf_schemes", "SELECT * FROM mf_schemes WHERE instrument_id=?"),
+    ("bond_terms", "SELECT * FROM bond_terms WHERE instrument_id=?"),
+    ("deposit_terms", "SELECT * FROM deposit_terms WHERE instrument_id=?"),
+)
 
 
 class DiscoverIn(BaseModel):
@@ -92,8 +102,8 @@ def router() -> APIRouter:  # noqa: PLR0915 - route table
         if row is None:
             raise HTTPException(404, "not found")
         out: dict[str, Any] = {"instrument": dict(row)}
-        for table in ("mf_schemes", "bond_terms", "deposit_terms"):
-            extra = st.conn.execute(f"SELECT * FROM {table} WHERE instrument_id=?", (instrument_id,)).fetchone()  # noqa: S608
+        for table, sql in _TERMS_QUERIES:
+            extra = st.conn.execute(sql, (instrument_id,)).fetchone()
             if extra:
                 out[table] = dict(extra)
         series = "nav:" + str(row["amfi_code"]) if row["amfi_code"] else "yield:" + instrument_id
@@ -134,8 +144,16 @@ def router() -> APIRouter:  # noqa: PLR0915 - route table
 
     # ------------------------------------------------------------------ ingestion & data health
     @r.post("/ingestion/amfi-navall")
-    def run_navall(request: Request) -> dict[str, Any]:
+    def run_navall(request: Request) -> Any:
         st = _state(request)
+        # SEC-86: at most one manual refresh per source per 15 minutes; refused calls make no outbound request.
+        now = st.clock()
+        last = getattr(st, "last_navall_refresh", None)
+        if last is not None and (now - last).total_seconds() < REFRESH_MIN_INTERVAL_S:
+            wait = int(REFRESH_MIN_INTERVAL_S - (now - last).total_seconds()) + 1
+            return JSONResponse({"code": "RATE_LIMITED", "retry_after_s": wait}, status_code=429,
+                                headers={"Retry-After": str(wait)})  # fmt: skip
+        st.last_navall_refresh = now
         ingestion.sync_sources(st.conn)
         summary = ingestion.ingest_navall(st.conn, Fetcher(), st.clock)
         return summary.__dict__

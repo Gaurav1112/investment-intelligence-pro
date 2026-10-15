@@ -17,6 +17,8 @@ from decimal import Decimal
 
 from iip.data.fetch import Fetcher, FetchError
 from iip.data.models import DataError, Observation, ParseResult, QualityStatus, SchemeRecord
+from iip.data.parsers._amfi import CURRENCY as NAV_CURRENCY
+from iip.data.parsers._amfi import UNIT as NAV_UNIT
 from iip.data.parsers.amfi_navall import parse_navall
 from iip.data.parsers.amfi_navhistory import parse_navhistory
 from iip.data.registry import (
@@ -30,8 +32,6 @@ from iip.data.registry import (
 from iip.data.validators import classify_freshness, run_all
 from iip.store.db import write_tx
 from iip.store.observations import ObservationRow, upsert_observation
-
-NAV_UNIT = "INR/unit"
 
 
 @dataclass(frozen=True)
@@ -184,7 +184,7 @@ def _store_observations(
 
 
 def _validated(result: ParseResult) -> list[Observation]:
-    checked = run_all(list(result.observations), expected_unit=NAV_UNIT, expected_currency="INR")
+    checked = run_all(list(result.observations), expected_unit=NAV_UNIT, expected_currency=NAV_CURRENCY)
     return list(checked.observations)
 
 
@@ -280,7 +280,7 @@ def _validated_list(observations: list[Observation]) -> list[Observation]:
     if not observations:
         return []
     observations = sorted(observations, key=lambda o: o.observation_date)
-    return list(run_all(observations, expected_unit=NAV_UNIT, expected_currency="INR").observations)
+    return list(run_all(observations, expected_unit=NAV_UNIT, expected_currency=NAV_CURRENCY).observations)
 
 
 def latest_freshness(conn: sqlite3.Connection, code: int, as_of: datetime) -> tuple[str, str | None]:

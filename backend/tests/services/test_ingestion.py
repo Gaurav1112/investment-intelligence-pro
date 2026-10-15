@@ -62,6 +62,8 @@ def test_navall_ingests_only_the_minimised_scope_with_provenance(conn) -> None: 
     obs = conn.execute("SELECT * FROM observations").fetchall()
     assert obs and all(o["source_id"] == "amfi.navall" and o["raw_sha256"] and o["retrieved_at"] for o in obs)
     assert all("." in o["value"] or o["value"].isdigit() for o in obs)  # decimal strings, never floats
+    # Regression (live run 2026-10-15): a unit-string mismatch silently stored every row as 'rejected'.
+    assert {o["quality_status"] for o in obs} == {"ok"}
     run = conn.execute("SELECT * FROM ingestion_runs").fetchone()
     assert run["status"] == summary.status and run["raw_sha256"]
 
@@ -104,3 +106,5 @@ def test_history_backfill_keeps_only_the_requested_scheme(conn) -> None:  # type
     assert series == {"nav:119018"}
     values = [r["value"] for r in conn.execute("SELECT value FROM observations ORDER BY observation_date")]
     assert values == ["1393.087", "1385.402"]  # verbatim from the probe (HDFC Large Cap Direct Growth)
+    statuses = {r["quality_status"] for r in conn.execute("SELECT quality_status FROM observations")}
+    assert statuses == {"ok"}

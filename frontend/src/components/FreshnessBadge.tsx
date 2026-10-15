@@ -8,7 +8,11 @@ const META: Record<Freshness, { glyph: string; word: string; cls: string }> = {
   STALE: { glyph: "○ ⚠", word: "STALE", cls: "stale" },
   FIXTURE: { glyph: "▨", word: "FIXTURE — not market data", cls: "fixture" },
   MANUAL: { glyph: "✎", word: "MANUAL ENTRY", cls: "eod" },
-  UNKNOWN: { glyph: "?", word: "NO DATA", cls: "stale" },
+  DERIVED: { glyph: "∑", word: "COMPUTED FROM YOUR RECORDS", cls: "neutral" },
+  USER_INPUT: { glyph: "✎", word: "YOUR INPUT", cls: "neutral" },
+  ILLUSTRATIVE: { glyph: "◇", word: "ILLUSTRATIVE", cls: "delayed" },
+  UNAVAILABLE: { glyph: "—", word: "NOT AVAILABLE", cls: "stale" },
+  UNKNOWN: { glyph: "?", word: "FRESHNESS UNKNOWN", cls: "stale" },
 };
 
 /** Glyph + word + date: never colour alone (ux-design §4.4). */

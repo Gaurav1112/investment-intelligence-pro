@@ -1,4 +1,4 @@
-import { dateLabel, fractionToPercent, groupIndian, inr, inrCompact, pct, percentToFraction, roundHalfUp, utcStamp } from "./format";
+import { addDecimals, compareDecimals, dateLabel, fractionToPercent, groupIndian, inr, inrCompact, pct, percentToFraction, roundHalfUp, sumDecimals, utcStamp } from "./format";
 
 describe("roundHalfUp (string arithmetic, mirrors backend money())", () => {
   it.each([
@@ -97,5 +97,41 @@ describe("percent ↔ fraction (exact)", () => {
   ])("%s → %s %%", (f, p) => expect(fractionToPercent(f)).toBe(p));
   it("round-trips", () => {
     for (const p of ["0", "1", "12.5", "33.333", "250"]) expect(fractionToPercent(percentToFraction(p))).toBe(p);
+  });
+});
+
+describe("exact decimal-string adder (no floats)", () => {
+  it.each([
+    ["0.1", "0.2", "0.3"],
+    ["33.33", "33.34", "66.67"],
+    ["0.10", "0.20", "0.3"],
+    ["1", "0", "1"],
+    ["0", "0", "0"],
+    ["99.99", "0.01", "100"],
+    ["12345678901234567890.5", "0.5", "12345678901234567891"],
+    ["-1.5", "0.5", "-1"],
+    ["-0.5", "0.5", "0"],
+  ])("%s + %s = %s", (a, b, out) => expect(addDecimals(a, b)).toBe(out));
+
+  it("sums allocation weights exactly", () => {
+    expect(sumDecimals(["33.33", "33.33", "33.34"])).toBe("100");
+    expect(sumDecimals(["33.33", "33.33", "33.33"])).toBe("99.99");
+    expect(sumDecimals(["0.3333", "0.3333", "0.3334"])).toBe("1");
+    expect(sumDecimals([])).toBe("0");
+    // the float trap: 0.1 + 0.2 !== 0.3 in binary floating point
+    expect(sumDecimals(["0.1", "0.2"])).toBe("0.3");
+  });
+
+  it("compares exactly, ignoring trailing zeros", () => {
+    expect(compareDecimals("100", "100.00")).toBe(0);
+    expect(compareDecimals("99.99", "100")).toBe(-1);
+    expect(compareDecimals("100.0000001", "100")).toBe(1);
+    expect(compareDecimals("-0.2", "0.1")).toBe(-1);
+  });
+
+  it("rejects non-decimal text", () => {
+    expect(() => addDecimals("1e3", "1")).toThrow();
+    expect(() => addDecimals("", "1")).toThrow();
+    expect(() => compareDecimals("abc", "1")).toThrow();
   });
 });

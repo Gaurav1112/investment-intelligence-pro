@@ -333,6 +333,12 @@ export default function InstrumentDetail() {
             Evidence viewer
           </Link>
         </div>
+        <nav className="row small" aria-label="Analyse this instrument">
+          <span>Analyse:</span>
+          <Link to={`/risk?id=${encodeURIComponent(i.instrument_id)}`}>Risk</Link>
+          <Link to={`/scenarios?tab=feasibility&id=${encodeURIComponent(i.instrument_id)}`}>Return-target feasibility</Link>
+          <Link to={`/compare?ids=${encodeURIComponent(i.instrument_id)}`}>Compare</Link>
+        </nav>
       </header>
       <h2>Terms</h2>
       <Terms d={d} />

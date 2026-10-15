@@ -150,3 +150,49 @@ export function percentToFraction(text: string): string | null {
 export function fractionToPercent(fraction: string | null): string {
   return fraction ? shiftPoint(fraction, 2) : "";
 }
+
+// ------------------------------------------------------------------ exact decimal-string arithmetic (no floats)
+// Used only to VALIDATE user input (e.g. allocation weights must sum to exactly 100 %), never to compute a financial
+// result. BigInt on scaled integers keeps it exact: 0.1 + 0.2 is exactly 0.3 here.
+
+function scaled(value: string): { n: bigint; scale: number } {
+  const t = value.trim();
+  if (!/^-?\d+(\.\d+)?$/.test(t)) throw new Error(`not a decimal string: ${value}`);
+  const neg = t.startsWith("-");
+  const [i = "0", f = ""] = t.replace("-", "").split(".");
+  const n = BigInt(i + f);
+  return { n: neg ? -n : n, scale: f.length };
+}
+
+function unscale(n: bigint, scale: number): string {
+  const neg = n < 0n;
+  const digits = (neg ? -n : n).toString().padStart(scale + 1, "0");
+  const whole = digits.slice(0, digits.length - scale) || "0";
+  const frac = scale ? digits.slice(digits.length - scale).replace(/0+$/, "") : "";
+  const body = frac ? `${whole}.${frac}` : whole;
+  return neg && body !== "0" ? `-${body}` : body;
+}
+
+function aligned(a: string, b: string): [bigint, bigint, number] {
+  const x = scaled(a);
+  const y = scaled(b);
+  const scale = Math.max(x.scale, y.scale);
+  return [x.n * 10n ** BigInt(scale - x.scale), y.n * 10n ** BigInt(scale - y.scale), scale];
+}
+
+/** Exact sum of two decimal strings, normalised ("33.33" + "33.34" → "66.67"; "0.10" + "0.20" → "0.3"). */
+export function addDecimals(a: string, b: string): string {
+  const [x, y, scale] = aligned(a, b);
+  return unscale(x + y, scale);
+}
+
+/** Exact sum of a list of decimal strings ("0" for an empty list). */
+export function sumDecimals(values: readonly string[]): string {
+  return values.reduce((acc, v) => addDecimals(acc, v), "0");
+}
+
+/** Exact comparison of two decimal strings: −1, 0 or 1 ("1.0" equals "1"). */
+export function compareDecimals(a: string, b: string): -1 | 0 | 1 {
+  const [x, y] = aligned(a, b);
+  return x < y ? -1 : x > y ? 1 : 0;
+}

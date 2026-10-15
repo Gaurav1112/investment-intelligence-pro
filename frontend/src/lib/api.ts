@@ -72,3 +72,20 @@ export async function api<T>(path: string, init: { method?: string; body?: unkno
   }
   return (await res.json()) as T;
 }
+
+/** Multipart POST (file upload). The browser sets the multipart Content-Type with its boundary, so it is never set
+ * here; the CSRF header and same-origin credentials are kept exactly as in `api()`. */
+export async function apiUpload<T>(path: string, form: FormData, init: { signal?: AbortSignal } = {}): Promise<T> {
+  const headers: Record<string, string> = {};
+  if (csrf) headers["X-IIP-CSRF"] = csrf;
+  const res = await fetch(path, { method: "POST", headers, body: form, credentials: "same-origin", signal: init.signal });
+  if (!res.ok) {
+    const body = await safeJson(res);
+    if (res.status === 401) {
+      csrf = null;
+      window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+    }
+    throw new ApiError(res.status, body?.code ?? "REQUEST_FAILED", body);
+  }
+  return (await res.json()) as T;
+}

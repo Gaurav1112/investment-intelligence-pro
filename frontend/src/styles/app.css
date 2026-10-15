@@ -151,3 +151,39 @@ code { font-family: var(--mono); font-size: 0.92em; background: var(--surface-2)
 .table-wrap--scroll { max-height: 420px; overflow-y: auto; }
 .plain-list { list-style: none; padding: 0; margin: 0 0 var(--space-3); display: grid; gap: var(--space-1); }
 .table tr.is-unverified td { background: var(--surface-2); }
+
+/* ---------- portfolio, watchlist, alerts, evidence, settings ---------- */
+.nature--actual { color: var(--accent); }
+.nature--hypothetical { color: var(--fresh-delayed); border-style: dashed; }
+.portfolio-banner { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; padding: var(--space-3) var(--space-4);
+  margin-bottom: var(--space-4); border: 2px solid var(--accent); border-radius: var(--radius); background: var(--surface); }
+.portfolio-banner--hypothetical { border: 2px dashed var(--fresh-delayed);
+  background-image: repeating-linear-gradient(45deg, transparent 0 12px, var(--surface-2) 12px 14px); }
+.exclusion-note { margin-top: 2px; }
+.bar-cell { width: 35%; min-width: 80px; }
+.bar { display: block; height: 10px; background: var(--accent); border-radius: 2px; min-width: 1px; }
+.break { overflow-wrap: anywhere; word-break: break-all; }
+.label-like { display: block; font-weight: 500; margin-bottom: var(--space-1); }
+.search-results { margin-top: var(--space-2); max-height: 260px; overflow-y: auto; }
+.note-cell { max-width: 260px; overflow-wrap: anywhere; }
+.import-preview { margin-top: var(--space-4); }
+.import-preview h4 { margin: var(--space-3) 0 var(--space-2); }
+.alert-list { gap: var(--space-3); }
+.alert.is-acked { opacity: 0.75; }
+.alert__msg { margin: var(--space-2) 0; }
+.sev--info { color: var(--text-muted); }
+.sev--warning { color: var(--fresh-delayed); }
+.sev--critical { color: var(--fresh-stale); }
+.danger-zone { border-color: var(--fresh-stale); margin-top: var(--space-4); }
+
+/* ---------- analysis pages (compare, scenarios, simulator, risk) ---------- */
+.h-inline { margin-top: 0; }
+.context-line { margin: var(--space-3) 0; padding: var(--space-2) var(--space-4); }
+.context-line p { margin: 0; }
+.refusal { font-style: italic; color: var(--text-muted); }
+.compare-table th[scope="row"] { min-width: 200px; max-width: 280px; font-weight: 500; color: var(--text); background: var(--surface); position: static; }
+.compare-table td { min-width: 180px; }
+.compare-table td .band { display: inline-flex; flex-wrap: wrap; justify-content: flex-end; gap: 0 4px; white-space: normal; }
+.chart .range-bar { stroke: var(--accent); stroke-width: 2; }
+.mismatch { color: var(--fresh-stale); }
+.shock-na { border-style: dashed; margin: var(--space-3) 0; }

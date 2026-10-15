@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
-from iip.data.fetch import Fetcher, FetchError
+from iip.data.fetch import Fetcher, FetchError, NoData
 from iip.data.models import DataError, Observation, ParseResult, SchemeRecord
 from iip.data.parsers._amfi import CURRENCY as NAV_CURRENCY
 from iip.data.parsers._amfi import UNIT as NAV_UNIT
@@ -335,8 +335,13 @@ def prune_untracked_history(conn: sqlite3.Connection, tracked: set[int]) -> int:
     return removed
 
 
+# AMFI fund-house ids are unpublished. A full probe on 2026-10-15 found 54 fund houses with ids up to 89 (PPFAS = 64);
+# unused ids answer with AMFI's HTML form page, which the fetcher reports as NoData (no breaker failure).
+MAX_FUND_HOUSE_ID = 120
+
+
 def discover_fund_house_id(
-    conn: sqlite3.Connection, fetcher: Fetcher, amc_name: str, probe_day: date, max_id: int = 80,
+    conn: sqlite3.Connection, fetcher: Fetcher, amc_name: str, probe_day: date, max_id: int = MAX_FUND_HOUSE_ID,
     pause: Callable[[float], object] | None = None,
 ) -> int | None:  # fmt: skip
     """Find AMFI's internal fund-house id for an AMC by probing one day per id (mapping is NOT published)."""
@@ -423,6 +428,8 @@ def _fetch_window(
     try:
         request = navhistory_request(mf_id=mf_id, tp=1, from_date=window_start, to_date=window_end)
         res = parse_navhistory(fetcher.fetch(request))
+    except NoData:
+        return 0, 0, 0, None  # AMFI has nothing in this window (e.g. before the scheme launched): empty, not an error
     except (FetchError, DataError) as exc:
         return 0, 0, 0, f"{window_start}..{window_end}: {type(exc).__name__}"
     mine = [o for o in res.observations if int(o.entity_key) == scheme_code]
@@ -464,7 +471,7 @@ def _window_count(start: date, end: date) -> int:
 def backfill_resumable(
     conn: sqlite3.Connection, fetcher: Fetcher, *, scheme_code: int, amc_name: str, start: date, end: date,
     now: Callable[[], datetime], pause: Callable[[float], object] | None, stop: Callable[[], bool],
-    max_id: int = 80,
+    max_id: int = MAX_FUND_HOUSE_ID,
 ) -> dict[str, object]:  # fmt: skip
     """One bounded step of a NAV-history backfill (same windows, filtering and storage as :func:`backfill_history`).
 

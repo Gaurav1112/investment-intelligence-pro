@@ -81,6 +81,8 @@ class SourceSpec:
     currency: str | None = None
     convention: str | None = None
     requires_configuration: bool = False
+    # Bytes that identify the source's normal "nothing for this query" HTML page (fetch.NoData, not a failure).
+    no_data_marker: bytes | None = None
 
 
 _NAV_SLO = FreshnessSLO(
@@ -129,6 +131,7 @@ _SOURCES: tuple[SourceSpec, ...] = (
         freshness=_NAV_SLO,
         max_bytes=32 * MiB,
         content_types=frozenset({"text/plain"}),
+        no_data_marker=b"View/Download NAV History",
         unit="INR_per_unit",
         currency="INR",
         convention="NAV_PER_UNIT_AS_PUBLISHED",

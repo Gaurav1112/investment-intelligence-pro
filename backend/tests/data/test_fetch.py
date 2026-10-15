@@ -433,6 +433,43 @@ def test_content_type_mismatch_not_retried() -> None:
     assert len(rec.requests) == 1
 
 
+def test_amfi_no_data_page_is_no_data_and_never_opens_the_breaker() -> None:
+    """Walkthrough 2026-10-15: AMFI answers an unused fund-house id with its HTML form page (HTTP 200). That used to
+    be a ContentTypeMismatch FAILURE, so three unused ids in a row opened the breaker for 6 h and blocked every
+    backfill."""
+    from datetime import date
+
+    from iip.data.fetch import NoData
+    from iip.data.registry import navhistory_request
+
+    page = b"\r\n<!DOCTYPE html><html><head><title>\r\n\tView/Download NAV History\r\n</title></head></html>"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/html; charset=utf-8"}, content=page)
+
+    clock = Clock()
+    breaker = CircuitBreaker(clock=clock)
+    f = make_fetcher(handler, clock=clock, breaker=breaker)
+    for mf_id in range(10, 16):  # six unused ids in a row
+        with pytest.raises(NoData):
+            f.fetch(navhistory_request(mf_id=mf_id, tp=1, from_date=date(2026, 10, 1), to_date=date(2026, 10, 1)))
+    assert breaker.allow("amfi.navhistory") is BreakerStatus.CLOSED
+
+
+def test_html_without_the_no_data_marker_is_still_a_failure() -> None:
+    from datetime import date
+
+    from iip.data.registry import navhistory_request
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/html"}, content=b"<html>Service unavailable</html>")
+
+    with pytest.raises(ContentTypeMismatch):
+        make_fetcher(handler).fetch(
+            navhistory_request(mf_id=3, tp=1, from_date=date(2026, 10, 1), to_date=date(2026, 10, 1))
+        )
+
+
 # --- REL-50/51: retries ------------------------------------------------------------------------------------
 
 

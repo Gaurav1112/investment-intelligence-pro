@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from decimal import Decimal
+from typing import Any
 
 import numpy as np
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from iip.engine.determinism import content_hash
+from iip.engine.errors import EngineError
 from iip.engine.money import D
 from iip.engine.scenarios import (
     BulletBond,
@@ -107,7 +109,16 @@ def test_metrics_deterministic(prices: list[Decimal]) -> None:
         lambda s, rf: historical_var(s, D("0.9"), gates=FIX),
         lambda s, rf: sharpe(s, rf, annualisation=252, gates=FIX),
     ):
-        assert content_hash(f(s1, rf1)) == content_hash(f(s2, rf2))
+        # Determinism includes refusals: the same input must give the same result OR the same refusal (e.g. Sharpe
+        # refuses autocorrelated/smoothed series by design — risk-methodology §4.3).
+        assert _outcome(f, s1, rf1) == _outcome(f, s2, rf2)
+
+
+def _outcome(f: Any, s: Any, rf: Any) -> tuple[str, str]:
+    try:
+        return ("ok", content_hash(f(s, rf)))
+    except EngineError as exc:
+        return (type(exc).__name__, str(exc))
 
 
 # ---------------------------------------------------------------- scenarios

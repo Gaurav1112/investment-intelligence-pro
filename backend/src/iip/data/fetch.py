@@ -82,6 +82,16 @@ class ContentTypeMismatch(FetchError):
     code = "CONTENT_TYPE_MISMATCH"
 
 
+class NoData(FetchError):
+    """The source answered normally but has nothing for this query (e.g. AMFI's NAV-history form page for an unused
+    fund-house id). A successful exchange: it counts as a success for the circuit breaker, never a failure."""
+
+    code = "NO_DATA"
+
+
+_NO_DATA_SNIFF_BYTES = 64 * 1024
+
+
 class CircuitOpen(FetchError):
     code = "BREAKER_OPEN"
 
@@ -407,6 +417,9 @@ class Fetcher:
             payload = self._run(request, attempts)
         except FetchOffline:
             raise  # an offline machine is not the source's fault
+        except NoData:
+            self.breaker.record_success(spec.id)  # the source is healthy; it just has nothing for this query
+            raise
         except (FetchError, FetchRefused):
             self.breaker.record_failure(spec.id)
             raise
@@ -469,6 +482,7 @@ class Fetcher:
                             url = str(resp.url.join(location))
                             continue
                         self._raise_for_status(resp)
+                        self._raise_if_no_data(resp, spec.no_data_marker)
                         body = self._read_body(resp, spec.max_bytes, spec.content_types, started)
                         return RawPayload.from_bytes(
                             source_id=spec.id,
@@ -495,6 +509,23 @@ class Fetcher:
             retry_after = _parse_retry_after(resp.headers.get("retry-after")) if s in (429, 503) else None
             raise FetchFailed(f"HTTP {s}", code=f"HTTP_{s}", retryable=True, status=s, retry_after=retry_after)
         raise FetchFailed(f"HTTP {s}", code=f"HTTP_{s}", retryable=False, status=s)
+
+    @staticmethod
+    def _raise_if_no_data(resp: httpx.Response, marker: bytes | None) -> None:
+        """An HTML answer carrying the source's declared "no data" marker is NoData, not a content-type failure."""
+        if marker is None:
+            return
+        ctype = resp.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if ctype != "text/html":
+            return
+        head = b""
+        for chunk in resp.iter_bytes():
+            head += chunk
+            if len(head) >= _NO_DATA_SNIFF_BYTES:
+                break
+        if marker in head[:_NO_DATA_SNIFF_BYTES]:
+            raise NoData("the source has no data for this query")
+        raise ContentTypeMismatch(f"content-type {ctype!r} without the source's no-data marker")
 
     def _read_body(self, resp: httpx.Response, cap: int, content_types: frozenset[str], started: float) -> bytes:
         ctype = resp.headers.get("content-type", "").split(";", 1)[0].strip().lower()

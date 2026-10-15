@@ -8,7 +8,7 @@ Status labels: **VERIFIED** (executed, with evidence) · **IMPLEMENTED, NOT VERI
 
 | Suite | Result |
 |---|---|
-| Backend `pytest` (unit, property, oracle, data, services, API, security, red-team) | **VERIFIED — 1,231 passed, 1 skipped (opt-in live-network test)** |
+| Backend `pytest` (unit, property, oracle, data, services, API, security, red-team) | **VERIFIED — 1,237 passed, 1 skipped (opt-in live-network test)** (Track 6 re-run; 1,231 before the 6 new tax tests) |
 | Backend `ruff check` / `ruff format --check` / `mypy --strict` (69 source files) | **VERIFIED — ruff clean, 134 files formatted, mypy --strict: no issues in 69 source files** |
 | Frontend `vitest` | **VERIFIED — 208 passed (23 files)** |
 | Frontend `tsc` type-check and production build | **VERIFIED — tsc OK; Vite production build OK** |
@@ -23,7 +23,7 @@ Status labels: **VERIFIED** (executed, with evidence) · **IMPLEMENTED, NOT VERI
 | Returns, CAGR, TWR, XIRR, costs | `tests/unit/test_returns.py`, `test_costs.py`, property tests | **pyxirr**, **scipy brentq** (worst 9.8e-10) |
 | Fixed income (T-bill, G-sec, corporates, YTM/YTC, duration, convexity) | `tests/unit/test_fixed_income.py`, properties | **QuantLib 1.44** (1e-8 … 1e-10); reproduces RBI 14-Oct-2026 auction cut-off yields |
 | Deposits (FD, DICGC) | `tests/unit/test_deposits.py` | QuantLib compounding (₹1e-6) |
-| Tax (65 versioned rules, ITA 1961 → 2025) | `tests/unit/test_tax.py`, `test_rules_loader.py` | **None exists** → IMPLEMENTED, NOT VERIFIED (CA review required) |
+| Tax (65 versioned rules, ITA 1961 → 2025; table `india-tax@2026-10-15.r2`) | `tests/unit/test_tax.py`, `test_rules_loader.py` (incl. 3 correction regression tests and a primary-citation check on every rule upgraded from NV) | No computational oracle exists. Rules checked against the **statute text** (Income-tax Act 2025 as amended by FA 2026; Finance Acts 2024, 2025, 2026; ITA 1961): 51 P / 6 S / 8 NV (was 31 / 14 / 20) → IMPLEMENTED, NOT VERIFIED until CA sign-off (`docs/finance/ca-review-packet.md`) |
 | Risk metrics, scenarios | `tests/unit/test_risk_metrics.py`, `test_scenarios.py`, properties | **numpy/scipy/QuantLib** (1e-9 … 1e-12) |
 | Forecast baselines, walk-forward, DM-HLN, feasibility | `tests/forecasting/*` incl. a planted-future-information leakage test | **scoringrules** (1e-12) |
 | Ranking policy 1.1.0 | `tests/unit/test_ranking.py` + 6 Hypothesis invariants (permutation invariance, partition, junk-candidate stability, tier monotonicity, no projected loss under preservation) | — |

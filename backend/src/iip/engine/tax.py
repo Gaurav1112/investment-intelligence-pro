@@ -274,6 +274,7 @@ class TaxRuleSet:
     withholding: tuple[WithholdingRule, ...]
     deductions: tuple[DeductionRule, ...]
     levies: tuple[TransactionLevy, ...]
+    table_version: str = ""  # bumped on every value/status change (india.yaml header)
 
     def _all(self) -> Iterable[ActPeriod | VersionedRule]:
         yield from self.acts

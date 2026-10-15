@@ -256,6 +256,7 @@ class _LevyM(_Versioned):
 
 class _TaxFileM(_Strict):
     schema_version: Literal[1]
+    table_version: str
     jurisdiction: Literal["IN"]
     snapshot_date: date
     coverage_to: date
@@ -340,6 +341,7 @@ def parse_tax_rules(data: Mapping[str, Any]) -> TaxRuleSet:
         raise RuleTableError(str(exc)) from exc
     ruleset = TaxRuleSet(
         schema_version=f.schema_version,
+        table_version=f.table_version,
         jurisdiction=f.jurisdiction,
         snapshot_date=f.snapshot_date,
         coverage_to=f.coverage_to,

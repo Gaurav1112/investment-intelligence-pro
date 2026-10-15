@@ -119,5 +119,9 @@ def seed(conn: sqlite3.Connection, *, as_of: date, now: datetime) -> list[str]:
             " VALUES (?, 'FIXTURE Bank', '0.0700', 'quarterly', 180, '0.0100', 1, ?, ?) ON CONFLICT DO NOTHING",
             (fd, as_of.isoformat(), FIXTURE_URL),
         )
+        # The synthetic investor states ₹0 at this fictional bank (an unstated figure blocks the DICGC check).
+        conn.execute(
+            "INSERT INTO settings(key, value_json) VALUES (?, '\"0\"') ON CONFLICT DO NOTHING", (f"fd.existing:{fd}",)
+        )
     created.append(fd)
     return created

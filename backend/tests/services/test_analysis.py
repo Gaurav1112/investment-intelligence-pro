@@ -5,6 +5,7 @@ from collections.abc import Iterator
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -471,3 +472,15 @@ def test_conflicted_series_is_never_evaluated(conn: Any) -> None:
         with pytest.raises(an.AnalysisError) as e:
             call()
         assert e.value.status == 409 and e.value.code == "SOURCE_CONFLICT"
+
+
+def test_elss_by_name_only_shows_its_lock_in() -> None:
+    """ECC PR-2: live AMFI files some ELSS index funds under "Index Funds - Equity Funds"; the ELSS marker is only in
+    the scheme name. The compare row must still show the 3-year lock-in, not 0. (Only a > 3-year horizon makes the
+    row evaluable, which fixture history cannot support, so the row's helper is tested directly.)"""
+    elss = SimpleNamespace(kind="mf_scheme", category="Index Funds - Equity Funds",
+                           name="XYZ ELSS Tax Saver Index Fund - Direct Growth")  # fmt: skip
+    assert an._lock_in_days(elss) == 1095  # type: ignore[arg-type]
+    plain = SimpleNamespace(kind="mf_scheme", category="Index Funds - Equity Funds", name="XYZ Nifty 50 Index Fund")
+    assert an._lock_in_days(plain) == 0  # type: ignore[arg-type]
+    assert an._lock_in_days(SimpleNamespace(kind="fd", category=None, name="FD")) is None  # type: ignore[arg-type]

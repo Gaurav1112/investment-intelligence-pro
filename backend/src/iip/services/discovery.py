@@ -31,6 +31,7 @@ from iip.engine.ranking import (
     rank,
 )
 from iip.services import bonds, inputs
+from iip.services import portfolio as pf
 from iip.services.explain import badge, source_ref
 from iip.services.instruments import FD_RATE_STALE_DAYS, TBILL_STALE_DAYS
 from iip.services.profile import ILLUSTRATIVE_AMOUNT, ILLUSTRATIVE_HORIZON_DAYS, ProfileStatus
@@ -247,6 +248,7 @@ def build_universe(  # noqa: PLR0915 - one linear pass per instrument kind
             sources[iid]["freshness"] = badge(sources[iid], as_of)
 
     if "fd" not in excluded_kinds:
+        held_at_bank = pf.fd_principal_by_bank(conn)  # ECC F1: FDs already in your actual portfolios count too
         for r in conn.execute(
             "SELECT i.instrument_id, i.name, i.origin, i.created_at, d.* FROM instruments i"
             " JOIN deposit_terms d USING(instrument_id)"
@@ -254,10 +256,7 @@ def build_universe(  # noqa: PLR0915 - one linear pass per instrument kind
         ):
             iid, name = r["instrument_id"], r["name"]
             rate_date = date.fromisoformat(r["rate_as_of"])
-            existing_row = conn.execute(
-                "SELECT value_json FROM settings WHERE key=?", (f"fd.existing:{iid}",)
-            ).fetchone()
-            existing = Decimal(json.loads(existing_row["value_json"])) if existing_row else D("0")
+            existing = pf.existing_fd_deposits(conn, iid, held_at_bank)
             if rate_date > as_of:
                 b = cb._ineligible(iid, name, Tier.T2, [f"LOOK_AHEAD: rate dated {rate_date}, after the analysis date"],
                                    amount)  # fmt: skip

@@ -139,6 +139,17 @@ def test_fd_over_dicgc_limit_drops_to_t3_with_flag() -> None:
     assert b.candidate.loss_frequency is None
 
 
+def test_fd_unrecorded_existing_deposits_are_not_assumed_zero() -> None:
+    """ECC silent-failure F1: with nothing recorded at this bank, DICGC cover cannot be established, so the deposit
+    is never shown as zero-loss insured credit."""
+    b = _fd(other_deposits_same_bank=None)
+    c = b.candidate
+    assert "EXISTING_DEPOSITS_NOT_RECORDED" in c.flags and "EXCEEDS_DICGC_LIMIT_AT_THIS_BANK" not in c.flags
+    assert c.tier is Tier.T3 and c.loss_frequency is None and c.credit_rating == "UNRATED"
+    assert dict(b.evidence.inputs)["dicgc_existing_deposits"] == "not recorded"  # type: ignore[union-attr]
+    assert "dicgc_exposure_at_bank" not in dict(b.evidence.inputs)  # type: ignore[union-attr]
+
+
 def test_nbfc_deposit_never_insured() -> None:
     b = _fd(dicgc_eligible=False)
     assert b.candidate.tier is Tier.T3 and "NOT_DICGC_INSURED" in b.candidate.flags

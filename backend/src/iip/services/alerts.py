@@ -80,27 +80,40 @@ def _guarded(c: Candidate, rule: str) -> Candidate:
     return c
 
 
-def _held_and_watched(conn: sqlite3.Connection) -> dict[str, str]:
-    """instrument_id → why it is checked ('held' / 'watched'); actual portfolios only (hypothetical are excluded)."""
+def _held_and_watched(conn: sqlite3.Connection) -> tuple[dict[str, str], list[tuple[str, str]]]:
+    """instrument_id → why it is checked ('held' / 'watched'); actual portfolios only (hypothetical are excluded).
+
+    Also returns (portfolio_id, error code) for every actual book that cannot be replayed: its holdings are unknown,
+    so they cannot be checked, and that must be reported rather than skipped silently (ECC F2)."""
     out: dict[str, str] = {}
+    unreadable: list[tuple[str, str]] = []
     for p in conn.execute("SELECT portfolio_id FROM portfolios WHERE nature='actual' ORDER BY portfolio_id"):
         try:
             positions = pf.fifo_positions(pf.load_txns(conn, p["portfolio_id"]))
-        except pf.PortfolioError:
+        except pf.PortfolioError as exc:
+            unreadable.append((p["portfolio_id"], exc.code))
             continue
         for iid, pos in positions.items():
             if pos.units > 0:
                 out[iid] = "held"
     for w in conn.execute("SELECT instrument_id FROM watchlist ORDER BY instrument_id"):
         out.setdefault(w["instrument_id"], "watched")
-    return out
+    return out, unreadable
 
 
-def _stale(conn: sqlite3.Connection, now: datetime) -> list[Candidate]:
+def _stale(conn: sqlite3.Connection, now: datetime) -> tuple[list[Candidate], list[str]]:
     rule = "stale data for held or watched instruments"
     out: list[Candidate] = []
     as_of = now.date()
-    for iid, why in sorted(_held_and_watched(conn).items()):
+    checked, unreadable = _held_and_watched(conn)
+    for pid, code in unreadable:
+        body = (
+            f"the stored transactions of portfolio {pid} cannot be replayed ({code}), so its holdings could not be "
+            "checked for stale data. Review or re-import that portfolio's transactions."
+        )
+        out.append(Candidate("inconsistent_book", "critical", pid, _rule_text(rule, body), "user.transactions", None,
+                             f"inconsistent-book:{pid}:{code}"))  # fmt: skip
+    for iid, why in sorted(checked.items()):
         inst = conn.execute("SELECT * FROM instruments WHERE instrument_id=?", (iid,)).fetchone()
         if inst is None:
             continue
@@ -141,7 +154,7 @@ def _stale(conn: sqlite3.Connection, now: datetime) -> list[Candidate]:
                 )
                 out.append(Candidate("stale_data", "warning", iid, _rule_text(rule, body), "deposit_terms",
                                      t["rate_as_of"], f"stale:{iid}:{t['rate_as_of']}"))  # fmt: skip
-    return [_guarded(c, rule) for c in out]
+    return [_guarded(c, rule) for c in out], [f"{pid}: {code}" for pid, code in unreadable]
 
 
 def _portfolio_rules(conn: sqlite3.Connection, now: datetime, rules: AlertRules) -> tuple[list[Candidate], list[str]]:
@@ -247,10 +260,13 @@ def evaluate(
 ) -> dict[str, Any]:
     rules = load_rules(conn)
     candidates: list[Candidate] = []
+    skipped: list[str] = []
     if rules.stale_data:
-        candidates += _stale(conn, now)
-    port, skipped = _portfolio_rules(conn, now, rules)
+        stale, skipped = _stale(conn, now)
+        candidates += stale
+    port, port_skipped = _portfolio_rules(conn, now, rules)
     candidates += port
+    skipped = sorted({*skipped, *port_skipped})  # one entry per unreadable book, whichever check found it
     if rules.decline_since_added_beyond is not None:
         candidates += _decline(conn, now, rules.decline_since_added_beyond)
     if rules.tax_coverage_within_days is not None:

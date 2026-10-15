@@ -70,7 +70,7 @@ restore-encrypted: ## Decrypt + verify the newest (or BACKUP=…) into a NEW fil
 	$(PY) -m iip.store.encrypted_backup restore --data-dir "$(IIP_DATA_DIR)" $(if $(BACKUP),--backup "$(BACKUP)") $(if $(DEST),--dest "$(DEST)")
 
 restore-drill:   ## Prove the newest backup restores (REL-40) into a temp file — never touches the live DB
-	$(PY) -c "import os,pathlib,tempfile;from iip.store.db import restore,connect,integrity_ok;b=sorted((pathlib.Path(os.environ['IIP_DATA_DIR'])/'backups').glob('iip-*'))[-1];t=pathlib.Path(tempfile.mkdtemp())/'r.db';restore(b,t);print('restore OK' if integrity_ok(connect(t)) else 'RESTORE FAILED',b)"
+	$(PY) -c "import os,pathlib,tempfile;from iip.store.db import restore,connect,integrity_ok;d=pathlib.Path(os.environ['IIP_DATA_DIR'])/'backups';b=max([*d.glob('iip-*.sqlite3'),*d.glob('iip-*.db')],key=lambda p:p.stat().st_mtime);td=tempfile.TemporaryDirectory();t=pathlib.Path(td.name)/'r.db';restore(b,t);c=connect(t);ok=integrity_ok(c);c.close();td.cleanup();print('restore OK (temp copy deleted)' if ok else 'RESTORE FAILED',b);raise SystemExit(0 if ok else 1)"
 
 clean:           ## Remove build artefacts (never touches $(IIP_DATA_DIR))
 	rm -rf $(FRONTEND)/dist $(BACKEND)/.pytest_cache $(BACKEND)/.mypy_cache $(BACKEND)/.ruff_cache

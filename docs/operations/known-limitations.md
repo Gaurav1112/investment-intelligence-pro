@@ -51,7 +51,7 @@ Living document, last updated 2026-10-15 (track 5: open findings resolved).
 | Equity shock | Simplification, labelled | Applied to the fund's NAV with β = 1. Market beta is not estimated. |
 | Scenario impacts | Before tax | Tax on the changed gain is not recomputed. |
 | Forecast inputs | Note | NAVs are converted Decimal→float in the service layer before the forecasting engine, which is float-based by design. Outputs return to Decimal at the boundary. |
-| DICGC aggregation | Conservative | "Existing deposits" entered against several FDs at one bank are summed. This can overstate exposure; it never understates it. |
+| DICGC aggregation | Conservative, with one gap | For a prospective FD, deposits already at that bank = the figure you entered with the FD **plus** open FD principal at cost at the same bank (same name and insured status) in all your actual portfolios (ECC F1). A figure that already includes those FDs is counted twice, and figures entered against several FDs at one bank are summed; both can only overstate. If neither a figure nor a recorded FD exists (e.g. an API call that omits it), cover cannot be established: the FD is flagged `EXISTING_DEPOSITS_NOT_RECORDED`, tier T3, UNRATED, never zero-loss. **Gap:** recorded FDs count at principal (accrued interest not added) and deposits held outside the app count only if you type them in. FDs entered before this change stored ₹0 when the figure was omitted and are read as ₹0; re-enter them to state the figure. |
 
 ## Findings from the red-team audit (docs/audit/final-red-team-report.md)
 

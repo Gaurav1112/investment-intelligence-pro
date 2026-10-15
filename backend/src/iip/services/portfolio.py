@@ -39,7 +39,7 @@ from iip.engine.returns import CashFlow, XirrOutcome, xirr
 from iip.engine.stats.metrics import hhi_from_values
 from iip.services import ingestion
 from iip.services.explain import source_ref
-from iip.services.instruments import TBILL_STALE_DAYS
+from iip.services.instruments import TBILL_STALE_DAYS, _slug
 from iip.store.db import backup as db_backup
 from iip.store.db import current_version, write_tx
 
@@ -501,6 +501,23 @@ def _already_applied(conn: sqlite3.Connection, portfolio_id: str, sha: str) -> b
     )
 
 
+def claim_previewed_batch(conn: sqlite3.Connection, key: str, portfolio_id: str, sha: str) -> None:
+    """Inside the write transaction: atomically move the batch from 'previewed' to 'applying' (ECC F1/DB-2).
+
+    The checks before the transaction are only a fast path. Two concurrent applies both pass them, so the batch is
+    claimed here with a conditional UPDATE under BEGIN IMMEDIATE, and only the request whose UPDATE changed the row
+    may insert. The file-level "already imported into this portfolio" check is repeated under the same lock."""
+    cur = conn.execute(
+        "UPDATE settings SET value_json=json_set(value_json, '$.status', 'applying')"
+        " WHERE key=? AND json_extract(value_json, '$.status')='previewed'",
+        (key,),
+    )
+    if cur.rowcount != 1:
+        raise PortfolioError("ALREADY_APPLIED", "this import batch has already been applied", 409)
+    if _already_applied(conn, portfolio_id, sha):
+        raise PortfolioError("ALREADY_APPLIED", "this file has already been imported into this portfolio", 409)
+
+
 def preview_holdings_import(
     conn: sqlite3.Connection, portfolio_id: str, data: bytes, filename: str, encoding: str | None, now: datetime
 ) -> dict[str, Any]:
@@ -590,6 +607,7 @@ def apply_holdings_import(
     if pre_change is not None:
         pre_change()
     with write_tx(conn):
+        claim_previewed_batch(conn, key, pid, sha256)
         _portfolio(conn, pid)
         for item in pending:
             conn.execute(
@@ -770,7 +788,7 @@ def _split_by_lots(total: Decimal, lots: Sequence[Lot], weights: Sequence[Decima
 def _lot_days(h: Holding, lot: Lot, as_of: date) -> int | None:
     if h.kind == "mf_scheme":
         settle = 1 if mf_tier_from_category(h.category) is Tier.T3 else 3
-        lock = mf_lock_in_days(h.category)
+        lock = mf_lock_in_days(h.category, h.name)  # ELSS may be marked only in the name (ECC PR-2)
         unlock_wait = max(0, (lot.acquired + timedelta(days=lock) - as_of).days) if lock else 0
         return unlock_wait + settle
     if h.kind == "fd" and h.tenure_days is not None:
@@ -840,6 +858,56 @@ def _positions_for(conn: sqlite3.Connection, portfolio_id: str) -> dict[str, Pos
         return fifo_positions(load_txns(conn, portfolio_id))
     except Oversell as exc:  # cannot happen through the API; a hand-edited DB must not produce numbers
         raise PortfolioError("INCONSISTENT_BOOK", f"stored transactions are inconsistent: {exc.message}", 409) from exc
+
+
+BankKey = tuple[str, bool]  # (institution slug, DICGC-eligible): RT-27 — an NBFC never shares a bank's cover
+
+
+def _bank_key(institution: str, dicgc_eligible: object) -> BankKey:
+    return _slug(institution), bool(dicgc_eligible)
+
+
+def fd_principal_by_bank(conn: sqlite3.Connection) -> dict[BankKey, Decimal] | None:
+    """Open FD principal at cost per bank across ALL actual portfolios (DICGC cover is per depositor per bank).
+
+    None when any actual book cannot be replayed: the exposure is then unknown, never assumed to be ₹0."""
+    out: dict[BankKey, Decimal] = {}
+    for p in conn.execute("SELECT portfolio_id FROM portfolios WHERE nature='actual' ORDER BY portfolio_id"):
+        try:
+            positions = _positions_for(conn, p["portfolio_id"])
+        except PortfolioError:
+            return None
+        for pos in positions.values():
+            if pos.units <= 0:
+                continue
+            t = conn.execute(
+                "SELECT d.institution, d.dicgc_eligible FROM deposit_terms d JOIN instruments i USING(instrument_id)"
+                " WHERE i.instrument_id=? AND i.kind='fd'",
+                (pos.instrument_id,),
+            ).fetchone()
+            if t is not None:
+                k = _bank_key(t["institution"], t["dicgc_eligible"])
+                out[k] = out.get(k, ZERO) + pos.cost
+    return out
+
+
+def existing_fd_deposits(conn: sqlite3.Connection, iid: str, held: dict[BankKey, Decimal] | None) -> Decimal | None:
+    """Deposits the user already has at the bank of FD ``iid``, for the DICGC check of a new deposit (ECC F1).
+
+    = the figure entered with this FD (if any) + open FD principal at the same bank in the actual portfolios
+    (``held`` from :func:`fd_principal_by_bank`). None when neither is recorded, or the books cannot be read. A
+    typed figure that already includes the recorded FDs is counted twice, which can only overstate exposure."""
+    row = conn.execute("SELECT value_json FROM settings WHERE key=?", (f"fd.existing:{iid}",)).fetchone()
+    raw = json.loads(row["value_json"]) if row else None
+    manual = None if raw is None else Decimal(raw)
+    t = conn.execute("SELECT institution, dicgc_eligible FROM deposit_terms WHERE instrument_id=?", (iid,)).fetchone()
+    if held is None or t is None:
+        return None
+    k = _bank_key(t["institution"], t["dicgc_eligible"])
+    if manual is None and k not in held:
+        return None
+    with engine_context():
+        return (manual or ZERO) + held.get(k, ZERO)
 
 
 def _dicgc(conn: sqlite3.Connection, portfolio: sqlite3.Row, as_of: date) -> dict[str, Any]:
@@ -1289,10 +1357,18 @@ def backups_dir(data_dir: Path) -> Path:
     return data_dir / "backups"
 
 
+_BACKUP_GLOBS = ("iip-*.sqlite3", "iip-*.db", "iip-*.db.enc", "*.partial")
+_RESTORED_GLOBS = ("restored-*.db", "restored-*.db.partial")
+
+
 def _backup_files(data_dir: Path) -> list[Path]:
+    """Every copy of user data the app's own tools write (ECC SR-01). Erase must find every copy:
+    the API writes backups/iip-*.sqlite3, `make backup` iip-*.db, `make backup-encrypted` iip-*.db.enc, and
+    `make restore-encrypted` a PLAINTEXT <data-dir>/restored-*.db; an interrupted write leaves a *.partial file."""
     d = backups_dir(data_dir)
-    # Both naming schemes: the API writes iip-*.sqlite3, `make backup` writes iip-*.db. Erase must find every copy.
-    return sorted([*d.glob("iip-*.sqlite3"), *d.glob("iip-*.db")]) if d.exists() else []
+    found = {p for g in _BACKUP_GLOBS for p in d.glob(g)} if d.exists() else set()
+    found |= {p for g in _RESTORED_GLOBS for p in data_dir.glob(g)} if data_dir.exists() else set()
+    return sorted(p for p in found if p.is_file())
 
 
 assert all(t.isidentifier() for t in PUBLIC_TABLES)

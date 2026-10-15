@@ -54,6 +54,7 @@ from iip.engine.ranking import Tier
 from iip.engine.stats import metrics as rm
 from iip.engine.stats.series import Frequency, ReturnSeries
 from iip.services import bonds, discovery, inputs
+from iip.services import portfolio as pf
 from iip.services import profile as profile_svc
 from iip.services.explain import badge, source_ref
 from iip.services.instruments import FD_RATE_STALE_DAYS, TBILL_STALE_DAYS
@@ -189,7 +190,7 @@ class Built:
     maturity: date | None = None
     institution: str | None = None
     dicgc_eligible: bool | None = None
-    existing_same_bank: Decimal = ZERO
+    existing_same_bank: Decimal | None = ZERO  # None = nothing recorded at this bank (cover cannot be established)
     extra: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -340,11 +341,6 @@ def _build_tbill(
     return Built(iid, name, "tbill", b, (), prov, maturity=maturity)
 
 
-def _existing_deposits(conn: sqlite3.Connection, iid: str) -> Decimal:
-    row = conn.execute("SELECT value_json FROM settings WHERE key=?", (f"fd.existing:{iid}",)).fetchone()
-    return Decimal(json.loads(row["value_json"])) if row else ZERO
-
-
 def _build_fd(
     conn: sqlite3.Connection,
     inst: sqlite3.Row,
@@ -362,7 +358,7 @@ def _build_fd(
         return Built(iid, name, "fd", None, ("MISSING_DATA: no deposit terms stored",), {"kind": "fd",
                      "fixture": fixture})  # fmt: skip
     rate_date = date.fromisoformat(r["rate_as_of"])
-    existing = _existing_deposits(conn, iid)
+    existing = pf.existing_fd_deposits(conn, iid, pf.fd_principal_by_bank(conn))  # ECC F1: typed + recorded
     if rate_date > as_of:
         b = cb._ineligible(iid, name, Tier.T2, [f"LOOK_AHEAD: rate dated {rate_date}, after the analysis date"],
                            amount)  # fmt: skip
@@ -695,6 +691,11 @@ def _exit_cost(b: Built) -> dict[str, Any]:
     )
 
 
+def _lock_in_days(b: Built) -> int | None:
+    """Scheme lock-in, detected from the category AND the name (some ELSS index funds say ELSS only in the name)."""
+    return cb.mf_lock_in_days(b.category or "", b.name) if b.kind == "mf_scheme" else None
+
+
 def _compare_row(b: Built, ctx: Context, infl: _Inflation | tuple[str, str]) -> dict[str, Any]:
     row: dict[str, Any] = {
         "instrument_id": b.instrument_id,
@@ -792,7 +793,7 @@ def _compare_row(b: Built, ctx: Context, infl: _Inflation | tuple[str, str]) -> 
             "returns": rets,
             "liquidity": {
                 "days_to_cash": c.days_to_cash,
-                "lock_in_days": cb.mf_lock_in_days(b.category or "") if b.kind == "mf_scheme" else None,
+                "lock_in_days": _lock_in_days(b),
             },
             "exit_cost": _exit_cost(b),
             "real_return": _real_returns(b, ctx, infl),
@@ -1629,7 +1630,10 @@ def _dicgc(built: Sequence[Built], alloc: Sequence[Decimal], as_of: date) -> dic
         else:
             notes.append(f"{b.instrument_id}: interest not included (deposit not evaluable); exposure understated")
         holdings.append(DepositHolding(b.institution, itype, "you", a, interest))
-        if b.existing_same_bank > 0:
+        if b.existing_same_bank is None:
+            notes.append(f"{b.instrument_id}: your other deposits at {b.institution} are not recorded, so DICGC "
+                         "cover cannot be established; exposure may be understated")  # fmt: skip
+        elif b.existing_same_bank > 0:
             holdings.append(DepositHolding(b.institution, itype, "you", b.existing_same_bank, ZERO))
             notes.append(f"{b.instrument_id}: includes your recorded existing deposits at {b.institution} "
                          "(may double count if entered for several deposits at this institution)")  # fmt: skip

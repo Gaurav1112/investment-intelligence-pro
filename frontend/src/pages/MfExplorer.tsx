@@ -94,6 +94,58 @@ export type JobStep = Partial<RunSummary> & {
 };
 
 export const MAX_JOB_STEPS = 200;
+export const MAX_BATCH = 100;
+
+/** One step of a batch backfill (hosted) or its final answer (both modes). Counts are the server's. */
+export type BatchStep = Omit<JobStep, "status"> & {
+  /** "skipped": every selected scheme was backfilled in the last 15 minutes, so nothing was asked of AMFI. */
+  status?: RunSummary["status"] | "skipped";
+  amcs_done?: number;
+  amcs_total?: number;
+  amc?: string;
+  stored?: number;
+  fund_houses?: { amc: string; status: string; error: string | null; schemes: { amfi_code: number; stored: number }[] }[];
+  skipped?: { amfi_code: number; retry_after_s: number }[];
+};
+
+/** Plain-English progress for one batch step (nothing is computed here; the counts come from the server). */
+export function batchStepText(s: BatchStep): string {
+  if (s.phase === "discovering") return `finding AMFI's fund-house id${s.amc ? ` for ${s.amc}` : ""}…`;
+  return (
+    `${s.amcs_done ?? 0} of ${s.amcs_total ?? 0} fund houses done · fetched ${s.windows_done ?? 0} of ` +
+    `${s.windows_total ?? 0} date windows · ${s.stored ?? 0} NAVs stored…`
+  );
+}
+
+/** The final answer as activity lines: a summary, one line per fund house, and the skipped schemes. */
+export function batchResultLines(s: BatchStep, nameOf: (code: number) => string): Activity[] {
+  const key = s.run_id ?? `batch-${s.detail ?? ""}`;
+  const out: Activity[] = [];
+  const skipped = s.skipped ?? [];
+  if (s.status !== "skipped") {
+    out.push(runText("History backfill for the selected schemes", { ...s, status: s.status } as RunSummary));
+  }
+  for (const h of s.fund_houses ?? []) {
+    const parts = h.schemes.map((x) => `${nameOf(x.amfi_code)}: ${x.stored ? `${x.stored} NAVs stored` : "nothing new"}`);
+    out.push({
+      key: `${key}-${h.amc}`,
+      tone: h.status === "failed" ? "warn" : "ok",
+      text: h.status === "failed" ? `${h.amc}: not backfilled — ${h.error ?? "failed"}.` : `${h.amc}: ${parts.join("; ")}.`,
+    });
+  }
+  if (skipped.length) {
+    const wait = Math.max(...skipped.map((x) => x.retry_after_s));
+    const minutes = Math.max(1, Math.ceil(wait / 60));
+    out.push({
+      key: `${key}-skipped`,
+      tone: "warn",
+      text:
+        `Skipped, because they were backfilled in the last 15 minutes: ${skipped.map((x) => nameOf(x.amfi_code)).join("; ")}. ` +
+        `Try them again in about ${minutes} minute${minutes === 1 ? "" : "s"}.`,
+    });
+  }
+  return out;
+}
 
 /** Plain-English progress for one step (counts are the server's; nothing is computed here). */
 export function stepText(s: JobStep): string {
@@ -104,9 +156,14 @@ export function stepText(s: JobStep): string {
 
 /** Call `step` until the server says the job is done; report each unfinished step. Bounded, never endless. */
 export async function runUntilDone(step: () => Promise<JobStep>, onProgress: (s: JobStep) => void): Promise<RunSummary> {
+  return (await stepUntilDone(step, onProgress)) as RunSummary;
+}
+
+/** The same bounded loop for any step shape (the batch backfill returns more than a run summary). */
+export async function stepUntilDone<T extends { done?: boolean }>(step: () => Promise<T>, onProgress: (s: T) => void): Promise<T> {
   for (let i = 0; i < MAX_JOB_STEPS; i++) {
     const s = await step();
-    if (s.done !== false) return s as RunSummary;
+    if (s.done !== false) return s;
     onProgress(s);
   }
   throw new Error("JOB_DID_NOT_FINISH");
@@ -190,6 +247,9 @@ export default function MfExplorer() {
   const [navPending, setNavPending] = useState(false);
   const [progress, setProgress] = useState("");
   const [editing, setEditing] = useState<InstrumentListItem | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [years, setYears] = useState("10");
+  const [batchPending, setBatchPending] = useState(false);
   // Arriving from a "Enter exit load" link (Discovery ledger, instrument page): open that scheme's form once listed.
   const wantExitLoad = params.get("exit_load");
   useEffect(() => {
@@ -246,7 +306,52 @@ export default function MfExplorer() {
     }
   }
 
+  const selectable = (r: InstrumentListItem) => !r.fixture && Boolean(r.amfi_code);
+  const toggle = (code: string) =>
+    setSelected((cur) => {
+      const next = new Set(cur);
+      if (next.has(code)) next.delete(code);
+      else next.add(code);
+      return next;
+    });
+  const yearsValid = /^\d+$/.test(years.trim()) && Number(years) >= 1 && Number(years) <= 20;
+
+  async function backfillSelected() {
+    const codes = [...selected].map((c) => Number(c));
+    const names = new Map((list.data?.items ?? []).map((r) => [Number(r.amfi_code), r.name]));
+    const nameOf = (c: number) => names.get(c) ?? `AMFI ${c}`;
+    setBatchPending(true);
+    try {
+      const s = await stepUntilDone(
+        () =>
+          api<BatchStep>("/api/ingestion/backfill-batch", { method: "POST", body: { amfi_codes: codes, years: Number(years) } }),
+        (p) => setProgress(`History backfill for ${codes.length} selected scheme${codes.length === 1 ? "" : "s"}: ${batchStepText(p)}`),
+      );
+      batchResultLines(s, nameOf).reverse().forEach(log);
+      setSelected(new Set());
+      list.reload();
+    } catch (e) {
+      log({ key: `batch-${Date.now()}`, tone: "warn", text: `History backfill for the selected schemes failed: ${jobErrorText(e)}` });
+    } finally {
+      setBatchPending(false);
+      setProgress("");
+    }
+  }
+
   const columns: Column<InstrumentListItem>[] = [
+    {
+      key: "select",
+      header: "Select",
+      render: (r) =>
+        selectable(r) ? (
+          <input
+            type="checkbox"
+            checked={selected.has(String(r.amfi_code))}
+            onChange={() => toggle(String(r.amfi_code))}
+            aria-label={`Select ${r.name}`}
+          />
+        ) : null,
+    },
     {
       key: "name",
       header: "Scheme",
@@ -344,6 +449,40 @@ export default function MfExplorer() {
           {list.data.truncated ? " (only the first 500 matches are shown — refine the search)" : ""}. Sorted by scheme name, not
           ranked for you. Select a column heading to sort by it.
         </p>
+        <div className="card" role="group" aria-labelledby="mf-batch-title">
+          <h2 id="mf-batch-title">Backfill several schemes</h2>
+          <p className="small muted">
+            Tick the schemes you want, then backfill them together. AMFI&apos;s history report covers a whole fund house per
+            request, so the selection is grouped by fund house and AMFI is asked once per fund house and date window; only
+            the schemes you ticked are stored. Up to {MAX_BATCH} at a time.
+          </p>
+          <div className="row">
+            <button type="button" className="btn" onClick={() => setSelected(new Set(items.filter(selectable).map((r) => String(r.amfi_code))))}>
+              Select all shown
+            </button>
+            <button type="button" className="btn" disabled={selected.size === 0} onClick={() => setSelected(new Set())}>
+              Clear
+            </button>
+            <label htmlFor="mf-years">Years of history</label>
+            <input id="mf-years" className="input-short" inputMode="numeric" value={years} onChange={(e) => setYears(e.target.value)}
+              aria-invalid={!yearsValid} aria-describedby="mf-batch-hint" />
+            <button
+              type="button"
+              className="btn btn--primary"
+              disabled={selected.size === 0 || selected.size > MAX_BATCH || !yearsValid || batchPending}
+              onClick={() => void backfillSelected()}
+            >
+              {batchPending ? "Backfilling selected…" : `Backfill history for ${selected.size} selected`}
+            </button>
+          </div>
+          <p id="mf-batch-hint" className="small subtle">
+            {!yearsValid
+              ? "Years of history: a whole number from 1 to 20."
+              : selected.size > MAX_BATCH
+                ? `${selected.size} selected — at most ${MAX_BATCH} at a time; clear some first.`
+                : "Each scheme can be backfilled once per 15 minutes; recently backfilled ones are skipped and listed."}
+          </p>
+        </div>
         <DataTable rows={items} columns={columns} rowKey={(r) => r.instrument_id} caption="Stored mutual fund schemes, sorted by name" initialSort={{ key: "name", dir: "ascending" }} tall stickyFirst />
       </>
     );

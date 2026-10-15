@@ -22,3 +22,11 @@ describe("errorText for a NAVAll fetch already running", () => {
     expect(errorText(e)).toBe("The AMFI latest-NAV fetch is already running. Try again in about 1 minute.");
   });
 });
+
+describe("errorText for a structured refusal", () => {
+  it("shows the server's message and the codes it lists", () => {
+    const detail = { code: "UNKNOWN_SCHEMES", unknown: [123456], message: "not stored schemes; run the AMFI NAV ingestion first" };
+    const e = new ApiError(404, "REQUEST_FAILED", { detail });
+    expect(errorText(e)).toBe("not stored schemes; run the AMFI NAV ingestion first (123456) (HTTP 404)");
+  });
+});

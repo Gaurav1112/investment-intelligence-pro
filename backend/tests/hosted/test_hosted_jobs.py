@@ -414,3 +414,38 @@ def test_a_cold_start_does_not_interrupt_a_job_still_in_progress(db: Path) -> No
         rows = {r["run_id"]: r["status"] for r in state(c2).conn.execute("SELECT run_id, status FROM ingestion_runs")}
     assert rows[run_id] == "running" and rows[stale] == "failed"
     assert ORIGIN
+
+
+def test_batch_backfill_route_steps_until_done_and_then_limits_each_scheme(db: Path) -> None:
+    """Walkthrough 2026-10-15: several selected schemes, one pass per fund house, in bounded hosted steps."""
+    with make_client(db) as c:
+        h = login(c)
+        st = state(c)
+        code, amc = _history_scheme()
+        ing.sync_sources(st.conn)
+        st.conn.execute(
+            "INSERT INTO instruments(instrument_id, kind, name, amfi_code, origin, created_at)"
+            " VALUES (?, 'mf_scheme', 'A scheme', ?, 'source', ?)",
+            (f"mf:{code}", str(code), NOW.isoformat()),
+        )
+        st.conn.execute(
+            "INSERT INTO mf_schemes(instrument_id, amc, category_raw, sebi_category, plan)"
+            " VALUES (?, ?, 'x', 'x', 'direct')",
+            (f"mf:{code}", amc),
+        )
+        st.fetcher_factory = lambda: fetcher(_probe_handler(1))
+        st.pause = lambda _s: None
+        st.job_budget_s = 0.0  # every call does exactly one unit of work
+        body = {"amfi_codes": [code], "years": 1}
+        calls = []
+        while True:
+            r = c.post("/api/ingestion/backfill-batch", json=body, headers=h)
+            assert r.status_code == 200, r.text
+            calls.append(r.json())
+            if r.json()["done"]:
+                break
+            assert {"amcs_done", "amcs_total", "windows_done", "windows_total", "stored"} <= r.json().keys()
+            assert len(calls) < 30
+        assert len(calls) > 2 and calls[-1]["stored"] >= 1 and calls[-1]["fund_houses"][0]["amc"] == amc
+        again = c.post("/api/ingestion/backfill-batch", json=body, headers=h).json()
+        assert again["status"] == "skipped" and again["skipped"][0]["amfi_code"] == code  # 15-min limit per scheme

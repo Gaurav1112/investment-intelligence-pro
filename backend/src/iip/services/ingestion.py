@@ -18,7 +18,7 @@ from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import cast
+from typing import Any, cast
 
 from iip.data.fetch import Fetcher, FetchError, NoData
 from iip.data.models import DataError, Observation, ParseResult, SchemeRecord
@@ -441,15 +441,29 @@ def _fetch_window(
     run_id: str,
 ) -> tuple[int, int, int, str | None]:  # fmt: skip
     """One ≤ 90-day NAV-history request; keeps ONLY this scheme's rows. Returns (ok, rejected, stored, error)."""
+    ok, rej, stored, err = _fetch_window_many(conn, fetcher, {scheme_code}, mf_id, window_start, window_end, run_id)
+    return ok, rej, sum(stored.values()), err
+
+
+def _fetch_window_many(
+    conn: sqlite3.Connection, fetcher: Fetcher, scheme_codes: set[int], mf_id: int, window_start: date,
+    window_end: date, run_id: str,
+) -> tuple[int, int, dict[int, int], str | None]:  # fmt: skip
+    """One ≤ 90-day NAV-history request for a whole fund house; keeps ONLY the requested schemes' rows (AMFI ToU:
+    never a significant portion). Returns (rows ok, rows rejected, stored per scheme, error)."""
     try:
         request = navhistory_request(mf_id=mf_id, tp=1, from_date=window_start, to_date=window_end)
         res = parse_navhistory(fetcher.fetch(request))
     except NoData:
-        return 0, 0, 0, None  # AMFI has nothing in this window (e.g. before the scheme launched): empty, not an error
+        return 0, 0, {}, None  # AMFI has nothing in this window (e.g. before the schemes launched): empty, no error
     except (FetchError, DataError) as exc:
-        return 0, 0, 0, f"{window_start}..{window_end}: {type(exc).__name__}"
-    mine = [o for o in res.observations if int(o.entity_key) == scheme_code]
-    stored = _store_observations(conn, _validated_list(mine), run_id, lambda _c: True)
+        return 0, 0, {}, f"{window_start}..{window_end}: {type(exc).__name__}"
+    stored: dict[int, int] = {}
+    for code in sorted(scheme_codes):
+        mine = [o for o in res.observations if int(o.entity_key) == code]
+        n = _store_observations(conn, _validated_list(mine), run_id, lambda _c: True)
+        if n:
+            stored[code] = n
     return res.report.rows_ok, res.report.rows_rejected, stored, None
 
 
@@ -547,6 +561,165 @@ def backfill_resumable(
         [str(e) for e in state["errors"]],
     )  # fmt: skip
     return {**_progress(state, "complete"), **summary.__dict__}
+
+
+# ----------------------------------------------------------------------------- batch backfill (several schemes)
+# AMFI's NAV-history report returns a whole fund house per request, so the selected schemes are grouped by AMC and each
+# fund house is fetched ONCE over the windows; only the selected schemes' rows are kept. The same resumable step serves
+# both modes: locally it runs to completion in one call (``stop`` never fires); hosted it answers in bounded steps.
+
+BATCH_JOB = "backfill-batch"
+BATCH_MAX_SCHEMES = 100
+
+
+def backfill_in_progress(conn: sqlite3.Connection) -> bool:
+    """An unfinished single-scheme or batch backfill job exists (one backfill at a time, ADR-0013)."""
+    row = conn.execute(
+        "SELECT 1 FROM job_progress WHERE job_key=? OR job_key LIKE 'backfill:%' LIMIT 1", (BATCH_JOB,)
+    ).fetchone()
+    return row is not None
+
+
+def start_batch_backfill(
+    conn: sqlite3.Connection, *, groups: dict[str, list[int]], skipped: list[dict[str, int]], start: date, end: date,
+    now: Callable[[], datetime],
+) -> dict[str, Any]:  # fmt: skip
+    """Create the batch job: one group per AMC (sorted by AMC name, codes ascending). Returns the job state."""
+    per_group = _window_count(start, end)
+    state: dict[str, Any] = {
+        "run_id": _start_run(conn, "amfi.navhistory", now()), "start": start.isoformat(), "end": end.isoformat(),
+        "probe_day": end.replace(day=1).isoformat(), "skipped": skipped, "gi": 0,
+        "groups": [
+            {"amc": amc, "codes": sorted(codes), "mf_id": None, "next_probe_id": 1, "next_end": end.isoformat(),
+             "windows_done": 0, "stored": {}, "status": "pending", "error": None}
+            for amc, codes in sorted(groups.items())
+        ],
+        "windows_total": per_group * len(groups), "windows_done": 0, "ok": 0, "rej": 0, "errors": [],
+    }  # fmt: skip
+    save_job(conn, BATCH_JOB, state, now().isoformat())
+    return state
+
+
+def _batch_progress(state: dict[str, Any], phase: str) -> dict[str, Any]:
+    groups: list[dict[str, Any]] = state["groups"]
+    return {
+        "done": phase == "complete", "phase": phase,
+        "amcs_done": sum(1 for g in groups if g["status"] in ("done", "failed")), "amcs_total": len(groups),
+        "windows_done": state["windows_done"], "windows_total": state["windows_total"],
+        "stored": sum(int(n) for g in groups for n in g["stored"].values()),
+    }  # fmt: skip
+
+
+def backfill_batch_step(
+    conn: sqlite3.Connection, fetcher: Fetcher, *, now: Callable[[], datetime],
+    pause: Callable[[float], object] | None, stop: Callable[[], bool], max_id: int = MAX_FUND_HOUSE_ID,
+) -> dict[str, Any]:  # fmt: skip
+    """One bounded step of the batch job (the first unit of work always runs, so every call makes progress).
+
+    Per group: resolve the fund-house id (cache, else a resumable probe; not found → that group fails, the others
+    continue), then fetch its windows newest first. Returns the progress, plus the summary when complete."""
+    state = load_job(conn, BATCH_JOB)
+    if state is None:
+        raise LookupError("no batch backfill in progress")
+    run_id = str(state["run_id"])
+    groups: list[dict[str, Any]] = state["groups"]
+    start_d = date.fromisoformat(str(state["start"]))
+    first = True
+    with _failing_run(conn, run_id, now):
+        while int(state["gi"]) < len(groups) and (first or not stop()):
+            g = groups[int(state["gi"])]
+            if g["mf_id"] is None:
+                g["mf_id"] = cached_fund_house_id(conn, str(g["amc"]))
+            if g["mf_id"] is None:
+                found, next_id = probe_fund_house_ids(
+                    conn, fetcher, str(g["amc"]), date.fromisoformat(str(state["probe_day"])),
+                    range(int(g["next_probe_id"]), max_id + 1), pause=pause, stop=stop,
+                )  # fmt: skip
+                first = False
+                g["mf_id"], g["next_probe_id"] = found, next_id
+                if found is None and next_id > max_id:
+                    g.update(status="failed", error="AMFI's fund-house id for this AMC could not be found")
+                    left = _window_count(start_d, date.fromisoformat(str(g["next_end"])))
+                    state["windows_done"] = int(state["windows_done"]) + left
+                    state["gi"] = int(state["gi"]) + 1
+                save_job(conn, BATCH_JOB, state, now().isoformat())
+                continue
+            window_end = date.fromisoformat(str(g["next_end"]))
+            if window_end < start_d:
+                g["status"] = "done"
+                state["gi"] = int(state["gi"]) + 1
+                save_job(conn, BATCH_JOB, state, now().isoformat())
+                continue
+            first = False
+            window_start = max(start_d, window_end - timedelta(days=MAX_HISTORY_WINDOW_DAYS))
+            w_ok, w_rej, w_stored, err = _fetch_window_many(
+                conn, fetcher, {int(c) for c in g["codes"]}, int(g["mf_id"]), window_start, window_end, run_id
+            )
+            for code, n in w_stored.items():
+                g["stored"][str(code)] = int(g["stored"].get(str(code), 0)) + n
+            if err:
+                state["errors"].append(f"{g['amc']}: {err}")
+            g.update(status="fetching", next_end=(window_start - timedelta(days=1)).isoformat(),
+                     windows_done=int(g["windows_done"]) + 1)  # fmt: skip
+            state.update(ok=int(state["ok"]) + w_ok, rej=int(state["rej"]) + w_rej,
+                         windows_done=int(state["windows_done"]) + 1)  # fmt: skip
+            save_job(conn, BATCH_JOB, state, now().isoformat())
+            if pause is not None:
+                pause(1.0)
+    if int(state["gi"]) < len(groups):
+        g = groups[int(state["gi"])]
+        return {**_batch_progress(state, "discovering" if g["mf_id"] is None else "fetching"), "amc": g["amc"]}
+    clear_job(conn, BATCH_JOB)
+    return {**_batch_progress(state, "complete"), **_finish_batch(conn, run_id, now, state)}
+
+
+def _finish_batch(
+    conn: sqlite3.Connection, run_id: str, now: Callable[[], datetime], state: dict[str, Any]
+) -> dict[str, Any]:
+    groups: list[dict[str, Any]] = state["groups"]
+    errors = [str(e) for e in state["errors"]]
+    errors += [f"{g['amc']}: {g['error']}" for g in groups if g["status"] == "failed"]
+    stored = sum(int(n) for g in groups for n in g["stored"].values())
+    ok, rej = int(state["ok"]), int(state["rej"])
+    status = "ok" if not errors and rej == 0 else ("partial" if stored else "failed")
+    codes = sum(len(g["codes"]) for g in groups)
+    skipped: list[dict[str, int]] = state["skipped"]
+    detail = f"{codes} scheme(s) across {len(groups)} fund house(s), one pass per fund house"
+    if skipped:
+        detail += f"; {len(skipped)} skipped (backfilled in the last 15 minutes)"
+    if errors:
+        detail += "; " + "; ".join(errors[:5])
+    _finish_run(conn, run_id, now(), status, ok, rej, None, "; ".join(errors[:5]))
+    return {
+        **RunSummary(run_id, "amfi.navhistory", status, ok, rej, stored, detail).__dict__,
+        "fund_houses": [
+            {"amc": g["amc"], "status": g["status"], "error": g["error"],
+             "schemes": [{"amfi_code": c, "stored": int(g["stored"].get(str(c), 0))} for c in g["codes"]]}
+            for g in groups
+        ],
+        "skipped": skipped,
+    }  # fmt: skip
+
+
+def skipped_only_result(skipped: list[dict[str, int]]) -> dict[str, Any]:
+    """Every selected scheme was backfilled in the last 15 minutes: nothing to do, no request, no run."""
+    return {
+        "done": True, "phase": "complete", "amcs_done": 0, "amcs_total": 0, "windows_done": 0, "windows_total": 0,
+        "stored": 0, "run_id": None, "source_id": "amfi.navhistory", "status": "skipped", "rows_ok": 0,
+        "rows_rejected": 0, "detail": f"all {len(skipped)} selected scheme(s) were backfilled in the last 15 minutes",
+        "fund_houses": [], "skipped": skipped,
+    }  # fmt: skip
+
+
+def run_batch_backfill_locally(
+    conn: sqlite3.Connection, fetcher: Fetcher, *, now: Callable[[], datetime],
+    pause: Callable[[float], object] | None, max_id: int = MAX_FUND_HOUSE_ID,
+) -> dict[str, Any]:  # fmt: skip
+    """Local mode: the same step, never stopped, so one call does the whole batch."""
+    while True:
+        out = backfill_batch_step(conn, fetcher, now=now, pause=pause, stop=lambda: False, max_id=max_id)
+        if out["done"]:
+            return out
 
 
 NAVALL_JOB = "navall"

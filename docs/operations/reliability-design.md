@@ -404,3 +404,10 @@ Scripts are plain POSIX shell and Python. Make is the single entry point, with n
 1. Agent E: confirm exact source URLs and publication times; the §3 thresholds will be tuned to observed publication behaviour after 30 days of ledger data.
 2. Decide whether `mfapi.in` serves as a fallback for NAV history. If yes, it gets its own breaker, is tagged lower-trust, and is cross-checked against AMFI for overlapping dates.
 3. Confirm Diwali Muhurat trading and other special sessions are represented in the calendar model (affects REL-10).
+
+
+## Amendment (2026-10-15): SQLite connections per thread
+The live browser pass found that a single connection shared across FastAPI's worker threads fails under parallel requests
+(`sqlite3.InterfaceError`, HTTP 500). Each worker thread now has its own connection (`AppState.conn`, a thread-local).
+WAL mode allows concurrent readers, and writes serialise via `BEGIN IMMEDIATE` plus `busy_timeout`. Regression test:
+`tests/api/test_concurrency.py` (80 parallel requests, 16 workers).

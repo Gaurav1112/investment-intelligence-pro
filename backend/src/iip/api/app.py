@@ -5,6 +5,8 @@ from __future__ import annotations
 import hmac
 import logging
 import secrets
+import sqlite3
+import threading
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -33,6 +35,10 @@ def utc_now() -> datetime:
 
 
 class AppState:
+    """Shared application state. SQLite connections are PER THREAD: FastAPI runs sync endpoints in a thread pool, and a
+    single shared connection used from several threads fails with sqlite3.InterfaceError (found in the live browser
+    pass, 2026-10-15). WAL allows concurrent readers; writes serialise via BEGIN IMMEDIATE + busy_timeout."""
+
     def __init__(self, settings: Settings, clock: Callable[[], datetime] = utc_now) -> None:
         self.settings = settings
         self.clock = clock
@@ -40,8 +46,26 @@ class AppState:
         self.login_limiter = RateLimiter(limit=10, window_s=60)
         self.settings.data_dir.mkdir(parents=True, exist_ok=True)
         self.token = ensure_access_token(settings) if settings.auth else ""
-        self.conn = connect(settings.db_path)
+        self._local = threading.local()
+        self._all: list[sqlite3.Connection] = []
+        self._lock = threading.Lock()
         migrate(self.conn, clock().isoformat())
+
+    @property
+    def conn(self) -> sqlite3.Connection:
+        c: sqlite3.Connection | None = getattr(self._local, "conn", None)
+        if c is None:
+            c = connect(self.settings.db_path)
+            self._local.conn = c
+            with self._lock:
+                self._all.append(c)
+        return c
+
+    def close(self) -> None:
+        with self._lock:
+            for c in self._all:
+                c.close()
+            self._all.clear()
 
 
 def create_app(
@@ -52,7 +76,7 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
-        state.conn.close()
+        state.close()
 
     dev = settings.env in {"dev", "test"}
     app = FastAPI(

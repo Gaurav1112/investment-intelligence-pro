@@ -873,6 +873,8 @@ def discover(  # noqa: PLR0915 - one auditable orchestration sequence
         else {
             "narrative": sup.report.narrative,
             "writer": sup.report.writer,
+            "template_narrative": "\n".join(s.text for s in sup.report.sections),
+            "rejected_llm_reasons": list(sup.report.rejected_llm_reasons),
             "sections": [
                 {"worker": s.worker, "subject": s.subject, "topic": s.topic, "stance": s.stance, "text": s.text}
                 for s in sup.report.sections
@@ -897,6 +899,16 @@ def discover(  # noqa: PLR0915 - one auditable orchestration sequence
     }
     run_info: dict[str, Any] = output["run"]
     run_info["result_hash"] = content_hash({k: v for k, v in output.items() if k != "run"})
+    # C-11 §3: the hash of everything the engine decided — ranking, numbers, exclusions and the TEMPLATE text — with
+    # the optional LLM's wording, writer and AI disclosure left out. It is identical with and without the LLM.
+    report = output["report"]
+    run_info["ranking_hash"] = content_hash(
+        {
+            **{k: v for k, v in output.items() if k not in ("run", "report")},
+            "report_sections": None if report is None else report["sections"],
+            "template_narrative": None if report is None else report["template_narrative"],
+        }
+    )
     return output
 
 

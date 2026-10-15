@@ -67,7 +67,21 @@ describe("Settings & privacy", () => {
     expect(screen.getByRole("link", { name: "Edit objectives" })).toHaveAttribute("href", "/onboarding");
     expect(screen.getByRole("link", { name: "Export everything (JSON)" })).toHaveAttribute("href", "/api/privacy/export");
     expect(screen.getByRole("link", { name: "Export transactions (CSV)" })).toHaveAttribute("href", "/api/privacy/export.csv");
-    expect(screen.getByText(/not part of version 1/)).toBeInTheDocument();
+    // The optional AI wording section replaces the old "not part of version 1" note; with no status endpoint it degrades.
+    expect(await screen.findByText(/AI wording settings are unavailable/)).toBeInTheDocument();
+  });
+
+  it("includes the optional AI wording section, off by default", async () => {
+    stubFetch((url, method) =>
+      url === "/api/llm/status"
+        ? json({ mode: "off", base_url: "", model: "", api_key_env: "", config_source: "env", api_key_present: false, provider: null,
+            privacy_note: "", config_error: null, last_error: null, rejected_count: 0, calls: 0, cache_hits: 0,
+            default_local_url: "http://127.0.0.1:11434/v1", providers: [], probe: null })
+        : realistic(url, method),
+    );
+    renderPage();
+    expect(await screen.findByRole("heading", { name: "Optional AI wording" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /Off — deterministic wording only/ })).toBeChecked();
   });
 
   it("shows an error state for the inventory", async () => {

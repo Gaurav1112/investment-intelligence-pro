@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { AiWording } from "../components/AiWording";
 import { ExplainDrawer, ExplainedNumber } from "../components/ExplainDrawer";
 import { FreshnessBadge } from "../components/FreshnessBadge";
 import { CodeLabel, CodeText, InstName } from "../components/Code";
@@ -359,11 +360,13 @@ export default function Discovery() {
         <div className="grid grid--2">
           <div className="card">
             <h3>What the analysis found</h3>
-            {data.report.sections.map((s) => (
-              <p key={`${s.worker}-${s.text}`} className={s.stance === "challenges" ? "callout callout--warn" : undefined}>
-                {s.text} <span className="small subtle">({WORKER_LABEL[s.worker] ?? s.worker})</span>
-              </p>
-            ))}
+            <AiWording report={data.report}>
+              {data.report.sections.map((s) => (
+                <p key={`${s.worker}-${s.text}`} className={s.stance === "challenges" ? "callout callout--warn" : undefined}>
+                  {s.text} <span className="small subtle">({WORKER_LABEL[s.worker] ?? s.worker})</span>
+                </p>
+              ))}
+            </AiWording>
           </div>
           <div className="card">
             <h3>Disagreements</h3>

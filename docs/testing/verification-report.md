@@ -79,7 +79,7 @@ Status labels: **VERIFIED** (executed, with evidence) · **IMPLEMENTED, NOT VERI
 | Dependency audit | VERIFIED | SEC-84 via `make audit` (found pytest PYSEC-2026-1845 → upgraded) |
 | Cross-origin page attack (Playwright, second origin) | IMPLEMENTED, NOT VERIFIED | SEC-16 — covered at the API level by the CSRF/Origin tests; browser-level test not automated |
 | XSS through imported names rendered in the UI | IMPLEMENTED, NOT VERIFIED (browser) | SEC-23 — React text rendering + CSP; `dangerouslySetInnerHTML` banned by test (SEC-24); no Playwright test |
-| LLM adapter controls (prompt contents, loopback endpoint, timeouts) | N/A in v1 | SEC-73…76 — the optional LLM adapter is not built |
+| LLM adapter controls (prompt contents, loopback endpoint, cloud allowlist, output validation, timeouts, memoisation) | VERIFIED (stub server) | SEC-70…76: `tests/security/test_llm_boundary.py` and `tests/api/test_llm_api.py` against an httpx MockTransport stub. No live model was available (127.0.0.1:11434 and :1234 not listening), so live wording quality is IMPLEMENTED, NOT VERIFIED |
 | Encrypted backups | N/A in v1 | SEC-83 — optional feature not built |
 | Supply-chain pinning policy (`minimumReleaseAge`, `onlyBuiltDependencies`) | Open | SEC-85 — lockfiles present and frozen in `make setup`; the pnpm policy settings are not configured |
 

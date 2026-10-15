@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from iip.api import routes_llm
 from iip.data.fetch import Fetcher
 from iip.data.registry import REGISTRY, SourceMode
 from iip.engine import tax as tx
@@ -61,9 +62,13 @@ def router() -> APIRouter:  # noqa: PLR0915 - route table
     def discover(body: DiscoverIn, request: Request) -> dict[str, Any]:
         st = _state(request)
         as_of = st.clock().date()
-        status = profile_svc.evaluate(profile_svc.load(st.conn), as_of)
+        profile = profile_svc.load(st.conn)
+        status = profile_svc.evaluate(profile, as_of)
+        rephrase, _ = routes_llm.rephraser(st, profile)  # None unless the optional AI wording is enabled (ADR-0007)
         out = discovery.discover(st.conn, status, as_of=as_of, ruleset=tax_rules(),
-                                 allow_fixtures=body.include_fixtures)  # fmt: skip
+                                 allow_fixtures=body.include_fixtures, llm_rephrase=rephrase)  # fmt: skip
+        if rephrase is not None and out["report"] is not None:
+            routes_llm.runtime(st).record_rejection(out["report"]["rejected_llm_reasons"])
         out["run"]["run_id"] = discovery.store_run(st.conn, out, st.clock())
         return out
 

@@ -8,6 +8,9 @@ import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from iip.llm.config import LLMConfig, LLMConfigError, validate_config
+from iip.llm.config import from_env as llm_from_env
+
 
 class StartupRefused(SystemExit):
     """Raised (exit code 2) when configuration violates a security invariant."""
@@ -30,7 +33,7 @@ class Settings:
     allow_non_loopback: bool = False
     dev_origins: tuple[str, ...] = ()
     max_body_bytes: int = 5 * 1024 * 1024
-    llm_enabled: bool = False
+    llm: LLMConfig = field(default_factory=LLMConfig)  # IIP_LLM=off|local|cloud (ADR-0007); off by default
 
     @property
     def db_path(self) -> Path:
@@ -76,6 +79,10 @@ def validate(settings: Settings) -> Settings:
             raise StartupRefused("Non-loopback binding requires the access token to be enabled")
     if settings.dev_origins and settings.env != "dev":
         raise StartupRefused("IIP_DEV_ORIGINS is only permitted with IIP_ENV=dev")
+    try:  # SEC-75: a "local" LLM endpoint that is not loopback, or a cloud URL off the allowlist, refuses startup
+        validate_config(settings.llm)
+    except LLMConfigError as exc:
+        raise StartupRefused(f"LLM configuration refused: {exc}") from exc
     return settings
 
 
@@ -91,7 +98,7 @@ def from_env(environ: dict[str, str] | None = None) -> Settings:
             auth=env.get("IIP_AUTH", "on") != "off",
             allow_non_loopback=env.get("IIP_ALLOW_NON_LOOPBACK", "") == "1",
             dev_origins=dev_origins,
-            llm_enabled=env.get("IIP_LLM", "off") == "on",
+            llm=llm_from_env(env),
         )
     )
 

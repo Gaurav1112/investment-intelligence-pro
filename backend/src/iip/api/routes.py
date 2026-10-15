@@ -9,6 +9,7 @@ from iip.api import (
     routes_bonds,
     routes_cas,
     routes_core,
+    routes_inputs,
     routes_llm,
     routes_portfolio,
     routes_profile,
@@ -24,4 +25,5 @@ def all_routers() -> list[APIRouter]:
         routes_llm.router(),
         routes_cas.router(),
         routes_bonds.router(),
+        routes_inputs.router(),
     ]

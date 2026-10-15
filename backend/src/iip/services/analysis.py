@@ -21,11 +21,19 @@ from itertools import pairwise
 from typing import Any
 
 from iip.engine import candidates as cb
+from iip.engine import macro
 from iip.engine import scenarios as scn
 from iip.engine import tax as tx
-from iip.engine.deposits import DepositHolding, InstitutionType, dicgc_coverage
+from iip.engine.dates import add_months
+from iip.engine.deposits import (
+    DepositHolding,
+    InstitutionType,
+    card_rate_for_tenure,
+    dicgc_coverage,
+    fd_premature_withdrawal,
+)
 from iip.engine.determinism import content_hash
-from iip.engine.errors import EngineError, InsufficientHistory, InvalidInput
+from iip.engine.errors import EngineError, InsufficientHistory, InvalidInput, MissingData, StaleData
 from iip.engine.feasibility import (
     EvidenceLevel,
     FeasibilityReport,
@@ -45,7 +53,7 @@ from iip.engine.money import ONE, PAISA, ZERO, D, engine_context, format_inr, fr
 from iip.engine.ranking import Tier
 from iip.engine.stats import metrics as rm
 from iip.engine.stats.series import Frequency, ReturnSeries
-from iip.services import bonds, discovery
+from iip.services import bonds, discovery, inputs
 from iip.services import profile as profile_svc
 from iip.services.explain import badge, source_ref
 from iip.services.instruments import FD_RATE_STALE_DAYS, TBILL_STALE_DAYS
@@ -286,6 +294,7 @@ def _build_mf(
     b = cb.mf_candidate(
         instrument_id=iid, name=name, category=cat, amount=amount, as_of=as_of, withdrawal=withdrawal,
         nav_dates=dates, navs=navs, exit_load=load, ruleset=ruleset, profile=profile, settlement_days=settle,
+        credit_facts=inputs.fund_credit_facts(conn, iid, as_of),
     )  # fmt: skip
     return Built(iid, name, "mf_scheme", b, (), {**prov, "kind": "mf_scheme", "category": cat}, category=cat)
 
@@ -405,6 +414,18 @@ def _freshness(prov: Mapping[str, Any] | None) -> str:
     return str(prov.get("freshness") or "UNKNOWN")
 
 
+_FRESHNESS_RANK = {"FIXTURE": 4, "STALE": 3, "UNKNOWN": 2}
+
+
+def _worst_freshness(prov: Mapping[str, Any] | None, extra: Sequence[Mapping[str, Any]]) -> str:
+    out = _freshness(prov)
+    for p in extra:
+        f = _freshness(p)
+        if _FRESHNESS_RANK.get(f, 0) > _FRESHNESS_RANK.get(out, 0):
+            out = f
+    return out
+
+
 def _display(value: Decimal, unit: str) -> str:
     if unit == "INR":
         return format_inr(value)
@@ -436,8 +457,12 @@ def explained(
     assumptions: Sequence[str] = (),
     sensitivity: Sequence[Mapping[str, str]] = (),
     limitations: Sequence[str] = (),
+    extra_prov: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
-    """The Explained shape of ``discovery.explained_outcome`` for any engine-computed number."""
+    """The Explained shape of ``discovery.explained_outcome`` for any engine-computed number.
+
+    ``extra_prov``: further dated sources the number depends on (e.g. CPI, a factsheet, the T-bill series). They are
+    listed as sources, and the freshness shown is the least fresh of all of them (fixture > stale > unknown)."""
     text = _value_text(value, unit)
     payload = {
         "id": eid,
@@ -458,9 +483,9 @@ def explained(
         "formula": formula,
         "substituted": substituted,
         "inputs": list(inputs),
-        "sources": _sources(prov),
+        "sources": _sources(prov) + [x for p in extra_prov for x in _sources(p)],
         "observed": prov.get("observation_date") if prov else None,
-        "freshness": _freshness(prov),
+        "freshness": _worst_freshness(prov, extra_prov),
         "assumptions": list(assumptions),
         "sensitivity": [dict(s) for s in sensitivity],
         "limitations": list(limitations),
@@ -497,6 +522,90 @@ def _pretax(b: Built, which: str) -> Decimal:
     with engine_context():
         net: Decimal = getattr(b.built.candidate.outcome, which)
         return net + _tax_for(b.built.evidence, which)
+
+
+# ============================================================================================ macro inputs
+
+
+@dataclass(frozen=True)
+class _Inflation:
+    basis: macro.InflationBasis
+    prov: dict[str, Any]
+
+    def horizon(self, days: int, delta_annual: Decimal = ZERO) -> Decimal:
+        with engine_context():
+            annual = self.basis.annual + delta_annual
+        return macro.horizon_inflation(annual, days)
+
+    def describe(self) -> list[str]:
+        b = self.basis
+        return [
+            f"CPI inflation (trailing 12 months to {b.month:%Y-%m}, base {b.base_year}, {b.method.value}): {b.annual}",
+            *[f"{k}: {v}" for k, v in b.inputs],
+        ]
+
+
+def _inflation(conn: sqlite3.Connection, as_of: date) -> _Inflation | tuple[str, str]:
+    """The CPI inflation basis at ``as_of``, or (refusal code, reason). Bases are never mixed (engine.macro)."""
+    points, provs = inputs.cpi_points(conn)
+    try:
+        basis = macro.select_inflation(points, as_of)
+    except StaleData as exc:
+        return "CPI_STALE", str(exc)
+    except MissingData as exc:
+        return "CPI_UNAVAILABLE", str(exc)
+    prov = dict(provs[(basis.base_year, basis.month)])
+    if prov.get("fixture"):
+        prov["freshness"] = "FIXTURE"
+    elif basis.freshness is macro.CpiFreshness.STALE:
+        prov["freshness"] = "STALE"
+    else:
+        prov["freshness"] = "MANUAL" if prov.get("quality_status") == "manual" else "END_OF_DAY"
+    return _Inflation(basis, prov)
+
+
+_PROJECTION = (
+    "Inflation over the horizon is a labelled projection: the latest trailing 12-month CPI inflation compounded over "
+    "the horizon, (1 + π_12m)^(days/365) − 1. It is not a forecast"
+)
+
+
+def _real_returns(b: Built, ctx: Context, infl: _Inflation | tuple[str, str]) -> dict[str, Any]:
+    """Real (inflation-adjusted) net return per band point, Fisher (calc §2.11), or a typed refusal."""
+    if isinstance(infl, tuple):
+        code, reason = infl
+        return {w: refusal(f"{b.instrument_id}.real_return.{w}", f"Real return ({w})", code, reason) for w in WHICH}
+    assert b.built is not None
+    pi_h = infl.horizon(ctx.horizon_days)
+    out: dict[str, Any] = {}
+    for w in WHICH:
+        net = getattr(b.built.candidate.outcome, w)
+        with engine_context():
+            r = (net - ctx.amount) / ctx.amount
+        rr = scn.real_return(r, pi_h)
+        out[w] = explained(
+            f"{b.instrument_id}.real_return.{w}", f"Real return over {ctx.horizon_days} days ({w})", rr.value,
+            "fraction",
+            what="Net return after costs and assumed tax, adjusted for CPI inflation over the same horizon (Fisher).",
+            formula_id=rr.method_id, formula="r_real = (1 + r_nom) / (1 + π_H) − 1",
+            substituted=f"(1 + {pct(r)}) / (1 + {pct(pi_h)}) − 1 = {pct(rr.value)}",
+            inputs=[f"net return ({w}): {r}", f"π over {ctx.horizon_days} days: {pi_h}", *infl.describe()],
+            prov=b.prov, engine_version=SERVICE_VERSION, extra_prov=[infl.prov],
+            assumptions=[_PROJECTION, *infl.basis.caveats],
+            limitations=[f"r − π approximation (labelled only): {pct(rr.approximation)}"],
+        )  # fmt: skip
+    return out
+
+
+def _debt_fund(b: Built) -> bool:
+    """Debt-category schemes whose factsheet duration describes the whole portfolio (not hybrids)."""
+    cat = b.category or ""
+    return b.kind == "mf_scheme" and cb.mf_tax_class_from_category(cat) is cb.MfTaxClass.SPECIFIED_DEBT
+
+
+def _facts_caveat(facts: Mapping[str, Any]) -> str:
+    stale = " — STALE (older than 45 days)" if facts["freshness"] == "STALE" else ""
+    return f"FACTSHEET_AS_OF_{facts['as_of_date']}{stale}"
 
 
 # ============================================================================================ compare
@@ -586,7 +695,7 @@ def _exit_cost(b: Built) -> dict[str, Any]:
     )
 
 
-def _compare_row(b: Built, ctx: Context) -> dict[str, Any]:
+def _compare_row(b: Built, ctx: Context, infl: _Inflation | tuple[str, str]) -> dict[str, Any]:
     row: dict[str, Any] = {
         "instrument_id": b.instrument_id,
         "name": b.name,
@@ -686,6 +795,7 @@ def _compare_row(b: Built, ctx: Context) -> dict[str, Any]:
                 "lock_in_days": cb.mf_lock_in_days(b.category or "") if b.kind == "mf_scheme" else None,
             },
             "exit_cost": _exit_cost(b),
+            "real_return": _real_returns(b, ctx, infl),
             "loss_frequency": discovery._loss_display(b.built),
         }
     )  # fmt: skip
@@ -721,7 +831,8 @@ def compare(
                   profile=ctx.tax_profile)
         for iid in instrument_ids
     ]  # fmt: skip
-    rows = [_compare_row(b, ctx) for b in built]
+    infl = _inflation(conn, as_of)
+    rows = [_compare_row(b, ctx, infl) for b in built]
     evaluable = sorted(
         (b for b in built if b.evaluable),
         key=lambda b: (-b.built.candidate.outcome.q05 if b.built else ZERO, b.instrument_id),
@@ -785,6 +896,16 @@ def compare(
 class _Applied:
     results: tuple[tuple[str, scn.ScenarioResult], ...]  # (which, result)
     measure: str
+    extra_prov: tuple[dict[str, Any], ...] = ()  # further dated sources (CPI, factsheet, card-rate table)
+
+
+@dataclass(frozen=True)
+class _Env:
+    """Stored inputs a scenario may need, loaded once per request."""
+
+    inflation: _Inflation | tuple[str, str]
+    facts: dict[str, Any] | None  # latest factsheet facts (mutual funds), with provenance under "prov"
+    card_rates: dict[str, Any] | None  # latest card-rate table for the FD's institution
 
 
 @dataclass(frozen=True)
@@ -822,7 +943,7 @@ def _tbill_sale_value(y: Decimal, exit_date: date, maturity: date, face: Decimal
     return res.consideration
 
 
-def _shock_rate(b: Built, value: Decimal, shocks: Mapping[str, Any], ctx: Context) -> _Outcome:
+def _shock_rate(b: Built, value: Decimal, shocks: Mapping[str, Any], ctx: Context, env: _Env) -> _Outcome:
     if b.kind == "tbill":
         exit_days = shocks.get("exit_before_maturity_days")
         if exit_days is None:
@@ -861,9 +982,32 @@ def _shock_rate(b: Built, value: Decimal, shocks: Mapping[str, Any], ctx: Contex
         return _NotApplicable(_BOND_RATE_TEXT)
     if _is_equity_scheme(b.category):
         return _NotApplicable("Interest-rate shocks apply to debt holdings; use equity_pct for an equity fund.")
-    return _NotApplicable(
-        "A rate shock on a debt fund needs its modified duration from the scheme's factsheet, which is not in the "
-        "local store. No duration is assumed."
+    if not _debt_fund(b):
+        return _NotApplicable(
+            "A hybrid or other fund's factsheet duration covers only its debt portion, and the split is not modelled. "
+            "No duration is assumed for the whole fund."
+        )
+    facts = env.facts
+    if facts is None or facts["modified_duration"] is None:
+        return _NotApplicable(
+            "A rate shock on a debt fund needs its modified duration from the scheme's factsheet, which is not in the "
+            "local store. Enter the factsheet facts; no duration is assumed."
+        )
+    d_mod = Decimal(facts["modified_duration"])
+    as_of_date = date.fromisoformat(facts["as_of_date"])
+    with engine_context():
+        dy = value * scn.BP
+    out = tuple(
+        (w, _with_caveats(scn.rate_shock_duration(_pretax(b, w), d_mod, dy, duration_as_of=as_of_date, as_of=ctx.as_of,
+                                                  label=scn.ScenarioLabel.STRESS),
+                          ["FUND_DURATION_FROM_FACTSHEET", _facts_caveat(facts)]))
+        for w in WHICH
+    )  # fmt: skip
+    return _Applied(
+        out,
+        f"proceeds at the withdrawal date, before tax — APPROXIMATE (modified duration {d_mod} from the factsheet "
+        f"as of {facts['as_of_date']}{', STALE' if facts['freshness'] == 'STALE' else ''})",
+        (facts["prov"],),
     )
 
 
@@ -874,7 +1018,11 @@ _BOND_RATE_TEXT = (
 )
 
 
-def _shock_spread(b: Built, value: Decimal, shocks: Mapping[str, Any], ctx: Context) -> _Outcome:
+def _with_caveats(res: scn.ScenarioResult, extra: Sequence[str]) -> scn.ScenarioResult:
+    return replace(res, caveats=tuple(dict.fromkeys((*res.caveats, *extra))))
+
+
+def _shock_spread(b: Built, value: Decimal, shocks: Mapping[str, Any], ctx: Context, env: _Env) -> _Outcome:
     if b.kind == "tbill":
         return _NotApplicable("A Government of India T-bill carries no credit spread.")
     if b.kind == "fd":
@@ -883,13 +1031,44 @@ def _shock_spread(b: Built, value: Decimal, shocks: Mapping[str, Any], ctx: Cont
         return _NotApplicable(_BOND_RATE_TEXT)
     if _is_equity_scheme(b.category):
         return _NotApplicable("Credit-spread shocks apply to debt holdings, not to an equity fund.")
-    return _NotApplicable(
-        "A spread shock on a debt fund needs its spread duration from portfolio disclosures, which are not in the "
-        "local store. No duration is assumed."
+    if not _debt_fund(b):
+        return _NotApplicable(
+            "A hybrid or other fund's factsheet duration covers only its debt portion, and the split is not modelled. "
+            "No spread duration is assumed."
+        )
+    facts = env.facts
+    if facts is None or facts["modified_duration"] is None:
+        return _NotApplicable(
+            "A spread shock on a debt fund needs its duration from the scheme's factsheet, which is not in the local "
+            "store. Enter the factsheet facts; no duration is assumed."
+        )
+    if facts["share_sovereign_cash"] is not None and Decimal(facts["share_sovereign_cash"]) == ONE:
+        return _NotApplicable("The factsheet shows 100 % sovereign and cash holdings: no credit-spread exposure.")
+    if value < 0:
+        return _NotApplicable(
+            "Spread tightening is not modelled for a fund: the duration proxy would overstate the gain (sovereign and "
+            "cash holdings carry no spread)."
+        )
+    d_mod = Decimal(facts["modified_duration"])
+    with engine_context():
+        ds = value * scn.BP
+    caveats = ["SPREAD_DURATION_PROXY_IS_PORTFOLIO_MODIFIED_DURATION",
+               "LOSS_MAGNITUDE_OVERSTATED_SOVEREIGN_CASH_HAS_NO_SPREAD", _facts_caveat(facts)]  # fmt: skip
+    if (ctx.as_of - date.fromisoformat(facts["as_of_date"])).days > scn.STALE_DURATION_DAYS:
+        caveats.append("STALE_DURATION")
+    out = tuple(
+        (w, _with_caveats(scn.spread_shock_duration(_pretax(b, w), d_mod, ds, label=scn.ScenarioLabel.STRESS), caveats))
+        for w in WHICH
+    )  # fmt: skip
+    return _Applied(
+        out,
+        f"proceeds at the withdrawal date, before tax — APPROXIMATE (spread duration taken as the portfolio modified "
+        f"duration {d_mod}, factsheet as of {facts['as_of_date']}{', STALE' if facts['freshness'] == 'STALE' else ''})",
+        (facts["prov"],),
     )
 
 
-def _shock_equity(b: Built, value: Decimal, shocks: Mapping[str, Any], ctx: Context) -> _Outcome:
+def _shock_equity(b: Built, value: Decimal, shocks: Mapping[str, Any], ctx: Context, env: _Env) -> _Outcome:
     if b.kind != "mf_scheme" or not _is_equity_scheme(b.category):
         return _NotApplicable("Equity shocks apply only to equity-scheme funds; this holding has no modelled equity "
                               "exposure.")  # fmt: skip
@@ -901,15 +1080,44 @@ def _shock_equity(b: Built, value: Decimal, shocks: Mapping[str, Any], ctx: Cont
     return _Applied(out, "proceeds at the withdrawal date, before tax (shock applied to this fund's own NAV, β = 1)")
 
 
-def _shock_inflation(b: Built, value: Decimal, shocks: Mapping[str, Any], ctx: Context) -> _Outcome:
-    return _NotApplicable(
-        "No CPI observation is ingested (source mospi.cpi is not implemented), so the base inflation rate that a "
-        "real-return shock starts from is unknown. No inflation rate is assumed."
+def _shock_inflation(b: Built, value: Decimal, shocks: Mapping[str, Any], ctx: Context, env: _Env) -> _Outcome:
+    infl = env.inflation
+    if isinstance(infl, tuple):
+        return _NotApplicable(
+            f"{infl[0]}: {infl[1]}. The base inflation rate that a real-return shock starts from is unknown; no "
+            "inflation rate is assumed."
+        )
+    with engine_context():
+        delta_annual = value / Decimal(100)
+        shocked_annual = infl.basis.annual + delta_annual
+    base_pi = infl.horizon(ctx.horizon_days)
+    try:
+        shocked_pi = infl.horizon(ctx.horizon_days, delta_annual)
+    except InvalidInput:
+        return _NotApplicable("The shocked inflation rate would be −100 % or lower.")
+    with engine_context():
+        delta_h = shocked_pi - base_pi
+    out = []
+    for w in WHICH:
+        pre = _pretax(b, w)
+        with engine_context():
+            nominal = pre / ctx.amount - ONE
+        res = scn.inflation_scenario(ctx.amount, nominal_return=nominal, base_inflation=base_pi,
+                                     delta_inflation=delta_h, label=scn.ScenarioLabel.STRESS)  # fmt: skip
+        caveats = [f"CPI_{infl.basis.method.value.upper()}_BASE{infl.basis.base_year}_{infl.basis.month:%Y-%m}",
+                   "INFLATION_PROJECTION_TRAILING_12M_NOT_A_FORECAST", *infl.basis.caveats]  # fmt: skip
+        out.append((w, _with_caveats(res, caveats)))
+    return _Applied(
+        tuple(out),
+        f"value in today's rupees (real), before tax: trailing 12-month CPI inflation {pct(infl.basis.annual)} "
+        f"(base {infl.basis.base_year}, {infl.basis.month:%Y-%m}) vs {pct(shocked_annual)} a year, each compounded "
+        f"over {ctx.horizon_days} days",
+        (infl.prov,),
     )
 
 
 def _shock_exit(
-    b: Built, value: Decimal, shocks: Mapping[str, Any], ctx: Context, rebuild: Callable[[date], Built]
+    b: Built, value: Decimal, shocks: Mapping[str, Any], ctx: Context, env: _Env, rebuild: Callable[[date], Built]
 ) -> _Outcome:
     days = int(value)
     if b.kind == "tbill":
@@ -934,10 +1142,7 @@ def _shock_exit(
         )
         return _Applied((("value", res),), f"held-to-maturity value vs sale on {exit_date}, before tax")
     if b.kind == "fd":
-        return _NotApplicable(
-            "A premature FD payout uses the bank's card rate for the shorter tenure actually run, which is not "
-            "stored. No card rate is assumed."
-        )
+        return _fd_early_exit(b, days, ctx, env)
     if days >= ctx.horizon_days:
         return _NotApplicable(f"Exit after {days} days is not before your {ctx.horizon_days}-day horizon.")
     early = rebuild(ctx.as_of + timedelta(days=days))
@@ -968,7 +1173,78 @@ def _shock_exit(
     return _Applied(out, f"proceeds before tax: withdrawal on {ctx.withdrawal} vs exit on {exit_on}")
 
 
-def _shock_reinvest(b: Built, value: Decimal, shocks: Mapping[str, Any], ctx: Context) -> _Outcome:
+def _fd_early_exit(b: Built, days: int, ctx: Context, env: _Env) -> _Outcome:
+    """calc §3.3: card rate for the tenure actually run (bank's table on the booking date) minus the bank's penalty."""
+    assert b.built is not None and b.built.evidence is not None
+    penalty_text = b.extra.get("premature_penalty")
+    if penalty_text is None:
+        return _NotApplicable(
+            "The bank's premature-withdrawal penalty is not recorded for this deposit; none is assumed."
+        )
+    table = env.card_rates
+    if table is None:
+        return _NotApplicable(
+            f"No card-rate table is stored for {b.institution} on or before {ctx.as_of}. A premature payout uses the "
+            "card rate for the shorter tenure actually run; enter the bank's table with its citation. No rate is "
+            "assumed."
+        )
+    table_date = date.fromisoformat(table["as_of"])
+    if (ctx.as_of - table_date).days > FD_RATE_STALE_DAYS:
+        return _NotApplicable(f"The card-rate table for {b.institution} is dated {table_date} (older than "
+                              f"{FD_RATE_STALE_DAYS} days); it is not used.")  # fmt: skip
+    assert b.maturity is not None
+    exit_date = ctx.as_of + timedelta(days=days)
+    if not ctx.as_of < exit_date < b.maturity:
+        return _NotApplicable(f"Exit after {days} days falls on {exit_date}, not strictly before maturity "
+                              f"({b.maturity}).")  # fmt: skip
+    try:
+        bucket = card_rate_for_tenure(table["engine_buckets"], days)
+    except MissingData as exc:
+        return _NotApplicable(f"{exc}; no rate is taken from a neighbouring tenure.")
+    booked = Decimal(dict(b.built.evidence.inputs)["rate"])
+    res = fd_premature_withdrawal(
+        ctx.amount, booked, ctx.as_of, b.maturity, exit_date, period_card_rate=bucket.rate,
+        penalty=Decimal(str(penalty_text)), rate_basis=table["engine_basis"],
+    )  # fmt: skip
+    gross = b.built.evidence.gross_end_value
+    assert gross is not None
+    scen = scn._build(
+        scenario_id="SCN_FD_PREMATURE@1",
+        label=scn.ScenarioLabel.ILLUSTRATIVE_DOWNSIDE,
+        inputs=[
+            scn.Quantity("principal", ctx.amount, "INR"),
+            scn.Quantity("booked_rate", booked, "fraction"),
+            scn.Quantity("period_card_rate", bucket.rate, "fraction"),
+            scn.Quantity("card_rate_bucket_min_days", Decimal(bucket.min_days), "days"),
+            scn.Quantity("card_rate_bucket_max_days", Decimal(bucket.max_days), "days"),
+            scn.Quantity("penalty", res.penalty, "fraction"),
+            scn.Quantity("exit_after_days", Decimal(days), "days"),
+        ],
+        outputs=[
+            scn.Quantity("effective_rate", res.effective_rate, "fraction"),
+            scn.Quantity("premature_payout", res.payout, "INR"),
+            scn.Quantity("same_tenure_at_booked_rate", res.at_booked_rate, "INR"),
+            scn.Quantity("cost_of_breaking", res.cost_of_breaking, "INR"),
+        ],
+        base_value=gross,
+        shocked_value=res.payout,
+        approximate=False,
+        caveats=[res.formula_id, *res.conventions, *res.warnings, "EARLIER_CASH_DATE",
+                 f"CARD_RATE_TABLE_AS_OF_{table['as_of']}"],
+    )  # fmt: skip
+    prov = {
+        "source_id": "bank.fd", "url": table["citation_url"], "retrieved_at": table["entered_at"],
+        "observation_date": table["as_of"], "quality_status": "manual", "fixture": False,
+    }  # fmt: skip
+    prov["freshness"] = badge(prov, ctx.as_of)
+    return _Applied(
+        (("value", scen),),
+        f"maturity proceeds on {b.maturity} vs premature payout on {exit_date}, before tax",
+        (prov,),
+    )
+
+
+def _shock_reinvest(b: Built, value: Decimal, shocks: Mapping[str, Any], ctx: Context, env: _Env) -> _Outcome:
     reason = {
         "tbill": "A T-bill pays no coupons; cash idle between maturity and your withdrawal is conservatively assumed "
         "to earn nothing, and the scenario engine has no idle-cash reinvestment model.",
@@ -987,13 +1263,16 @@ def _scn_quantities(qs: Sequence[scn.Quantity]) -> list[dict[str, str]]:
     return [{"name": q.name, "value": format(q.value, "f"), "unit": q.unit} for q in qs]
 
 
-def _scenario_values(b: Built, shock: str, which: str, res: scn.ScenarioResult) -> dict[str, Any]:
+def _scenario_values(
+    b: Built, shock: str, which: str, res: scn.ScenarioResult, extra_prov: Sequence[Mapping[str, Any]] = ()
+) -> dict[str, Any]:
     eid = f"{b.instrument_id}.scenario.{shock}.{which}"
     inputs = [f"{q.name}: {q.value} {q.unit}" for q in res.inputs]
     common: dict[str, Any] = {
         "formula_id": res.scenario_id,
         "inputs": inputs,
         "prov": b.prov,
+        "extra_prov": list(extra_prov),
         "engine_version": SERVICE_VERSION,
         "assumptions": list(res.caveats),
         "limitations": ["Hypothetical shock; not a forecast and not weighted by how likely it is"],
@@ -1076,19 +1355,26 @@ def scenario(
             for w in WHICH
         },
     }  # fmt: skip
-    handlers: dict[str, Callable[[Built, Decimal, Mapping[str, Any], Context], _Outcome]] = {
+    env = _Env(
+        inflation=_inflation(conn, as_of) if "inflation_pct" in given else ("NOT_REQUESTED", ""),
+        facts=inputs.latest_fund_facts(conn, b.instrument_id, as_of) if b.kind == "mf_scheme" else None,
+        card_rates=(
+            inputs.latest_fd_rate_table(conn, b.institution, as_of) if b.kind == "fd" and b.institution else None
+        ),
+    )
+    handlers: dict[str, Callable[[Built, Decimal, Mapping[str, Any], Context, _Env], _Outcome]] = {
         "rate_bp": _shock_rate,
         "spread_bp": _shock_spread,
         "equity_pct": _shock_equity,
         "inflation_pct": _shock_inflation,
-        "exit_before_maturity_days": lambda bb, v, s, c: _shock_exit(bb, v, s, c, rebuild),
+        "exit_before_maturity_days": lambda bb, v, s, c, e: _shock_exit(bb, v, s, c, e, rebuild),
         "reinvestment_rate": _shock_reinvest,
     }
     for key in SCENARIO_ORDER:
         if key not in given:
             continue
         val = Decimal(given[key])
-        res = handlers[key](b, val, given, ctx)
+        res = handlers[key](b, val, given, ctx, env)
         entry: dict[str, Any] = {"shock": key, "input": str(given[key])}
         if isinstance(res, _NotApplicable):
             entry.update({"status": "not_applicable", "reason": res.reason, "values": None})
@@ -1105,7 +1391,8 @@ def scenario(
                     "caveats": list(first.caveats),
                     "inputs": _scn_quantities(first.inputs),
                     "outputs": {w: _scn_quantities(r.outputs) for w, r in res.results},
-                    "values": [_scenario_values(b, key, w, r) for w, r in res.results],
+                    "values": [_scenario_values(b, key, w, r, res.extra_prov) for w, r in res.results],
+                    "sources": [x for p in res.extra_prov for x in _sources(p)],
                 }
             )
         out["results"].append(entry)
@@ -1636,6 +1923,7 @@ def forecast(conn: sqlite3.Connection, *, as_of: date, instrument_id: str, horiz
                                    **common),
         })  # fmt: skip
     zero = fb.zero_drift_baseline(horizon_months=max(1, (hd * 12 + 182) // 365), as_of=as_of)
+    carry = _yield_carry(conn, s, as_of, hd, ctx)
     validation = _walk_forward(s, prices, steps)
     warnings = list(meta.warnings)
     if nav_is_stale(last, as_of):  # validation-methodology §7: data freshness → mark stale, never silently OK
@@ -1671,10 +1959,81 @@ def forecast(conn: sqlite3.Connection, *, as_of: date, instrument_id: str, horiz
             "limitations": list(meta.limitations),
             "unreliable_when": list(meta.unreliable_when),
             "validation": validation,
+            "yield_carry": carry,
         }
     )
     out["run"] = _run_block(request, out, {**_VERSIONS, "validation": fv.VALIDATION_VERSION})
     return out
+
+
+def _yield_carry(conn: sqlite3.Connection, s: _Series, as_of: date, hd: int, ctx: Context) -> dict[str, Any]:
+    """B4 yield-carry scenarios for a debt fund (validation-methodology §2.4) from its latest factsheet facts."""
+    eid = f"{s.instrument_id}.forecast.yield_carry"
+    label = "Yield-carry scenario range (debt fund)"
+    cat = s.category or ""
+    if cb.mf_tax_class_from_category(cat) is not cb.MfTaxClass.SPECIFIED_DEBT:
+        return {"status": "not_applicable", "reason": "Yield carry applies to debt-category funds only."}
+    facts = inputs.latest_fund_facts(conn, s.instrument_id, as_of)
+    missing = [k for k in ("ytm", "modified_duration", "expense_ratio") if facts is None or facts[k] is None]
+    if facts is None or missing:
+        return refusal(eid, label, "FUND_FACTS_UNAVAILABLE",
+                       "needs the factsheet's portfolio YTM, modified duration and expense ratio "
+                       f"(missing: {', '.join(missing)}); none is assumed")  # fmt: skip
+    as_of_date = date.fromisoformat(facts["as_of_date"])
+    try:
+        yc = fb.yield_carry_scenarios(
+            ytm=Decimal(facts["ytm"]), expense_ratio=Decimal(facts["expense_ratio"]),
+            modified_duration=Decimal(facts["modified_duration"]), horizon_days=hd, as_of=as_of,
+            factsheet_published=as_of_date,
+        )  # fmt: skip
+    except StaleData as exc:
+        return refusal(eid, label, "STALE_DATA", f"factsheet as of {as_of_date}: {exc}; refresh the facts")
+    except InvalidInput as exc:
+        return refusal(eid, label, exc.code, str(exc))
+    prov = facts["prov"]
+    caveats = list(yc.meta.warnings)
+    if facts["expense_ratio_kind"] == "BER":
+        caveats.append("EXPENSE_IS_BER_LEVIES_NOT_INCLUDED_CARRY_OVERSTATED")
+    common: dict[str, Any] = {
+        "formula_id": yc.formula_id,
+        "prov": s.prov,
+        "extra_prov": [prov],
+        "engine_version": SERVICE_VERSION,
+        "assumptions": [*yc.meta.assumptions, "factsheet age measured from its as-of (portfolio) date"],
+        "limitations": [*yc.meta.limitations, *caveats],
+        "inputs": [f"{k}: {v}" for k, v in yc.inputs] + [f"horizon_days: {hd}", f"expense kind: "
+                                                          f"{facts['expense_ratio_kind']}"],
+    }  # fmt: skip
+
+    def row(bp: int, r: Decimal, stress: bool) -> dict[str, Any]:
+        with engine_context():
+            inr = ctx.amount * (ONE + r)
+        tag = f"{'+' if bp > 0 else ''}{bp}bp"
+        return {
+            "delta_yield_bp": bp,
+            "stress": stress,
+            "return": explained(f"{eid}.r.{tag}", f"Horizon return if yields move {tag}", r, "fraction",
+                                what="Carry net of expenses minus the duration effect of an immediate, held yield "
+                                "change (approximate).",
+                                formula="R ≈ (YTM − ER) × days/365 − D_mod × Δy", substituted=pct(r), **common),
+            "value_inr": explained(f"{eid}.inr.{tag}", f"Amount if yields move {tag} (before exit load and tax)", inr,
+                                   "INR", what="Your amount × (1 + R).", formula="amount × (1 + R)",
+                                   substituted=f"{format_inr(ctx.amount)} × (1 + {pct(r)})", **common),
+        }  # fmt: skip
+
+    return {
+        "status": "OK",
+        "label": "scenario range, not a forecast — APPROXIMATE (duration only; roll-down and credit ignored)",
+        "model_id": yc.meta.model_id,
+        "factsheet_as_of": facts["as_of_date"],
+        "factsheet_freshness": facts["freshness"],
+        "carry": explained(f"{eid}.carry", "Carry net of expenses over the horizon", yc.carry, "fraction",
+                           what="Portfolio YTM minus the expense ratio, for the horizon (no yield change).",
+                           formula="(YTM − ER) × days/365", substituted=pct(yc.carry), **common),
+        "scenarios": [row(bp, r, False) for bp, r in yc.scenarios],
+        "stress_scenarios": [row(bp, r, True) for bp, r in yc.stress_scenarios],
+        "context_amount": ctx.describe(),
+    }  # fmt: skip
 
 
 def _walk_forward(s: _Series, prices: list[float], h: int) -> dict[str, Any]:
@@ -1764,6 +2123,70 @@ def _risk_refusal(eid: str, label: str, exc: EngineError, category: rm.AssetCate
     return refusal(eid, label, exc.code, str(exc))
 
 
+SHARPE_WINDOW_YEARS = 3  # risk-methodology §8: Sharpe needs 3 years of daily history; the window is exactly that
+
+
+def _sharpe(
+    conn: sqlite3.Connection,
+    instrument_id: str,
+    obs: Sequence[tuple[date, Decimal]],
+    cat: rm.AssetCategory,
+    nav_prov: Mapping[str, Any],
+    as_of: date,
+) -> dict[str, Any]:
+    """§4.1 Sharpe over the trailing 3-year window, excess over the point-in-time 91-day T-bill series."""
+    eid, label = f"{instrument_id}.risk.sharpe", "Sharpe ratio"
+    rows = [r for r in inputs.risk_free_rows(conn) if r["observation_date"] <= as_of.isoformat()]
+    if not rows:
+        return refusal(eid, label, "RISK_FREE_SERIES_UNAVAILABLE",
+                       "insufficient data: no 91-day T-bill cut-off yields are stored; enter them from RBI's auction "
+                       "press releases. No risk-free rate is assumed")  # fmt: skip
+    if not obs:
+        return refusal(eid, label, "INSUFFICIENT_HISTORY", "no NAV observations")
+    boundary = add_months(obs[-1][0], -12 * SHARPE_WINDOW_YEARS)
+    start = max((i for i, (d, _) in enumerate(obs) if d <= boundary), default=0)
+    window = list(obs[start:])
+    try:
+        series = ReturnSeries.from_observations(window, Frequency.DAILY_BUSINESS)
+        if not series.covers_years(SHARPE_WINDOW_YEARS):
+            raise InsufficientHistory(f"Sharpe needs ≥ {SHARPE_WINDOW_YEARS} years of history")
+        auctions = {date.fromisoformat(r["observation_date"]): Decimal(r["value"]) for r in rows}
+        try:
+            al = macro.align_risk_free(series.return_dates, auctions)
+        except MissingData as exc:
+            return refusal(eid, label, "RISK_FREE_SERIES_INSUFFICIENT",
+                           f"insufficient risk-free coverage: {exc}. No rate is filled in")  # fmt: skip
+        rfs = rm.RiskFreeSeries(al.return_dates, al.effective_annual, Frequency.DAILY_BUSINESS)
+        sr = rm.sharpe(series, rfs, category=cat)
+    except EngineError as exc:
+        return _risk_refusal(eid, label, exc, cat)
+    if not sr.defined or sr.value is None:
+        return refusal(eid, label, "UNDEFINED", f"Sharpe is undefined: {sr.undefined_reason}")
+    last = rows[-1]
+    rf_prov = {
+        "source_id": last["source_id"], "url": last["source_url"], "retrieved_at": last["retrieved_at"],
+        "observation_date": last["observation_date"], "quality_status": last["quality_status"],
+        "fixture": last["quality_status"] == "fixture",
+    }  # fmt: skip
+    rf_prov["freshness"] = badge(rf_prov, as_of)
+    return explained(
+        eid, label, sr.value, "ratio",
+        what="Annualised mean excess return over the 91-day T-bill per unit of volatility of excess returns.",
+        formula_id=sr.method_id, formula="SR = mean(r − r_f) / stdev(r − r_f) × √A",
+        substituted=f"{sr.mean_excess} / {sr.stdev_excess} × √{sr.annualisation_factor} = {sr.value}",
+        inputs=[f"window: {series.start} → {series.end} (trailing {SHARPE_WINDOW_YEARS} years)",
+                f"returns: {series.n_returns}", f"A: {sr.annualisation_factor} ({sr.annualisation_source})",
+                f"mean excess per period: {sr.mean_excess}", f"stdev excess per period: {sr.stdev_excess}",
+                f"mean risk-free per period: {sr.risk_free_per_period}",
+                f"risk-free: 91-day T-bill cut-off, {al.auctions_used} auctions, each return date uses the latest "
+                f"auction on or before it (≤ {al.max_age_days} days old)",
+                "y_eff = (1 + y × 91/365)^(365/91) − 1; r_f = (1 + y_eff)^(1/A) − 1"],
+        prov=dict(nav_prov), engine_version=SERVICE_VERSION, extra_prov=[rf_prov],
+        assumptions=["RBI auction cut-off yields as the risk-free rate (FBIL T-bill curve is licence-blocked)"],
+        limitations=list(sr.caveats),
+    )  # fmt: skip
+
+
 def risk(conn: sqlite3.Connection, *, as_of: date, instrument_id: str) -> dict[str, Any]:
     s = _nav_series_for(conn, instrument_id, as_of)
     ctx = resolve_context(conn, as_of=as_of, amount=None, withdrawal=None)
@@ -1849,11 +2272,7 @@ def risk(conn: sqlite3.Connection, *, as_of: date, instrument_id: str) -> dict[s
             "refused for smoothed NAV: Sharpe needs monthly returns with Lo's adjustment (risk-methodology §4.3)",
         )  # fmt: skip
     else:
-        metrics["sharpe"] = refusal(
-            f"{instrument_id}.risk.sharpe", "Sharpe ratio", "RISK_FREE_SERIES_UNAVAILABLE",
-            "insufficient data: no point-in-time 91-day T-bill yield series is stored to align with the returns; "
-            "no risk-free rate is assumed",
-        )  # fmt: skip
+        metrics["sharpe"] = _sharpe(conn, instrument_id, obs, cat, s.prov, as_of)
     out["status"] = "OK"
     out["metrics"] = metrics
     out["run"] = _run_block(request, out, _VERSIONS)

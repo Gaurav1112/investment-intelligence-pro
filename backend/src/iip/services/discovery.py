@@ -30,7 +30,7 @@ from iip.engine.ranking import (
     Tier,
     rank,
 )
-from iip.services import bonds
+from iip.services import bonds, inputs
 from iip.services.explain import badge, source_ref
 from iip.services.instruments import FD_RATE_STALE_DAYS, TBILL_STALE_DAYS
 from iip.services.profile import ILLUSTRATIVE_AMOUNT, ILLUSTRATIVE_HORIZON_DAYS, ProfileStatus
@@ -200,6 +200,7 @@ def build_universe(  # noqa: PLR0915 - one linear pass per instrument kind
                     ruleset=ruleset,
                     profile=profile,
                     settlement_days=settle,
+                    credit_facts=inputs.fund_credit_facts(conn, r["instrument_id"], as_of),
                 )
             )
             sources[r["instrument_id"]] = {**prov, "kind": "mf_scheme", "category": cat}

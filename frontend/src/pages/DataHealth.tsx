@@ -1,4 +1,5 @@
 import { Link } from "react-router-dom";
+import { MacroInputs } from "../components/MacroInputs";
 import { PageHeader } from "../components/PageHeader";
 import { Empty, ErrorState, Loading } from "../components/States";
 import { dateLabel, utcStamp } from "../lib/format";
@@ -184,6 +185,8 @@ export default function DataHealth() {
           The tax rule file failed to load. Results that depend on tax abstain instead of guessing.
         </p>
       )}
+
+      <MacroInputs />
 
       <h2>Stored observations by quality status</h2>
       {counts.length === 0 ? (

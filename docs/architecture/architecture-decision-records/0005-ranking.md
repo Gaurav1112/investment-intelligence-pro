@@ -36,3 +36,17 @@ risk-methodology.md (ranking guidance; worked example excluding equity for a 1-m
   profile (stays in EXPLORATION with an explanation).
 - **Uninsured credit exposure (red team RT-01).** Contractual options outside T1/T2 fail preservation objectives
   (`UNINSURED_CREDIT_EXPOSURE`), because the DICGC limit is a hard constraint (risk-methodology §9).
+
+## Amendment — ranking_policy@1.2.0 (2026-10-15, red-team RT-23)
+- **Credit floor for debt-holding funds.** A fund that holds debt (every debt, liquid, money-market, overnight and gilt
+  scheme, and every hybrid) is checked against the user's credit floor by the **lowest rating it holds**, taken from its
+  latest factsheet (user-entered with a citation, `fund_facts`), provided the factsheet is **no more than 45 days old**
+  (risk-methodology §8) and not dated after the analysis date.
+- **Unknown is never assumed safe.** When the user sets a credit floor and such a fund has no factsheet, a stale one,
+  no "lowest rating held", or a lowest rating that is not on the long-term scale (short-term ratings such as A1+ have no
+  agreed long-term equivalent in this app), it is excluded with the new reason code **`CREDIT_QUALITY_UNKNOWN`**. With
+  no credit floor set, nothing changes.
+- Credit Risk Funds without a usable factsheet keep the 1.1.0 rule (treated as `UNRATED`, so any floor excludes them);
+  with one, their lowest rating held is used. Equity schemes are unaffected.
+- Engine: `Candidate.credit_quality_unknown`, `candidates.fund_credit_status`; the unknown check runs before the rating
+  comparison, so an unknown-quality fund fails even the lowest floor.

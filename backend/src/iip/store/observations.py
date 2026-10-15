@@ -62,22 +62,27 @@ def _insert(conn: sqlite3.Connection, row: ObservationRow) -> int:
     return int(cur.lastrowid or 0)
 
 
-def upsert_observation(conn: sqlite3.Connection, row: ObservationRow) -> UpsertOutcome:
+def upsert_observation(
+    conn: sqlite3.Connection, row: ObservationRow, *, compare_convention: bool = False
+) -> UpsertOutcome:
     """Idempotent: re-ingesting the same file is a no-op; a changed value supersedes (never overwrites) the old row.
 
     Note: value comparison is on the exact published string, so '25.9504' vs '25.95040' (mfapi padding) is a
-    correction only within the same source — different sources never supersede each other.
+    correction only within the same source — different sources never supersede each other. With
+    ``compare_convention`` a change of convention alone (e.g. a CPI value moving from provisional to final) is also a
+    correction.
     """
     with write_tx(conn):
         current = conn.execute(
-            "SELECT obs_id, value, quality_status FROM observations WHERE series_id=? AND observation_date=?"
-            " AND source_id=? AND superseded_by IS NULL",
+            "SELECT obs_id, value, quality_status, convention FROM observations WHERE series_id=?"
+            " AND observation_date=? AND source_id=? AND superseded_by IS NULL",
             (row.series_id, row.observation_date, row.source_id),
         ).fetchone()
         if current is None:
             _insert(conn, row)
             return UpsertOutcome.INSERTED
-        if current["value"] == row.value and current["quality_status"] == row.quality_status:
+        same_convention = not compare_convention or current["convention"] == row.convention
+        if current["value"] == row.value and current["quality_status"] == row.quality_status and same_convention:
             return UpsertOutcome.UNCHANGED
         old_id = int(current["obs_id"])
         # Temporarily point the old row at itself (a valid FK) so the partial unique index frees the slot.

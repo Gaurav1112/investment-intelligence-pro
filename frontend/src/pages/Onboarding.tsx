@@ -32,6 +32,15 @@ interface FieldError {
   message: string;
 }
 
+/** FastAPI 422 → the server's own reasons, in its words (e.g. "growth objectives require accepting some loss …"). */
+function serverReasons(e: ApiError): string {
+  const detail = (e.detail as { detail?: unknown } | undefined)?.detail;
+  const msgs = Array.isArray(detail)
+    ? detail.map((d) => String((d as { msg?: unknown }).msg ?? "").replace(/^Value error, /, "")).filter(Boolean)
+    : [];
+  return msgs.length ? `${msgs.join("; ")}.` : "some values are not acceptable.";
+}
+
 export default function Onboarding() {
   const { status, reload } = useProfile();
   const navigate = useNavigate();
@@ -65,13 +74,27 @@ export default function Onboarding() {
   const aspFr = pctToFraction(aspPct);
   // Save stays enabled; problems are listed on submit (WCAG 3.3.1/3.3.3). The loss limit only counts while its input is
   // shown ("Yes, up to a limit"): a leftover invalid value behind "No" used to block Save with nothing visible.
+  const growth = p.objective === "D_growth" || p.objective === "E_aggressive_growth";
+  const over = (fr: string | null | "invalid", max: number) => fr !== null && fr !== "invalid" && Number(fr) > max;
   const errors: FieldError[] = [
     ...(!amountValid ? [{ field: "amount", step: 0, message: "Investable amount: digits only, for example 500000." }] : []),
+    // Growth objectives (D, E) need an explicit loss budget — the server refuses them otherwise (profile._consistency).
+    ...(growth && p.loss_acceptable !== true
+      ? [{ field: "loss-yes", step: 3, message: "You chose a growth objective (D or E), which needs a loss limit: choose “Yes, up to a limit” and enter it, or go back and pick objective A, B or C." }]
+      : []),
     ...(p.loss_acceptable === true && lossFr === "invalid"
       ? [{ field: "loss", step: 3, message: `Largest loss you would accept: ${PCT_HELP}` }]
       : []),
+    ...(growth && p.loss_acceptable === true && lossFr === null
+      ? [{ field: "loss", step: 3, message: "Largest loss you would accept: required for growth objectives, for example 10." }]
+      : []),
+    ...(p.loss_acceptable === true && over(lossFr, 1)
+      ? [{ field: "loss", step: 3, message: "Largest loss you would accept: at most 100 %." }]
+      : []),
     ...(slabFr === "invalid" ? [{ field: "slab", step: 4, message: `Income-tax slab: ${PCT_HELP}` }] : []),
+    ...(over(slabFr, 0.5) ? [{ field: "slab", step: 4, message: "Income-tax slab: at most 50 %." }] : []),
     ...(aspFr === "invalid" ? [{ field: "asp", step: 4, message: `Return you are hoping for: ${PCT_HELP}` }] : []),
+    ...(over(aspFr, 5) ? [{ field: "asp", step: 4, message: "Return you are hoping for: at most 500 % a year." }] : []),
   ];
   const errorFor = (field: string) => errors.find((x) => x.field === field);
   const showSummary = summaryKey > 0 && errors.length > 0;
@@ -116,7 +139,6 @@ export default function Onboarding() {
     }
   }
 
-  const growth = p.objective === "D_growth" || p.objective === "E_aggressive_growth";
 
   return (
     <main className="onboarding">
@@ -206,6 +228,9 @@ export default function Onboarding() {
                 <span className="small muted"> — {OBJECTIVES[k]?.blurb}</span>
               </label>
             ))}
+            {growth ? (
+              <p className="hint">Growth objectives need a loss limit: the next step asks how much loss you would accept.</p>
+            ) : null}
           </fieldset>
         )}
         {step === 3 && (
@@ -216,9 +241,11 @@ export default function Onboarding() {
                 <input type="radio" name="loss" checked={p.loss_acceptable === false} onChange={() => set("loss_acceptable", false)} /> No
               </label>
               <label className="choice">
-                <input type="radio" name="loss" checked={p.loss_acceptable === true} onChange={() => set("loss_acceptable", true)} /> Yes, up
+                <input type="radio" name="loss" id="loss-yes" checked={p.loss_acceptable === true} onChange={() => set("loss_acceptable", true)}
+                  aria-invalid={Boolean(errorFor("loss-yes"))} aria-describedby={errorFor("loss-yes") ? "loss-yes-error" : undefined} /> Yes, up
                 to a limit
               </label>
+              {fieldError("loss-yes")}
             </fieldset>
             {p.loss_acceptable ? (
               <div className="field">
@@ -343,9 +370,7 @@ export default function Onboarding() {
         {save.error ? (
           <p className="callout callout--stale" role="alert">
             Not saved:{" "}
-            {save.error instanceof ApiError && save.error.status === 422
-              ? "some values are not acceptable (check the loss limit and objective combination)."
-              : "the request failed."}
+            {save.error instanceof ApiError && save.error.status === 422 ? serverReasons(save.error) : "the request failed."}
           </p>
         ) : null}
         {result ? (

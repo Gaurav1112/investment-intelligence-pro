@@ -96,3 +96,63 @@ describe("Onboarding validation (A11Y-1)", () => {
     await waitFor(() => expect(document.title).toBe("Your objectives · Investment Intelligence Pro"));
   });
 });
+
+describe("Onboarding: growth objectives need a loss limit (user report 2026-10-15)", () => {
+  it("growth + 'No' to loss is caught before saving and points at the loss question; nothing is sent", async () => {
+    const calls = setup();
+    await waitFor(() => expect(calls.some((c) => c.url === "/api/profile")).toBe(true));
+    await userEvent.click(screen.getByRole("button", { name: "3. Objective" }));
+    await userEvent.click(screen.getByRole("radio", { name: /Risk-adjusted growth/ }));
+    expect(screen.getByText(/Growth objectives need a loss limit: the next step asks/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "4. Loss & early need" }));
+    await userEvent.click(screen.getByRole("radio", { name: "No" }));
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    const summary = await screen.findByRole("alert");
+    expect(summary).toHaveTextContent(/growth objective \(D or E\), which needs a loss limit/);
+    expect(puts(calls)).toHaveLength(0);
+    await userEvent.click(screen.getByRole("link", { name: /growth objective/ }));
+    expect(screen.getByRole("radio", { name: /Yes, up to a limit/ })).toHaveFocus();
+  });
+
+  it("growth + 'Yes' with an empty limit asks for the limit; with a limit it saves", async () => {
+    const calls = setup();
+    await waitFor(() => expect(calls.some((c) => c.url === "/api/profile")).toBe(true));
+    await userEvent.click(screen.getByRole("button", { name: "3. Objective" }));
+    await userEvent.click(screen.getByRole("radio", { name: /Aggressive growth/ }));
+    await userEvent.click(screen.getByRole("button", { name: "4. Loss & early need" }));
+    await userEvent.click(screen.getByRole("radio", { name: /Yes, up to a limit/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/required for growth objectives/);
+    expect(puts(calls)).toHaveLength(0);
+
+    await userEvent.type(screen.getByLabelText(/Largest loss you would accept/), "15");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(puts(calls)).toHaveLength(1));
+    expect(puts(calls)[0]?.body).toMatchObject({ objective: "E_aggressive_growth", loss_acceptable: true, max_loss_fraction: "0.15" });
+  });
+
+  it("a server refusal shows the server's own reason, not a guess", async () => {
+    const calls: Call[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        const method = init?.method ?? "GET";
+        calls.push({ url, method, body: undefined });
+        if (method === "PUT")
+          return json({ detail: [{ loc: ["body"], msg: "Value error, withdrawal date must be after today", type: "value_error" }] }, 422);
+        return json(STATUS);
+      }),
+    );
+    render(
+      <MemoryRouter>
+        <ProfileProvider>
+          <Onboarding />
+        </ProfileProvider>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(calls.some((c) => c.url === "/api/profile")).toBe(true));
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText(/Not saved: withdrawal date must be after today\./)).toBeInTheDocument();
+  });
+});

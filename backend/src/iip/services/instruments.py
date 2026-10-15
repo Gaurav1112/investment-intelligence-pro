@@ -57,7 +57,8 @@ class FDIn(BaseModel):
     rate: Decimal = Field(ge=0, lt=Decimal("0.3"))
     tenure_days: int = Field(ge=7, le=3650)
     premature_penalty: Decimal | None = Field(default=None, ge=0, lt=Decimal("0.1"))
-    existing_deposits_at_institution: Decimal = Field(default=Decimal(0), ge=0)
+    # None = not stated: DICGC cover then cannot be established and is never assumed (ECC F1). Enter 0 for none.
+    existing_deposits_at_institution: Decimal | None = Field(default=None, ge=0)
     citation: Citation
     _f = field_validator("rate", "premature_penalty", "existing_deposits_at_institution", mode="before")(_no_float)
 
@@ -377,7 +378,10 @@ def add_fd(conn: sqlite3.Connection, body: FDIn, now: datetime) -> str:
         conn.execute(
             "INSERT INTO settings(key, value_json) VALUES (?, ?)"
             " ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json",
-            (f"fd.existing:{iid}", json.dumps(format(body.existing_deposits_at_institution, "f"))),
+            (
+                f"fd.existing:{iid}",
+                json.dumps(None if (x := body.existing_deposits_at_institution) is None else format(x, "f")),
+            ),
         )
         # Needed by the profile's "exclude NBFC deposits" restriction and to recognise sovereign-backed post-office
         # deposits (dicgc_eligible alone cannot tell an NBFC from a post office).

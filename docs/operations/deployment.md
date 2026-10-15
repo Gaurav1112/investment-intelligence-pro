@@ -40,7 +40,9 @@ make open           # in a second terminal: opens the browser with the one-time 
 3. **Mutual funds → Enter exit load** for non-liquid funds, from the scheme's SID/KIM, with a citation. No public source publishes exit loads, so
    until you enter one, the fund is excluded (`EXIT_LOAD_UNKNOWN`) rather than assumed load-free.
 4. **Fixed income → add T-bills / FDs.** Enter the yield or rate from the official page (RBI auction press release, the bank's rate
-   page) with its URL and date. The app never scrapes RBI, NSE, BSE, CCIL or FBIL (their terms prohibit it).
+   page) with its URL and date. The app never scrapes RBI, NSE, BSE, CCIL or FBIL (their terms prohibit it). For an FD, also
+   state the deposits you already hold at that bank (0 if none); FDs in your actual portfolios at the same bank are added
+   automatically. With neither, DICGC cover cannot be checked and the FD is never ranked as insured.
 
 ## Importing a CAS statement (CAMS / KFintech PDF)
 
@@ -92,7 +94,7 @@ make test-browser   # opt-in real-browser security tests (SEC-16 cross-origin, S
 
 ```bash
 make backup         # SQLite online backup API → ~/.iip/backups/iip-<UTC>.db, verified with integrity_check
-make restore-drill  # restores the newest backup into a temp file and checks it (never touches the live DB)
+make restore-drill  # restores the newest plain backup into a temp file, checks it, deletes the temp copy (never touches the live DB)
 ```
 
 To restore for real: stop the app, keep a copy of `~/.iip/iip.db`, then use `iip.store.db.restore(backup, ~/.iip/iip.db)`.
@@ -111,6 +113,8 @@ make restore-encrypted BACKUP=… DEST=…      # a specific file / destination 
 - The plaintext database never touches the disk during backup. Restore decrypts and checks everything in memory (GCM tag,
   then SQLite `integrity_check`) before writing anything: a wrong passphrase or a modified file fails cleanly and leaves
   no partial file. To use a restored file, stop the app and move it to `~/.iip/iip.db` (keep the old one).
+- A restored file is a **plaintext** copy of your data. *Erase my data* with "delete backups" removes
+  `restored-*.db` in the data dir along with every backup format; a custom `DEST=` elsewhere is yours to delete.
 
 ## Configuration (environment variables)
 

@@ -282,8 +282,12 @@ The design principle: **the LLM writes captions for decisions that have already 
 - **Erase my data**: `POST /api/data/erase` requires the confirmation phrase `ERASE MY DATA` in the body plus the CSRF checks. It then:
   - deletes all rows in user tables (holdings, objectives, tax profile, analyses, import ledger);
   - runs `PRAGMA secure_delete=ON` for the operation, then `VACUUM`;
-  - optionally deletes backups that contain user data;
-  - reports what was deleted.
+  - optionally deletes backups that contain user data: every copy the app's own tools write (ECC SR-01), i.e.
+    `backups/iip-*.sqlite3` (API), `iip-*.db` (`make backup`), `iip-*.db.enc` (`make backup-encrypted`), any
+    interrupted `*.partial`, and the PLAINTEXT `<data-dir>/restored-*.db` that `make restore-encrypted` writes by
+    default. A restore to a custom `DEST=` outside the data dir is not tracked and must be deleted by hand.
+    `make restore-drill` deletes its temporary copy;
+  - reports what was deleted and how many backup files remain.
   
   Public market data is kept unless the user asks for a "factory reset".
 - **Backups**: the online backup API (reliability doc §7).

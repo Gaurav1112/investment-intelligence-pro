@@ -30,6 +30,7 @@ const LABELS: Record<string, string> = {
   LOW_EVIDENCE: "Low evidence",
   EXCEEDS_DICGC_LIMIT_AT_THIS_BANK: "Partly outside DICGC cover",
   NOT_DICGC_INSURED: "Not DICGC insured",
+  EXISTING_DEPOSITS_NOT_RECORDED: "Other deposits at this bank not entered, so DICGC cover is unknown",
   PREMATURE_PENALTY_UNKNOWN: "Early-exit penalty unknown",
   ANNUALISED_FROM_SHORT_PERIOD: "Annualised from a short period",
   CONSTRAINT_CONFLICT: "Your settings pull in different directions",

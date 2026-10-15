@@ -275,14 +275,17 @@ def fd_candidate(
     withdrawal: date,
     dicgc_eligible: bool,
     premature_penalty: Decimal | None,
-    other_deposits_same_bank: Decimal,
+    other_deposits_same_bank: Decimal | None,
     ruleset: tx.TaxRuleSet,
     profile: tx.TaxProfile | None,
     short_tenure_cutoff_months: int = 6,
     sovereign_backed: bool = False,
 ) -> BuiltCandidate:
     """Cumulative deposit held to maturity. ``sovereign_backed`` = a Post Office Time Deposit (Government of India
-    obligation, not DICGC-insured): contractual sovereign credit, so T1 rather than uninsured bank credit."""
+    obligation, not DICGC-insured): contractual sovereign credit, so T1 rather than uninsured bank credit.
+
+    ``other_deposits_same_bank`` = None means nothing is recorded about the user's other deposits at this bank. DICGC
+    cover then cannot be established, so the deposit is never treated as zero-loss insured credit (ECC F1)."""
     maturity = start + timedelta(days=tenure_days)
     if maturity > withdrawal:
         return _ineligible(
@@ -297,8 +300,8 @@ def fd_candidate(
     except EngineError as exc:
         return _ineligible(instrument_id, name, Tier.T2, [f"{exc.code}: {exc}"], amount)
     with engine_context():
-        exposure = other_deposits_same_bank + res.maturity_amount
-        fully_insured = dicgc_eligible and exposure <= DICGC_LIMIT
+        exposure = None if other_deposits_same_bank is None else other_deposits_same_bank + res.maturity_amount
+        fully_insured = dicgc_eligible and exposure is not None and exposure <= DICGC_LIMIT
         credit_safe = sovereign_backed or fully_insured
         net = res.maturity_amount - tax_amt
     flags: list[str] = []
@@ -306,6 +309,8 @@ def fd_candidate(
         flags.append("SOVEREIGN_BACKED_NOT_DICGC")
     elif not dicgc_eligible:
         flags.append("NOT_DICGC_INSURED")
+    elif exposure is None:
+        flags.append("EXISTING_DEPOSITS_NOT_RECORDED")
     elif not fully_insured:
         flags.append("EXCEEDS_DICGC_LIMIT_AT_THIS_BANK")
     if report.unverified_assumption:
@@ -331,7 +336,9 @@ def fd_candidate(
             ("start", start.isoformat()),
             ("maturity", maturity.isoformat()),
             ("method", res.method.value),
-            ("dicgc_exposure_at_bank", str(exposure)),
+            ("dicgc_exposure_at_bank", str(exposure))
+            if exposure is not None
+            else ("dicgc_existing_deposits", "not recorded"),
         ),
         assumptions=(*res.conventions, "Interest is taxed in the year of maturity (cumulative FD; TDS ignored)"),
         limitations=(

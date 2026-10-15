@@ -56,6 +56,7 @@ def fd(conn: Any, institution: str, kind: str = "bank", as_of: date = AS_OF, rat
     body = FDIn(
         institution=institution, institution_type=kind,  # type: ignore[arg-type]
         rate=Decimal(rate), tenure_days=90, premature_penalty=Decimal("0.01"),
+        existing_deposits_at_institution=Decimal(0),  # stated, not assumed (ECC F1)
         citation=Citation(url=CITE_URL, as_of=as_of),
     )  # fmt: skip
     return add_fd(conn, body, NOW)

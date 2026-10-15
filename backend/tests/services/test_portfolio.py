@@ -515,3 +515,74 @@ def test_erase_with_backups_removes_both_backup_naming_schemes(conn: sqlite3.Con
     (bdir / "iip-20261015T000001Z.sqlite3").write_bytes(b"y")
     pf.erase(conn, tmp_path, delete_backups=True)
     assert list(bdir.glob("iip-*")) == []
+
+
+@pytest.mark.parametrize(
+    "rel",
+    [
+        "backups/iip-20261015T000000Z.db.enc",  # make backup-encrypted
+        "backups/iip-20261015T000000Z.db.enc.partial",  # interrupted encrypted backup
+        "backups/iip-20261015T000000Z-v2.sqlite3.partial",  # any interrupted write in backups/
+        "restored-20261015T000000Z.db",  # make restore-encrypted default destination (PLAINTEXT)
+        "restored-20261015T000000Z.db.partial",  # interrupted restore
+    ],
+)
+def test_erase_finds_and_removes_every_backup_artefact(conn: sqlite3.Connection, tmp_path: Path, rel: str) -> None:
+    """ECC SR-01: inventory and erase must see every copy of user data the app's own tools write, and the count of
+    remaining backups must not read 0 while one is left."""
+    f = tmp_path / rel
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_bytes(b"x")
+    assert pf.inventory(conn, tmp_path)["backups"]["count"] == 1
+    out = pf.erase(conn, tmp_path, delete_backups=False)
+    assert out["backups_remaining"] == 1 and f.exists()
+    out = pf.erase(conn, tmp_path, delete_backups=True)
+    assert out["backups_deleted"] == 1 and out["backups_remaining"] == 0 and not f.exists()
+
+
+def test_erase_leaves_the_live_database_and_unrelated_files(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    keep = [tmp_path / "x.db", tmp_path / "notes.db", tmp_path / "backups" / "README.txt"]
+    keep[2].parent.mkdir(parents=True, exist_ok=True)
+    for k in keep[1:]:
+        k.write_bytes(b"k")
+    pf.erase(conn, tmp_path, delete_backups=True)
+    assert all(k.exists() for k in keep)
+
+
+def test_stale_check_reports_a_book_it_cannot_replay(conn: sqlite3.Connection) -> None:
+    """ECC silent-failure F2: with only the stale-data rule on, a portfolio whose stored transactions cannot be
+    replayed used to be skipped with no trace, and its stale holdings raised no alert."""
+    pid = standard_book(conn)
+    conn.execute(
+        "INSERT INTO transactions(txn_id, portfolio_id, instrument_id, txn_date, txn_type, units, amount, price,"
+        " source, import_batch, created_at) VALUES ('t-x', ?, 'mf:990003', '2025-07-01', 'fee', '1', '1.00', NULL,"
+        " 'manual', NULL, ?)",
+        (pid, NOW.isoformat()),
+    )  # a 'fee' row is allowed by the schema but rejected by FIFO replay (hand-edited or legacy database)
+    conn.commit()
+    al.save_rules(conn, al.AlertRules(maturity_within_days=None, concentration_hhi_above=None,
+                                      decline_since_added_beyond=None, tax_coverage_within_days=None,
+                                      ingestion_failed_lookback_days=None))  # fmt: skip
+    out = al.evaluate(conn, NOW, tax_coverage_to=date(2027, 1, 1), tax_rules_loaded=True)
+    assert out["skipped_portfolios"] == [f"{pid}: UNSUPPORTED_TXN_TYPE"]
+    crit = [a for a in out["created"] if a["severity"] == "critical"]
+    assert len(crit) == 1 and crit[0]["kind"] == "inconsistent_book" and crit[0]["subject_id"] == pid
+    # With a portfolio rule on as well, the same portfolio is reported once, not twice.
+    al.save_rules(conn, al.AlertRules(concentration_hhi_above=None, decline_since_added_beyond=None,
+                                      tax_coverage_within_days=None, ingestion_failed_lookback_days=None))  # fmt: skip
+    out = al.evaluate(conn, NOW, tax_coverage_to=date(2027, 1, 1), tax_rules_loaded=True)
+    assert out["skipped_portfolios"] == [f"{pid}: UNSUPPORTED_TXN_TYPE"]
+
+
+def test_liquidity_ladder_honours_elss_lock_in_detected_by_name() -> None:
+    """ECC PR-2: an ELSS whose AMFI category does not say ELSS is locked for 3 years; its lot is not 3-day cash."""
+    lot = pf.Lot(txn_id="t", acquired=date(2026, 9, 1), units=Decimal("1"), cost=Decimal("100"))
+    h = pf.Holding(
+        instrument_id="mf:1", name="XYZ ELSS Tax Saver Index Fund - Direct Growth", kind="mf_scheme",
+        category="Index Funds - Equity Funds",
+        position=pf.Position("mf:1", (lot,), Decimal("1"), Decimal("100"), Decimal(0), Decimal(0)),
+        invested=Decimal("100"), nav=None, badge="UNKNOWN", market_value=None, exclusion=None, maturity=None,
+        tenure_days=None, institution=None, dicgc_eligible=None,
+    )  # fmt: skip
+    as_of = date(2026, 10, 15)
+    assert pf._lot_days(h, lot, as_of) == (date(2026, 9, 1) - as_of).days + 1095 + 3

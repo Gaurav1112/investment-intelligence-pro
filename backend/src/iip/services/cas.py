@@ -597,6 +597,7 @@ def apply_cas_import(
     if pre_change is not None:
         pre_change()
     with write_tx(conn):
+        pf.claim_previewed_batch(conn, key, pid, body.sha256)
         pf._portfolio(conn, pid)
         for item in pending:
             conn.execute(

@@ -1,8 +1,12 @@
 # ADR-0013: Hosted mode on Vercel (single user, personal use)
 
-Status: **IMPLEMENTED, NOT VERIFIED on Vercel.** Nothing has been deployed yet. Every hosted behaviour is tested
-locally against a libSQL **file** standing in for the remote database (`tests/hosted/`, `make deploy-check`). Behaviour
-that only a real Vercel deployment and a real Turso database can show is listed under "Not verified" below.
+Status: **DEPLOYED and VERIFIED on Vercel (2026-10-15)** at the project's production URL, with a Turso database from
+the Vercel marketplace. Verified on the live deployment: the UI is served from the function bundle; the build image
+runs pnpm and `node --run`; region `bom1` (Mumbai) is accepted on Hobby (`x-vercel-id: bom1::bom1`); login over the
+token gives a Secure, HttpOnly, SameSite=Strict cookie; HSTS, CSP, nosniff and no-referrer are sent; a raw deployment
+URL is refused (400); `/api/ready` reports schema version 3 against Turso; AMFI answers Vercel; the NAVAll fetch stores
+all 1,779 minimised-scope schemes in one 98 s call (0.038 s per scheme) after the batching fix. Items 4, 5 and 8 below
+remain NOT VERIFIED.
 
 ## Context
 
@@ -126,8 +130,8 @@ instances cold-starting at once cannot both apply the same migration.
      per call), so the job never stalls.
    - **One download per run:** the first call stages only the minimised scope, about 1 MiB in 18 rows of about
      58 KiB for 1,780 schemes. Continuations read that and never fetch.
-   Timing against Turso after the fix: **NOT VERIFIED** until the next deploy. The response reports
-   `seconds_per_scheme`.
+   Timing against Turso after the fix: **VERIFIED (2026-10-15)** — one call stored all 1,779 schemes in 98 s
+   (`seconds_per_scheme` 0.0379), well inside the 300 s limit.
 7. **AMFI from Vercel: VERIFIED (2026-10-15).** From `bom1`, `www.amfiindia.com` answered 302 to
    `portal.amfiindia.com/spages/NAVAll.txt`, which answered 200 in under a second.
 8. **Hermetic tests:** the hermetic test guard blocks Python sockets only. libSQL's Rust client would bypass it, so the

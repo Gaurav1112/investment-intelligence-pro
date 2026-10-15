@@ -32,7 +32,7 @@ make open           # in a second terminal: opens the browser with the one-time 
 
 ## Getting real data (personal use)
 
-1. **Data health → Fetch latest AMFI NAVs.** Downloads AMFI's `NAVAll.txt` once and keeps only Direct-plan Growth schemes plus
+1. **Mutual funds → Fetch latest AMFI NAVs.** Downloads AMFI's `NAVAll.txt` once and keeps only Direct-plan Growth schemes plus
    anything you hold or watch (data minimisation, per AMFI's terms of use).
 2. **Mutual funds → Backfill history** for each scheme you want evaluated. This makes polite, rate-limited 90-day requests and keeps
    only that scheme's rows. Discovery needs enough history for at least 10 independent windows at your horizon. For example, a 6-month
@@ -51,7 +51,7 @@ Status: **IMPLEMENTED, NOT VERIFIED** with a real statement (tests use a synthet
 1. Request a **Detailed** Consolidated Account Statement (with transactions, from the beginning) from CAMS or KFintech. It arrives
    as a password-protected PDF; the password is usually derived from your PAN and date of birth. Summary statements and
    NSDL/CDSL depository statements are refused because they carry no transaction ledger.
-2. Make sure the schemes are in the local store first (**Data health → Fetch latest AMFI NAVs**). Matching is by the **exact ISIN**
+2. Make sure the schemes are in the local store first (**Mutual funds → Fetch latest AMFI NAVs**). Matching is by the **exact ISIN**
    printed on the statement, never by name; a scheme whose ISIN is not stored is shown as *unmatched* and none of its rows are
    imported.
 3. **Overview → open a portfolio → Import CAS statement (PDF).** Choose the PDF, type the password, and press *Preview CAS
@@ -186,7 +186,7 @@ vercel deploy --prod     # uploads per .vercelignore; Vercel installs requiremen
 Then open `https://<your-project>.vercel.app/#login=<token>`. As with `make open`, the token is in the URL fragment and
 is never sent to the server. Do the first-deploy checks in ADR-0013:
 - the UI loads at `/`;
-- **Data health → Fetch latest AMFI NAVs** completes (it may take several calls; the page shows progress);
+- **Mutual funds → Fetch latest AMFI NAVs** completes (it may take several calls; the page shows progress);
 - a backfill completes.
 
 ### Hosted maintenance

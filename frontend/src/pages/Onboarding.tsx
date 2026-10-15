@@ -92,11 +92,17 @@ export default function Onboarding() {
       ? [{ field: "loss", step: 3, message: "Largest loss you would accept: at most 100 %." }]
       : []),
     ...(slabFr === "invalid" ? [{ field: "slab", step: 4, message: `Income-tax slab: ${PCT_HELP}` }] : []),
+    // The engine models the new regime only; a slab without it was silently replaced by the illustrative 30 % slab.
+    ...(slabFr !== null && slabFr !== "invalid" && p.tax_regime !== "new"
+      ? [{ field: "regime", step: 4, message: "Your slab is used only under the new tax regime (the old regime is not modelled): tick “I file under the new tax regime”, or leave the slab empty." }]
+      : []),
     ...(over(slabFr, 0.5) ? [{ field: "slab", step: 4, message: "Income-tax slab: at most 50 %." }] : []),
     ...(aspFr === "invalid" ? [{ field: "asp", step: 4, message: `Return you are hoping for: ${PCT_HELP}` }] : []),
     ...(over(aspFr, 5) ? [{ field: "asp", step: 4, message: "Return you are hoping for: at most 500 % a year." }] : []),
   ];
   const errorFor = (field: string) => errors.find((x) => x.field === field);
+  // Not shown before the question is answered: only after "No", or once a save was attempted.
+  const showLossYes = Boolean(errorFor("loss-yes")) && (p.loss_acceptable === false || summaryKey > 0);
   const showSummary = summaryKey > 0 && errors.length > 0;
 
   useEffect(() => {
@@ -242,10 +248,10 @@ export default function Onboarding() {
               </label>
               <label className="choice">
                 <input type="radio" name="loss" id="loss-yes" checked={p.loss_acceptable === true} onChange={() => set("loss_acceptable", true)}
-                  aria-invalid={Boolean(errorFor("loss-yes"))} aria-describedby={errorFor("loss-yes") ? "loss-yes-error" : undefined} /> Yes, up
+                  aria-invalid={showLossYes} aria-describedby={showLossYes ? "loss-yes-error" : undefined} /> Yes, up
                 to a limit
               </label>
-              {fieldError("loss-yes")}
+              {showLossYes ? fieldError("loss-yes") : null}
             </fieldset>
             {p.loss_acceptable ? (
               <div className="field">
@@ -298,6 +304,20 @@ export default function Onboarding() {
               </select>
             </div>
             <div className="field">
+              <label className="choice">
+                <input
+                  type="checkbox"
+                  id="regime"
+                  checked={p.tax_regime === "new"}
+                  onChange={(e) => set("tax_regime", e.target.checked ? "new" : null)}
+                  aria-invalid={Boolean(errorFor("regime"))}
+                  aria-describedby={errorFor("regime") ? "regime-error" : undefined}
+                />{" "}
+                I file under the new tax regime
+              </label>
+              {fieldError("regime")}
+            </div>
+            <div className="field">
               <label htmlFor="slab">Your marginal income-tax slab (%, new regime) — optional</label>
               <span className="pct">
               <input
@@ -309,7 +329,9 @@ export default function Onboarding() {
                 aria-describedby={describedBy("slab", "slab-hint")}
               />
               </span>
-              <div id="slab-hint" className="hint">If empty, after-tax figures use a labelled illustrative 30 % slab, not yours.</div>
+              <div id="slab-hint" className="hint">
+                Used only with the new regime ticked above. If empty, after-tax figures use a labelled illustrative 30 % slab, not yours.
+              </div>
               {fieldError("slab")}
             </div>
             <div className="field">
@@ -322,10 +344,6 @@ export default function Onboarding() {
                 <option value="0.25">25 % (above ₹2 crore)</option>
               </select>
             </div>
-            <label className="choice">
-              <input type="checkbox" checked={p.tax_regime === "new"} onChange={(e) => set("tax_regime", e.target.checked ? "new" : null)} /> I
-              file under the new tax regime
-            </label>
             <div className="field">
               <label htmlFor="asp">Return you are hoping for (% a year) — optional</label>
               <span className="pct">
@@ -361,7 +379,7 @@ export default function Onboarding() {
               <dt>Early need</dt>
               <dd>{p.early_need ?? "not given"}</dd>
               <dt>Income-tax slab</dt>
-              <dd>{slabPct ? `${slabPct} %` : "not given"}</dd>
+              <dd>{slabPct ? `${slabPct} %${p.tax_regime === "new" ? " (new regime)" : " — not used until the new regime is ticked"}` : "not given"}</dd>
               <dt>Return you are hoping for</dt>
               <dd>{aspPct ? `${aspPct} % a year` : "not given"}</dd>
             </dl>

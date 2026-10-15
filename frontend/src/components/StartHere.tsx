@@ -109,7 +109,7 @@ export function StartHere({ defaultOpen }: { defaultOpen: boolean }) {
 
   const steps: Step[] = [
     { key: "objectives", title: "Set your objectives", ...s1, to: "/onboarding", action: s1.state === "todo" ? "Set objectives" : "Review" },
-    { key: "nav", title: "Fetch the latest AMFI NAVs", ...s2, to: "/data-health", action: "Data health" },
+    { key: "nav", title: "Fetch the latest AMFI NAVs", ...s2, to: "/mf", action: "Mutual funds" },
     { key: "history", title: "Backfill history for the funds you want evaluated", ...s3, to: "/mf", action: "Mutual funds" },
     { key: "fixed", title: "Add T-bills or FDs", ...s4, to: "/fi", action: "Fixed income" },
     { key: "discover", title: "Run Discovery", ...s5, to: "/discover", action: "Open Discovery" },
@@ -129,7 +129,7 @@ export function StartHere({ defaultOpen }: { defaultOpen: boolean }) {
           </span>
         </span>
       </summary>
-      <p className="small muted">Five steps to get results for your own money. Each step links to where it is done.</p>
+      <p className="small muted">Four setup steps, then Discovery shows results for your own money. Each step links to where it is done.</p>
       <ol className="checklist" aria-label="Setup steps">
         {steps.map((s, i) => (
           <li key={s.key} data-testid={`step-${s.key}`} data-state={s.state}>

@@ -150,7 +150,7 @@ describe("MfExplorer", () => {
     await userEvent.click(await screen.findByRole("button", { name: /Backfill history for Example Liquid/ }));
     const msg = await screen.findByText(/status PARTIAL/);
     expect(msg).toHaveTextContent("rows ok 900 · rows rejected 3 · stored 897 · window 2019-01 failed: timeout");
-    expect(msg).toHaveTextContent("did not complete cleanly");
+    expect(msg).toHaveTextContent("some requests failed, so part of the data is missing; running it again fills the gaps");
     const post = calls.find((c) => c.method === "POST")!;
     expect(post.url).toBe("/api/ingestion/backfill/900551");
   });

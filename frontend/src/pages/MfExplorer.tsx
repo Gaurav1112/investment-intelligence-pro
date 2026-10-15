@@ -65,7 +65,13 @@ function runText(what: string, s: RunSummary): Activity {
     text:
       `${what}: status ${s.status.toUpperCase()} · rows ok ${s.rows_ok} · rows rejected ${s.rows_rejected} · stored ${s.stored}` +
       (s.detail ? ` · ${s.detail}` : "") +
-      (ok ? "" : ` — the run did not complete cleanly; not all data was stored.`) +
+      (s.status === "partial"
+        ? /failed/i.test(s.detail ?? "")
+          ? ` — some requests failed, so part of the data is missing; running it again fills the gaps.`
+          : ` — everything that passed validation was stored; the rejected rows are ones AMFI publishes without a usable value (for example a NAV of 0 or "N.A.", or a malformed ISIN). Details in Data health.`
+        : ok
+          ? ""
+          : ` — the run failed; nothing from the failed part was stored.`) +
       ` (run ${s.run_id})`,
   };
 }

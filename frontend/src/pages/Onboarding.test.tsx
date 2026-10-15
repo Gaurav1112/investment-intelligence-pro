@@ -156,3 +156,30 @@ describe("Onboarding: growth objectives need a loss limit (user report 2026-10-1
     expect(await screen.findByText(/Not saved: withdrawal date must be after today\./)).toBeInTheDocument();
   });
 });
+
+describe("Onboarding: tax regime and slab (walkthrough 2026-10-15)", () => {
+  it("a slab without the new regime ticked is flagged instead of being silently replaced by the illustrative slab", async () => {
+    const calls = setup();
+    await waitFor(() => expect(calls.some((c) => c.url === "/api/profile")).toBe(true));
+    await userEvent.click(screen.getByRole("button", { name: "5. Liquidity & extras" }));
+    await userEvent.type(screen.getByLabelText(/marginal income-tax slab/), "20");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/used only under the new tax regime/);
+    expect(puts(calls)).toHaveLength(0);
+    await userEvent.click(screen.getByRole("checkbox", { name: /new tax regime/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(puts(calls)).toHaveLength(1));
+    expect(puts(calls)[0]?.body).toMatchObject({ tax_regime: "new", slab_rate: "0.2" });
+  });
+
+  it("the growth/loss message is not shown before the loss question is answered", async () => {
+    const calls = setup();
+    await waitFor(() => expect(calls.some((c) => c.url === "/api/profile")).toBe(true));
+    await userEvent.click(screen.getByRole("button", { name: "3. Objective" }));
+    await userEvent.click(screen.getByRole("radio", { name: /Risk-adjusted growth/ }));
+    await userEvent.click(screen.getByRole("button", { name: "4. Loss & early need" }));
+    expect(screen.queryByText(/which needs a loss limit/)).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("radio", { name: "No" }));
+    expect(screen.getByText(/which needs a loss limit/)).toBeInTheDocument();
+  });
+});

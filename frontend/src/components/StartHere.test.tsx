@@ -73,7 +73,7 @@ describe("StartHere checklist", () => {
     const nav = screen.getByTestId("step-nav");
     await waitFor(() => expect(nav).toHaveAttribute("data-state", "done"));
     expect(within(nav).getByText(/Last fetched 15-Oct-2026 06:45 UTC/)).toBeInTheDocument();
-    expect(within(nav).getByRole("link")).toHaveAttribute("href", "/data-health");
+    expect(within(nav).getByRole("link")).toHaveAttribute("href", "/mf");
 
     const history = screen.getByTestId("step-history");
     expect(history).toHaveAttribute("data-state", "todo");

@@ -13,6 +13,7 @@ dependencies = [
     "pyyaml>=6.0,<7",
     "python-multipart>=0.0.9,<1",
     "openpyxl>=3.1,<4",
+    "defusedxml>=0.7,<1",
 ]
 
 [dependency-groups]
@@ -23,6 +24,8 @@ dev = [
     "mypy>=1.11",
     "types-pyyaml",
     "pytest-cov>=5",
+    "types-openpyxl>=3.1.5.20260827",
+    "types-defusedxml>=0.7.0.20260504",
 ]
 oracle = [
     "QuantLib==1.44",

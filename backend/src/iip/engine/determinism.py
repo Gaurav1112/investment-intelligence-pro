@@ -35,9 +35,7 @@ def _default(obj: Any) -> Any:
 
 def canonical_json(obj: Any) -> str:
     """Sorted keys, no whitespace, Decimal as plain string, floats rejected unless finite."""
-    return json.dumps(
-        obj, default=_default, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
-    )
+    return json.dumps(obj, default=_default, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
 
 
 def sha256_hex(data: str | bytes) -> str:

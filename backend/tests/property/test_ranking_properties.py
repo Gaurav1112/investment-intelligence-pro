@@ -119,11 +119,10 @@ def test_improving_q05_never_hurts_rank_under_preservation(universe: list[Candid
         if c.instrument_id == target:
             o = c.outcome
             bump = D("1000")
-            c = replace(
-                c,
-                outcome=OutcomeBand(o.q05 + bump, max(o.q50, o.q05 + bump), max(o.q95, o.q05 + bump), o.is_contractual),
-            )
-        improved.append(c)
+            band = OutcomeBand(o.q05 + bump, max(o.q50, o.q05 + bump), max(o.q95, o.q05 + bump), o.is_contractual)
+            improved.append(replace(c, outcome=band))
+        else:
+            improved.append(c)
     new = rank(_request(Objective.CAPITAL_PRESERVATION), improved)
     old_pos = [r.instrument_id for r in result.ranked].index(target)
     new_pos = [r.instrument_id for r in new.ranked].index(target)

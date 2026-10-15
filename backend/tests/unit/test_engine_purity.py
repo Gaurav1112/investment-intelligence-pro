@@ -33,11 +33,7 @@ def test_engine_has_no_io_clock_or_unseeded_randomness() -> None:
                 if (node.value.id, node.attr) in FORBIDDEN_CALLS:
                     offenders.append(f"{path.name}:{node.lineno} uses {node.value.id}.{node.attr}")
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "Decimal":
-                if (
-                    node.args
-                    and isinstance(node.args[0], ast.Constant)
-                    and isinstance(node.args[0].value, float)
-                ):
+                if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, float):
                     offenders.append(f"{path.name}:{node.lineno} Decimal(float literal)")
     assert not offenders, offenders
 

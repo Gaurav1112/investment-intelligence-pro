@@ -197,7 +197,7 @@ def test_disabled_source_is_refused() -> None:
     rec = Recorder()
     forged = object.__new__(SourceRequest)
     object.__setattr__(forged, "source", spec)
-    object.__setattr__(forged, "url", "https://api.mfapi.in/mf/128629")
+    object.__setattr__(forged, "url", "https://api.mfapi.in/mf/934256")
     with pytest.raises(FetchRefused, match="disabled"):
         make_fetcher(rec.wrap(amfi_ok)).fetch(forged)
     assert rec.requests == []

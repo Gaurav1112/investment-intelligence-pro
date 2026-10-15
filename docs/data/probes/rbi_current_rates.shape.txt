@@ -1,0 +1,3 @@
+# SYNTHETIC SHAPE SAMPLE - not RBI data. Text layout of the home-page "Current Rates" sidebar as probed on 2026-10-15
+# (tag-stripped, whitespace collapsed); every rate below is fictional.
+ 1. Current Rates Policy Rates Policy Repo Rate : 9.99% Standing Deposit Facility Rate : 9.74% Marginal Standing Facility Rate : 10.24% Bank Rate : 10.24% Fixed Reverse Repo Rate : 9.00% Reserve Ratios CRR : 9.00% SLR : 19.00% Exchange Rates INR / 1 USD : 99.0000 (As at 1.00pm of January 1, 2099) (Source : FBIL) Market Trends Government Securities Market 9.99% GS 2099 : 9.9999% # 91 day T-bills : 9.1111%* 182 day T-bills : 9.2222%* 364 day T-bills : 9.3333%* * cut-off at the last auction # as on January 1, 2099

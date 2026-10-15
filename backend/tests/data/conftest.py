@@ -12,7 +12,7 @@ from iip.data.models import QualityStatus, RawPayload
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures" / "data"
 _SEPARATOR = b"# ---\n"
 
-# Retrieval times of the probes the fixtures were cut from (see each fixture's header comment).
+# Retrieval times of the real probes whose LAYOUT the synthetic fixtures follow (docs/data/probes/README.md).
 NAVALL_RETRIEVED = datetime(2026, 10, 15, 5, 34, 19, tzinfo=UTC)
 NAVHISTORY_RETRIEVED = datetime(2026, 10, 15, 5, 34, 48, tzinfo=UTC)
 SCHEMEDATA_RETRIEVED = datetime(2026, 10, 15, 5, 43, 36, tzinfo=UTC)
@@ -26,7 +26,7 @@ SCHEMEDATA_URL = "https://portal.amfiindia.com/DownloadSchemeData_Po.aspx?mf=0"
 
 
 def load_fixture(name: str) -> bytes:
-    """Return the verbatim probe bytes below the fixture's '# ---' comment header."""
+    """Return the fixture bytes below its '# ---' comment header."""
     raw = (FIXTURES / name).read_bytes()
     head, sep, body = raw.partition(_SEPARATOR)
     assert sep, f"fixture {name} has no '# ---' header terminator"

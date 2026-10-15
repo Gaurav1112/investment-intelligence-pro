@@ -51,7 +51,7 @@ A free API can be added to the registry only when all of these hold:
 1. The publisher is the authority for the figure.
 2. Its terms allow personal use and the minimised storage this app uses.
 3. It needs no key, or a free key referenced by environment-variable **name**, as in ADR-0007.
-4. It gets a probe under `docs/data/probes/`, a strict parser and a source-registry row with a freshness SLO.
+4. It gets a probe recorded in `docs/data/probes/README.md` (findings and a synthetic shape sample, never the raw response), a strict parser and a source-registry row with a freshness SLO.
 
 The sources the app already uses are all free and official:
 - AMFI NAVAll and NAV history;

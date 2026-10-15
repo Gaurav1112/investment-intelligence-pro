@@ -117,8 +117,12 @@ class LLMAdapter:
         runtime: LLMRuntime,
         *,
         sensitive: Iterable[str] = (),
+        local_personal: bool = False,
     ) -> None:
         self.cfg = cfg
+        # threat-model C-11 §4: personal values (amounts, dates, holdings) are held back from the model by default,
+        # in local mode too; local mode may opt in explicitly (IIP_LLM_LOCAL_PERSONAL=1). Cloud mode never sends them.
+        self.redact_personal = cfg.mode == "cloud" or not local_personal
         self.conn = conn
         self.runtime = runtime
         self.sensitive = tuple(s for s in sensitive if s)
@@ -217,7 +221,7 @@ class LLMAdapter:
 
     # ------------------------------------------------------------------ public
     def rephrase(self, narrative: str) -> str:
-        packet = build_packet(narrative, cloud=self.cfg.mode == "cloud", sensitive=self.sensitive)
+        packet = build_packet(narrative, cloud=self.redact_personal, sensitive=self.sensitive)
         self.last_packet = packet
         if not packet.sent_numbers:
             raise RephraseFailed("nothing_to_send_after_redaction")

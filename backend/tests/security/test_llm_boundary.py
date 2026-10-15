@@ -401,3 +401,14 @@ def test_cloud_base_url_must_be_on_allowlist(url: str) -> None:
 def test_api_key_setting_must_be_an_env_var_name(name: str) -> None:
     with pytest.raises(LLMConfigError, match="NAME of an env var"):
         validate_config(LLMConfig("cloud", "https://api.groq.com/openai/v1", "m", name))
+
+
+def test_local_mode_holds_back_personal_values_by_default() -> None:
+    """Threat-model C-11 §4: amounts/dates stay out of the prompt even locally unless the user opts in."""
+    from iip.llm.prompt import build_packet
+
+    narrative = "For ₹5,00,000.00 the low-end outcome is ₹5,10,729.19.\nThe tax rule is not verified."
+    default_local = build_packet(narrative, cloud=True)  # adapter passes redact_personal=True by default
+    assert "₹5,00,000.00" not in default_local.user and "The tax rule is not verified." in default_local.user
+    opted_in = build_packet(narrative, cloud=False)
+    assert "₹5,00,000.00" in opted_in.user

@@ -6,6 +6,7 @@ Effective configuration = the config saved from Settings (settings key `llm.conf
 
 from __future__ import annotations
 
+import os
 import threading
 from collections.abc import Callable
 from typing import Any, Literal
@@ -80,7 +81,13 @@ def rephraser(state: Any, profile: Profile) -> tuple[Callable[[str], str] | None
         return None, None
     rt = runtime(state)
     try:
-        adapter = LLMAdapter(cfg, state.conn, rt, sensitive=sensitive_values(profile))
+        adapter = LLMAdapter(
+            cfg,
+            state.conn,
+            rt,
+            sensitive=sensitive_values(profile),
+            local_personal=os.environ.get("IIP_LLM_LOCAL_PERSONAL", "") == "1",
+        )
     except RephraseFailed as exc:
         reason = exc.reason
 

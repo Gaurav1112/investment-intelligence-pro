@@ -19,6 +19,7 @@ from iip.engine.ranking import POLICY_VERSION
 from iip.rules.loader import load_tax_rules
 from iip.services import discovery, fixtures, ingestion, instruments
 from iip.services import profile as profile_svc
+from iip.store import coordination
 from iip.supervisor import compliance
 
 
@@ -33,6 +34,44 @@ def tax_rules() -> tx.TaxRuleSet | None:
 def _rate_limited(wait: int) -> JSONResponse:
     return JSONResponse({"code": "RATE_LIMITED", "retry_after_s": wait}, status_code=429,
                         headers={"Retry-After": str(wait)})  # fmt: skip
+
+
+def _busy(code: str) -> JSONResponse:
+    return JSONResponse({"code": code, "retry_after_s": 60}, status_code=429, headers={"Retry-After": "60"})
+
+
+def _run_navall_hosted(st: Any) -> Any:
+    """ADR-0013: NAVAll in bounded steps (the client calls again while ``done`` is false). The 15-minute limit is
+    claimed only when a NEW run starts; continuations of the run in progress are not refused. One at a time."""
+    if not st.navall_lock.acquire(blocking=False):
+        return _busy("NAVALL_IN_PROGRESS")
+    try:
+        if coordination.load_job(st.conn, ingestion.NAVALL_JOB) is None:
+            if (wait := st.claim_refresh("amfi.navall")) is not None:
+                return _rate_limited(wait)
+            ingestion.sync_sources(st.conn)
+        deadline = st.monotonic() + st.job_budget_s
+        return ingestion.ingest_navall_resumable(st.conn, st.fetcher(), st.clock, lambda: st.monotonic() >= deadline)
+    finally:
+        st.navall_lock.release()
+
+
+def _backfill_hosted(st: Any, amfi_code: int, amc: str, years: int) -> Any:
+    """ADR-0013: a backfill in bounded steps (the caller holds the backfill lease). Per-scheme 15-minute limit on
+    NEW backfills only; a continuation of the one in progress is not refused."""
+    if coordination.load_job(st.conn, ingestion.backfill_job_key(amfi_code)) is None:
+        if (wait := st.claim_refresh(f"amfi.navhistory:{amfi_code}")) is not None:
+            return _rate_limited(wait)
+    today = st.clock().date()
+    deadline = st.monotonic() + st.job_budget_s
+    try:
+        return ingestion.backfill_resumable(
+            st.conn, st.fetcher(), scheme_code=amfi_code, amc_name=amc,
+            start=date(today.year - years, today.month, 1), end=today, now=st.clock, pause=st.pause,
+            stop=lambda: st.monotonic() >= deadline,
+        )  # fmt: skip
+    except ingestion.FundHouseNotFound as exc:
+        raise HTTPException(424, "could not determine AMFI's fund-house id for this AMC") from exc
 
 
 _TERMS_QUERIES = (
@@ -159,6 +198,8 @@ def router() -> APIRouter:  # noqa: PLR0915 - route table
     @r.post("/ingestion/amfi-navall")
     def run_navall(request: Request) -> Any:
         st = _state(request)
+        if st.hosted:
+            return _run_navall_hosted(st)
         # SEC-86: at most one manual refresh per source per 15 minutes; refused calls make no outbound request.
         if (wait := st.claim_refresh("amfi.navall")) is not None:
             return _rate_limited(wait)
@@ -182,6 +223,8 @@ def router() -> APIRouter:  # noqa: PLR0915 - route table
             return JSONResponse({"code": "BACKFILL_IN_PROGRESS", "retry_after_s": 60}, status_code=429,
                                 headers={"Retry-After": "60"})  # fmt: skip
         try:
+            if st.hosted:
+                return _backfill_hosted(st, amfi_code, str(row["amc"]), body.years)
             if (wait := st.claim_refresh(f"amfi.navhistory:{amfi_code}")) is not None:
                 return _rate_limited(wait)
             fetcher = st.fetcher()
@@ -230,8 +273,8 @@ def router() -> APIRouter:  # noqa: PLR0915 - route table
     @r.post("/dev/seed-fixtures")
     def seed_fixtures(request: Request) -> dict[str, Any]:
         st = _state(request)
-        if st.settings.env not in {"dev", "test"}:
-            raise HTTPException(403, "fixtures can only be seeded in dev/test")
+        if st.settings.env not in {"dev", "test"} or st.hosted:  # ADR-0013: never synthetic data in a hosted store
+            raise HTTPException(403, "fixtures can only be seeded in a local dev/test instance")
         return {"created": fixtures.seed(st.conn, as_of=st.clock().date(), now=st.clock()),
                 "warning": "FIXTURE — synthetic data, not market data"}  # fmt: skip
 

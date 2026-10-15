@@ -16,6 +16,7 @@ dependencies = [
     "defusedxml>=0.7,<1",
     "casparser>=1.4.1,<2",
     "cryptography>=50,<51",
+    "libsql==0.1.11",
 ]
 
 [dependency-groups]
@@ -69,5 +70,5 @@ python_version = "3.12"
 strict = true
 files = ["src/iip"]
 [[tool.mypy.overrides]]
-module = ["scipy.*", "QuantLib.*", "pyxirr.*", "scoringrules.*"]
+module = ["scipy.*", "QuantLib.*", "pyxirr.*", "scoringrules.*", "libsql"]
 ignore_missing_imports = true

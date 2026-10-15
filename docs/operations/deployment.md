@@ -116,6 +116,77 @@ make restore-encrypted BACKUP=… DEST=…      # a specific file / destination 
 - A restored file is a **plaintext** copy of your data. *Erase my data* with "delete backups" removes
   `restored-*.db` in the data dir along with every backup format; a custom `DEST=` elsewhere is yours to delete.
 
+## Hosted on Vercel (personal use)
+
+Status: **IMPLEMENTED, NOT VERIFIED on Vercel.** Design, research and limits are in ADR-0013. `make deploy-check`
+(no network) is VERIFIED; the first real deploy must do the checks in ADR-0013 "Not verified".
+
+**Conditions. Read these before deploying:**
+- **Only you.** Never share the URL together with the token, and never give other people access. There is no
+  multi-user model, and offering fund rankings to others raises SEBI adviser / research-analyst questions
+  (`docs/security/regulatory-readiness.md`). AMFI data is for personal, non-commercial use only.
+- **Third-party custody.** Your portfolio data will be held by **Turso** (the database and its backups) and processed
+  by **Vercel**. The app never logs amounts or personal values, but the data is no longer only on your machine.
+- **Missing when hosted:** file backups (use Turso's point-in-time restore, or Settings → Export), the local LLM, and
+  byte-level erase (Turso's backups keep deleted rows until they expire).
+
+### 1. Create the database (Turso, free tier)
+
+1. Create a Turso account and a database in an Indian region (Mumbai) from the Turso dashboard or the `turso` CLI.
+2. Copy the database URL (`libsql://<db>-<org>.turso.io`).
+3. Create an auth token for that database only.
+4. Keep both values out of the repository and out of chat logs.
+
+### 2. Generate your access token
+
+```bash
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"   # 43 characters; keep it in your password manager
+```
+
+### 3. Create the Vercel project and set its environment (Production only)
+
+```bash
+vercel link                                   # once, from the repository root
+vercel env add IIP_PUBLIC_ORIGIN production   # https://<your-project>.vercel.app — exact, no trailing slash
+vercel env add IIP_ACCESS_TOKEN production    # the token from step 2
+vercel env add IIP_DB_URL production          # libsql://…turso.io
+vercel env add IIP_DB_AUTH_TOKEN production   # the Turso database token
+vercel env add IIP_ENV production             # prod
+```
+
+| Variable | Required | Meaning |
+|---|---|---|
+| `IIP_DEPLOY` | set by `app.py` | `vercel`. Hosted mode is on |
+| `IIP_ENV` | yes | `prod`. Any other value except `test` refuses startup when hosted |
+| `IIP_PUBLIC_ORIGIN` | yes | The exact https origin users type. Every other Host is refused (so preview and deployment URLs return 400) |
+| `IIP_ACCESS_TOKEN` | yes | At least 32 characters; refused otherwise |
+| `IIP_DB_URL` | yes | `libsql://…` or `https://…` |
+| `IIP_DB_AUTH_TOKEN` | yes | Turso database token |
+| `IIP_LLM` | no | `off` (default) or `cloud`; `local` is refused when hosted |
+
+Set these for **Production only**. Previews would otherwise run against the same database on a Host the app refuses
+anyway.
+
+### 4. Deploy and verify
+
+```bash
+make deploy-check        # builds the UI, checks vercel.json, requirements.txt and the hosted entrypoint (no network)
+vercel deploy --prod     # uploads per .vercelignore; Vercel installs requirements.txt and runs scripts/vercel-build.sh
+```
+
+Then open `https://<your-project>.vercel.app/#login=<token>`. As with `make open`, the token is in the URL fragment and
+is never sent to the server. Do the first-deploy checks in ADR-0013:
+- the UI loads at `/`;
+- **Data health → Fetch latest AMFI NAVs** completes (it may take several calls; the page shows progress);
+- a backfill completes.
+
+### Hosted maintenance
+
+- After changing backend dependencies, run `make requirements`; `make deploy-check` fails if you forget.
+- Rotating the token: change `IIP_ACCESS_TOKEN` in Vercel and redeploy. Existing sessions stay valid until they expire
+  (24 h at most). To end them at once, run `DELETE FROM web_sessions` in the Turso shell.
+- Restoring: use Turso's point-in-time restore into a new database, then point `IIP_DB_URL` at it.
+
 ## Configuration (environment variables)
 
 | Variable | Default | Meaning |

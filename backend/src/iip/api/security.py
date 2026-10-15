@@ -11,6 +11,7 @@ No CORS headers are ever emitted.
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import logging
@@ -20,7 +21,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable, MutableMapping
 from dataclasses import dataclass, field
 from http.cookies import SimpleCookie
-from typing import Any
+from typing import Any, Protocol
 
 from iip.api.settings import Settings
 
@@ -85,8 +86,96 @@ class SessionStore:
         s.last_seen = now
         return s
 
+    def revoke(self, session_id: str) -> None:
+        self.sessions.pop(session_id, None)
+
     def revoke_all(self) -> None:
         self.sessions.clear()
+
+
+class SessionBackend(Protocol):
+    def create(self) -> Session: ...
+    def get(self, session_id: str | None) -> Session | None: ...
+    def revoke(self, session_id: str) -> None: ...
+    def revoke_all(self) -> None: ...
+
+
+class LoginLimiter(Protocol):
+    def allow(self) -> bool: ...
+
+
+def _id_hash(session_id: str) -> str:
+    return hashlib.sha256(session_id.encode()).hexdigest()
+
+
+@dataclass
+class DbSessionStore:
+    """Hosted mode (ADR-0013): sessions in the database, because serverless instances share no memory.
+
+    Only a SHA-256 of the cookie value is stored, so a copy of the database holds no usable session. The same idle
+    (8 h) and absolute (24 h) limits apply; expired rows are deleted when a new session is created."""
+
+    conn: Callable[[], Any]
+    clock: Callable[[], float] = time.time
+
+    def create(self) -> Session:
+        now = self.clock()
+        s = Session(secrets.token_urlsafe(32), secrets.token_urlsafe(32), now, now)
+        c = self.conn()
+        c.execute(
+            "DELETE FROM web_sessions WHERE last_seen < ? OR created < ?",
+            (now - IDLE_TIMEOUT_S, now - ABSOLUTE_TIMEOUT_S),
+        )
+        c.execute(
+            "INSERT INTO web_sessions(id_hash, csrf, created, last_seen) VALUES (?,?,?,?)",
+            (_id_hash(s.session_id), s.csrf, now, now),
+        )
+        return s
+
+    def get(self, session_id: str | None) -> Session | None:
+        if not session_id:
+            return None
+        key = _id_hash(session_id)
+        c = self.conn()
+        row = c.execute("SELECT csrf, created, last_seen FROM web_sessions WHERE id_hash=?", (key,)).fetchone()
+        if row is None:
+            return None
+        now = self.clock()
+        created, last_seen = float(row["created"]), float(row["last_seen"])
+        if now - last_seen > IDLE_TIMEOUT_S or now - created > ABSOLUTE_TIMEOUT_S:
+            c.execute("DELETE FROM web_sessions WHERE id_hash=?", (key,))
+            return None
+        c.execute("UPDATE web_sessions SET last_seen=? WHERE id_hash=?", (now, key))
+        return Session(session_id, str(row["csrf"]), created, now)
+
+    def revoke(self, session_id: str) -> None:
+        self.conn().execute("DELETE FROM web_sessions WHERE id_hash=?", (_id_hash(session_id),))
+
+    def revoke_all(self) -> None:
+        self.conn().execute("DELETE FROM web_sessions")
+
+
+@dataclass
+class DbRateLimiter:
+    """Hosted login limiter: at most ``limit`` hits per ``window_s`` per key, across all instances. The check and the
+    insert are ONE conditional statement, so concurrent attempts cannot both take the last slot."""
+
+    conn: Callable[[], Any]
+    key: str
+    limit: int
+    window_s: float
+    clock: Callable[[], float] = time.time
+
+    def allow(self) -> bool:
+        now = self.clock()
+        c = self.conn()
+        c.execute("DELETE FROM rate_hits WHERE key=? AND at <= ?", (self.key, now - self.window_s))
+        cur = c.execute(
+            "INSERT INTO rate_hits(key, at) SELECT ?, ?"
+            " WHERE (SELECT COUNT(*) FROM rate_hits WHERE key=? AND at > ?) < ?",
+            (self.key, now, self.key, now - self.window_s, self.limit),
+        )
+        return int(cur.rowcount) == 1
 
 
 @dataclass
@@ -139,11 +228,19 @@ async def _reject(send: Send, status: int, code: str, extra_headers: tuple[tuple
     await send({"type": "http.response.body", "body": body})
 
 
+HSTS = (b"strict-transport-security", b"max-age=63072000; includeSubDomains")
+
+
 class SecurityMiddleware:
-    def __init__(self, app: ASGIApp, settings: Settings, sessions: SessionStore) -> None:
+    def __init__(self, app: ASGIApp, settings: Settings, sessions: SessionBackend) -> None:
         self.app = app
         self.settings = settings
         self.sessions = sessions
+        # Hosted (HTTPS only, ADR-0013): browsers must never fall back to plain HTTP for this origin.
+        self.extra_headers: tuple[tuple[bytes, bytes], ...] = (HSTS,) if settings.hosted else ()
+
+    async def _deny(self, send: Send, status: int, code: str) -> None:
+        await _reject(send, status, code, self.extra_headers)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "lifespan":
@@ -153,7 +250,7 @@ class SecurityMiddleware:
             return
         hosts = _header_values(scope, b"host")
         if len(hosts) != 1 or hosts[0].lower() not in self.settings.allowed_hosts:
-            await _reject(send, 400, "BAD_HOST")
+            await self._deny(send, 400, "BAD_HOST")
             return
 
         method: str = scope["method"]
@@ -163,10 +260,10 @@ class SecurityMiddleware:
         if lengths:
             try:
                 if int(lengths[0]) > self.settings.max_body_bytes:
-                    await _reject(send, 413, "PAYLOAD_TOO_LARGE")
+                    await self._deny(send, 413, "PAYLOAD_TOO_LARGE")
                     return
             except ValueError:
-                await _reject(send, 400, "BAD_CONTENT_LENGTH")
+                await self._deny(send, 400, "BAD_CONTENT_LENGTH")
                 return
 
         is_api = path.startswith("/api/") or path == "/api"
@@ -175,17 +272,17 @@ class SecurityMiddleware:
             if self.settings.auth:
                 session = self.sessions.get(_cookie(scope, SESSION_COOKIE))
                 if session is None:
-                    await _reject(send, 401, "UNAUTHENTICATED")
+                    await self._deny(send, 401, "UNAUTHENTICATED")
                     return
             if method in STATE_CHANGING and not self._csrf_ok(scope, session, path):
-                await _reject(send, 403, "CSRF_REJECTED")
+                await self._deny(send, 403, "CSRF_REJECTED")
                 return
         if method == "OPTIONS":
             # No CORS: a preflight gets no allow headers at all.
-            await _reject(send, 405, "METHOD_NOT_ALLOWED")
+            await self._deny(send, 405, "METHOD_NOT_ALLOWED")
             return
         if is_api and method == "POST" and (method, path) in PUBLIC_ROUTES and not self._origin_ok(scope):
-            await _reject(send, 403, "CSRF_REJECTED")
+            await self._deny(send, 403, "CSRF_REJECTED")
             return
 
         scope.setdefault("state", {})["session"] = session
@@ -203,6 +300,7 @@ class SecurityMiddleware:
                     h for h in message.get("headers", []) if h[0].lower() not in {k for k, _ in SECURITY_HEADERS}
                 ]
                 headers.extend(SECURITY_HEADERS)
+                headers.extend(self.extra_headers)
                 if is_api:
                     headers = [h for h in headers if h[0].lower() != b"cache-control"]
                     headers.append((b"cache-control", b"no-store"))
@@ -214,14 +312,14 @@ class SecurityMiddleware:
         try:
             await self.app(scope, receive, send_wrapper)
         except _BodyTooLarge:
-            await _reject(send, 413, "PAYLOAD_TOO_LARGE")
+            await self._deny(send, 413, "PAYLOAD_TOO_LARGE")
         except Exception as exc:
             # SEC-21 / C-13 (ECC F2): Starlette re-raises after its 500 handler, and uvicorn would then log the full
             # traceback including the exception MESSAGE, which can carry user values. Nothing leaves this layer:
             # log the class only, and answer 500 if no response has started yet.
             log.error("unhandled error escaped the app type=%s", type(exc).__name__)
             if not started:
-                await _reject(send, 500, "INTERNAL_ERROR")
+                await self._deny(send, 500, "INTERNAL_ERROR")
 
     def _origin_ok(self, scope: Scope) -> bool:
         origins = _header_values(scope, b"origin")

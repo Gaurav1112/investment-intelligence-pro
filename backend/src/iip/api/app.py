@@ -11,7 +11,7 @@ import threading
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -19,15 +19,31 @@ from fastapi import APIRouter, FastAPI, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from iip.api.security import SESSION_COOKIE, RateLimiter, SecurityMiddleware, SessionStore
+from iip.api.security import (
+    SESSION_COOKIE,
+    DbRateLimiter,
+    DbSessionStore,
+    LoginLimiter,
+    RateLimiter,
+    SecurityMiddleware,
+    SessionBackend,
+    SessionStore,
+)
 from iip.api.settings import Settings, ensure_access_token
 from iip.data.fetch import CircuitBreaker, Fetcher
 from iip.services import ingestion
-from iip.store.db import connect, current_version, migrate
+from iip.store import coordination
+from iip.store.coordination import DbLease
+from iip.store.db import connect, connect_libsql, current_version, migrate
 
 log = logging.getLogger("iip.api")
 APP_VERSION = "0.1.0"
 REFRESH_MIN_INTERVAL_S = 15 * 60  # SEC-86: one manual refresh per source per 15 minutes
+# Hosted (ADR-0013). Vercel Hobby with Fluid compute: maxDuration ≤ 300 s (vercel.json sets 300). A job stops
+# starting new upstream requests after HOSTED_JOB_BUDGET_S, leaving room for one slow request and the DB writes. A
+# function killed at its limit never releases its lease, so leases lapse a little after the limit.
+HOSTED_JOB_BUDGET_S = 200.0
+LEASE_TTL_S = 330.0
 
 
 class TokenIn(BaseModel):
@@ -47,11 +63,7 @@ class AppState:
     def __init__(self, settings: Settings, clock: Callable[[], datetime] = utc_now) -> None:
         self.settings = settings
         self.clock = clock
-        self.sessions = SessionStore()
-        self.login_limiter = RateLimiter(limit=10, window_s=60)
-        self.settings.data_dir.mkdir(parents=True, exist_ok=True)
-        os.chmod(self.settings.data_dir, 0o700)  # SEC-82: private financial data
-        self.token = ensure_access_token(settings) if settings.auth else ""
+        self.hosted = settings.hosted
         self._local = threading.local()
         self._all: list[sqlite3.Connection] = []
         self._lock = threading.Lock()
@@ -59,15 +71,46 @@ class AppState:
         # paced; manual refreshes are limited per source, with an atomic check-and-set (routes run in a thread pool).
         self.breaker = CircuitBreaker(clock=clock)
         self.pause: Callable[[float], object] = time.sleep
+        self.monotonic: Callable[[], float] = time.monotonic
         self.fetcher_factory: Callable[[], Fetcher] | None = None
         self._refresh_lock = threading.Lock()
         self._last_refresh: dict[str, datetime] = {}
+        # Hosted resumable jobs (ADR-0013): work per call stops starting new requests after this many seconds, well
+        # inside the platform's function time limit; the next call resumes from the stored progress.
+        self.job_budget_s = HOSTED_JOB_BUDGET_S
+        self.sessions: SessionBackend
+        self.login_limiter: LoginLimiter
         # Only one NAV-history backfill runs at a time, so AMFI sees at most the paced rate (C-16).
-        self.backfill_lock = threading.Lock()
+        self.backfill_lock: threading.Lock | DbLease
+        self.navall_lock: threading.Lock | DbLease  # hosted only: one resumable NAVAll job at a time
+        if self.hosted:
+            # ADR-0013: no local disk, no memory shared between instances. The token comes from the platform's
+            # encrypted environment; sessions, limits and the backfill lock live in the database.
+            self.token = settings.access_token
+            epoch = self.epoch
+            self.sessions = DbSessionStore(lambda: self.conn, clock=epoch)
+            self.login_limiter = DbRateLimiter(lambda: self.conn, "login", limit=10, window_s=60, clock=epoch)
+            self.backfill_lock = DbLease(lambda: self.conn, "backfill", ttl_s=LEASE_TTL_S, clock=epoch)
+            self.navall_lock = DbLease(lambda: self.conn, "navall", ttl_s=LEASE_TTL_S, clock=epoch)
+        else:
+            self.sessions = SessionStore()
+            self.login_limiter = RateLimiter(limit=10, window_s=60)
+            self.settings.data_dir.mkdir(parents=True, exist_ok=True)
+            os.chmod(self.settings.data_dir, 0o700)  # SEC-82: private financial data
+            self.token = ensure_access_token(settings) if settings.auth else ""
+            self.backfill_lock = threading.Lock()
+            self.navall_lock = threading.Lock()
         migrate(self.conn, clock().isoformat())
-        _restrict_db_files(self.settings.db_path)
-        if ingestion.mark_interrupted_runs(self.conn, clock()):
+        if not self.hosted:
+            _restrict_db_files(self.settings.db_path)
+        # Hosted: another instance may be running a job right now, so only runs older than any function could live
+        # are "interrupted"; locally one process means every 'running' row was cut off.
+        started_before = clock() - timedelta(seconds=LEASE_TTL_S) if self.hosted else None
+        if ingestion.mark_interrupted_runs(self.conn, clock(), started_before=started_before):
             log.warning("ingestion runs left 'running' by a previous process were marked failed (interrupted)")
+
+    def epoch(self) -> float:
+        return self.clock().timestamp()
 
     def fetcher(self) -> Fetcher:
         """A fetcher sharing the process-wide circuit breaker (tests inject ``fetcher_factory``)."""
@@ -77,6 +120,8 @@ class AppState:
 
     def claim_refresh(self, source_id: str) -> int | None:
         """Reserve this source's manual-refresh slot. None = granted; otherwise the seconds to wait."""
+        if self.hosted:
+            return coordination.claim_refresh(self.conn, source_id, self.epoch(), REFRESH_MIN_INTERVAL_S)
         with self._refresh_lock:
             now = self.clock()
             last = self._last_refresh.get(source_id)
@@ -89,7 +134,10 @@ class AppState:
     def conn(self) -> sqlite3.Connection:
         c: sqlite3.Connection | None = getattr(self._local, "conn", None)
         if c is None:
-            c = connect(self.settings.db_path)
+            if self.hosted:
+                c = connect_libsql(self.settings.db_url, self.settings.db_auth_token, hosted=True)
+            else:
+                c = connect(self.settings.db_path)
             self._local.conn = c
             with self._lock:
                 self._all.append(c)
@@ -162,8 +210,9 @@ def create_app(
             log.warning("failed login attempt")  # never log the presented value
             return JSONResponse({"code": "BAD_TOKEN"}, status_code=401)
         session = state.sessions.create()
+        # Hosted (HTTPS): Secure, so the cookie is never sent over plain HTTP. Locally the app is plain-HTTP loopback.
         response.set_cookie(
-            SESSION_COOKIE, session.session_id, httponly=True, samesite="strict", path="/", secure=False
+            SESSION_COOKIE, session.session_id, httponly=True, samesite="strict", path="/", secure=settings.hosted
         )
         return {"csrf": session.csrf}
 
@@ -171,14 +220,19 @@ def create_app(
     def logout(request: Request, response: Response) -> dict[str, str]:
         sess = request.scope.get("state", {}).get("session")
         if sess is not None:
-            state.sessions.sessions.pop(sess.session_id, None)
-        response.delete_cookie(SESSION_COOKIE, path="/")
+            state.sessions.revoke(sess.session_id)
+        response.delete_cookie(SESSION_COOKIE, path="/", httponly=True, samesite="strict", secure=settings.hosted)
         return {"status": "logged_out"}
 
     @app.get("/api/me")
     def me(request: Request) -> dict[str, Any]:
         sess = request.scope.get("state", {}).get("session")
-        return {"authenticated": True, "csrf": sess.csrf if sess else None, "env": settings.env}
+        return {
+            "authenticated": True,
+            "csrf": sess.csrf if sess else None,
+            "env": settings.env,
+            "deploy": settings.deploy,
+        }
 
     for router in routers or []:
         app.include_router(router)

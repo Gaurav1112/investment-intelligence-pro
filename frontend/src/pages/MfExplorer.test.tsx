@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import type { InstrumentList, RunSummary } from "../lib/types";
-import MfExplorer from "./MfExplorer";
+import MfExplorer, { MAX_JOB_STEPS, runUntilDone, stepText, type JobStep } from "./MfExplorer";
 
 type Call = { url: string; method: string; body: unknown };
 const json = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { "Content-Type": "application/json" } });
@@ -186,5 +186,53 @@ describe("MfExplorer", () => {
     await userEvent.click(screen.getByRole("button", { name: "Save exit load" }));
     expect(await screen.findByText("Input should be less than or equal to 0.05")).toBeInTheDocument();
     expect(screen.getByLabelText("Exit load (% of redemption value)")).toHaveAttribute("aria-invalid", "true");
+  });
+});
+
+describe("MfExplorer in hosted mode (ADR-0013: long jobs answer in bounded steps)", () => {
+  const FINAL: RunSummary = {
+    run_id: "run_h", source_id: "amfi.navhistory", status: "ok", rows_ok: 40, rows_rejected: 0, stored: 40, detail: "complete",
+  };
+
+  it("keeps calling the backfill until the server says done, showing the server's progress", async () => {
+    const steps = [
+      { done: false, phase: "discovering", windows_done: 0, windows_total: 5 },
+      { done: false, phase: "fetching", windows_done: 2, windows_total: 5 },
+      { done: true, phase: "complete", windows_done: 5, windows_total: 5, ...FINAL },
+    ];
+    const calls = stubFetch((url, method) => (method === "POST" ? json(steps.shift()) : json(LIST)));
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: /Backfill history for Aditya/ }));
+    const msg = await screen.findByText(/status OK/);
+    expect(msg).toHaveTextContent("stored 40");
+    const posts = calls.filter((c) => c.method === "POST");
+    expect(posts).toHaveLength(3);
+    expect(posts.every((c) => c.url === "/api/ingestion/backfill/119551")).toBe(true);
+  });
+
+  it("describes each step in plain words from the server's counts", () => {
+    expect(stepText({ done: false, phase: "discovering" })).toBe("finding AMFI's fund-house id…");
+    expect(stepText({ done: false, phase: "fetching", windows_done: 2, windows_total: 5 })).toBe("fetched 2 of 5 date windows…");
+    expect(stepText({ done: false, phase: "storing", schemes_done: 200, schemes_total: 1779 })).toBe("stored 200 of 1779 schemes…");
+  });
+
+  it("never loops forever: a job that never finishes stops with a plain message", async () => {
+    let n = 0;
+    const step = async (): Promise<JobStep> => {
+      n++;
+      return { done: false, phase: "fetching" };
+    };
+    await expect(runUntilDone(step, () => undefined)).rejects.toThrow("JOB_DID_NOT_FINISH");
+    expect(n).toBe(MAX_JOB_STEPS);
+  });
+
+  it("a local single-call answer (no done field) ends after one call", async () => {
+    let n = 0;
+    const s = await runUntilDone(async () => {
+      n++;
+      return FINAL;
+    }, () => undefined);
+    expect(n).toBe(1);
+    expect(s.stored).toBe(40);
   });
 });

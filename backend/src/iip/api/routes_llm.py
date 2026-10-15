@@ -61,6 +61,8 @@ def runtime(state: Any) -> LLMRuntime:
 def effective(state: Any) -> tuple[LLMConfig, str]:
     saved = llm_config.load_saved(state.conn)
     if saved is not None:
+        if saved.mode == "local" and state.settings.hosted:  # a config saved while local must not run hosted
+            return LLMConfig(), "hosted-local-refused"
         return saved, "saved"
     return state.settings.llm, "env"
 
@@ -153,6 +155,10 @@ def router() -> APIRouter:
         st = request.app.state.iip
         rt = runtime(st)
         cfg = LLMConfig(body.mode, body.base_url.strip(), body.model.strip(), body.api_key_env.strip())
+        if cfg.mode == "local" and st.settings.hosted:  # ADR-0013: no model server runs beside a hosted function
+            return JSONResponse({"code": "LLM_LOCAL_NOT_AVAILABLE_HOSTED",
+                                 "message": "A local model is not available when the app is hosted."},
+                                status_code=422)  # fmt: skip
         if cfg.mode == "local" and not cfg.base_url:
             cfg = LLMConfig("local", llm_config.DEFAULT_LOCAL_URL, cfg.model, cfg.api_key_env)
         try:

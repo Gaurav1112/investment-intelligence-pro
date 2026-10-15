@@ -51,9 +51,9 @@ def _obs(conn: sqlite3.Connection, value: str, superseded_by: int | None = None)
 
 def test_migrations_apply_once_and_are_idempotent(tmp_path: Path) -> None:
     conn = connect(tmp_path / "x.db")
-    assert migrate(conn, T0) == ["0001_initial.sql", "0002_inputs.sql"]
+    assert migrate(conn, T0) == ["0001_initial.sql", "0002_inputs.sql", "0003_hosted.sql"]
     assert migrate(conn, T0) == []
-    assert current_version(conn) == 2
+    assert current_version(conn) == 3
 
 
 def test_pragmas(db: sqlite3.Connection) -> None:
@@ -138,7 +138,7 @@ def test_backup_restore_drill(db: sqlite3.Connection, tmp_path: Path) -> None:
     conn2 = connect(restored)
     assert integrity_ok(conn2)
     assert conn2.execute("SELECT value FROM observations").fetchone()[0] == "25.9504"
-    assert current_version(conn2) == 2
+    assert current_version(conn2) == 3
 
 
 def test_restore_refuses_corrupt_backup(tmp_path: Path) -> None:
@@ -161,8 +161,8 @@ def test_migration_0002_upgrades_a_version_1_database(tmp_path: Path) -> None:
     conn.execute("INSERT INTO schema_version VALUES (1, '0001_initial.sql', ?)", (T0,))
     _obs(conn, "25.9504")
     assert current_version(conn) == 1
-    assert migrate(conn, T0) == ["0002_inputs.sql"]
-    assert current_version(conn) == 2
+    assert migrate(conn, T0) == ["0002_inputs.sql", "0003_hosted.sql"]
+    assert current_version(conn) == 3
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"fund_facts", "fd_card_rate_tables", "fd_card_rate_buckets"} <= tables
     assert conn.execute("SELECT value FROM observations").fetchone()[0] == "25.9504"

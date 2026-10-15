@@ -1,0 +1,20 @@
+# Never uploaded to Vercel (ADR-0013). The frontend is rebuilt there from source (scripts/vercel-build.sh).
+.git
+.claude
+.env
+.env.*
+**/.venv
+**/node_modules
+**/__pycache__
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/.hypothesis
+frontend/dist
+backend/tests
+docs
+data
+*.db
+*.db-*
+*.sqlite3
+*.enc

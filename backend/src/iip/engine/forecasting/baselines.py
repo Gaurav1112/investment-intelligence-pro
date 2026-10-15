@@ -20,7 +20,7 @@ from itertools import pairwise
 import numpy as np
 import numpy.typing as npt
 
-from iip.engine.errors import InsufficientHistory, InvalidInput, StaleData
+from iip.engine.errors import DataGapsExceedGate, InsufficientHistory, InvalidInput, StaleData
 from iip.engine.money import engine_context
 
 FloatArray = npt.NDArray[np.float64]
@@ -34,6 +34,10 @@ INTERPOLATION_METHODS = {
 N_EFF_TAILS_5_95 = 20
 N_EFF_TAILS_10_90 = 10
 N_EFF_MIN = 10  # §8: suppressed when n_eff < 10
+# §8 "data gaps exceed the gate" with the gate of risk-methodology §1: a gap of more than 7 calendar days between
+# observations makes the observation suspect; more than 2 % of observations suspect → the series is rejected.
+MAX_GAP_DAYS = 7
+MAX_GAP_FRACTION = 0.02
 BLOCK_LENGTH_RANGE = (5.0, 63.0)
 FACTSHEET_MAX_AGE_DAYS = 45
 DEFAULT_DY_GRID_BP: tuple[int, ...] = (-100, -50, 0, 50, 100)
@@ -172,17 +176,25 @@ def empirical_horizon_distribution(
     levels: Sequence[float] = DEFAULT_LEVELS,
     interpolation: str = "linear",
     model_version: str = "1",
+    max_gap_days: int | None = None,
 ) -> ScenarioRange:
     """B1: R_t^H = P_{t+H}/P_t − 1 for every t with t + H ≤ cutoff; quantiles with an explicit method.
 
     ``horizon`` is in observation steps (business days for daily NAV: 21/63/126/252).
     n_eff = ⌊N/H⌋ with N = number of one-step returns. Gates: n_eff ≥ 20 for 5/95, ≥ 10 for 10/90;
     n_eff < 10 → InsufficientHistory (suppressed, §8).
+
+    ``max_gap_days`` (RT-24, §8 "data gaps beyond the gate"): when given, a step whose calendar length exceeds it is a
+    gap. More than ``MAX_GAP_FRACTION`` of observations behind a gap → ``DataGapsExceedGate`` (suppressed). Otherwise
+    every window that spans a gap is EXCLUDED (an H-step window across a gap is not an H-step return), and n_eff is
+    the largest number of non-overlapping gap-free windows (= ⌊N/H⌋ when there is no gap). ``None`` = no gap test.
     """
     if interpolation not in INTERPOLATION_METHODS:
         raise InvalidInput(f"interpolation must be one of {sorted(INTERPOLATION_METHODS)}")
     if horizon < 1:
         raise InvalidInput("horizon must be ≥ 1")
+    if max_gap_days is not None and max_gap_days < 1:
+        raise InvalidInput("max_gap_days must be ≥ 1")
     _check_levels(levels)
     ds, p = _cut(dates, prices, as_of)
     n = p.size - 1
@@ -190,7 +202,35 @@ def empirical_horizon_distribution(
         raise InsufficientHistory(f"horizon {horizon} exceeds the history ({n} steps)")
     windows = p[horizon:] / p[:-horizon] - 1.0
     n_eff = n // horizon
+    excluded = 0
+    if max_gap_days is not None:
+        gap = np.asarray([(b - a).days > max_gap_days for a, b in pairwise(ds)], dtype=np.int64)
+        if gap.sum() > MAX_GAP_FRACTION * p.size:
+            raise DataGapsExceedGate(
+                f"{int(gap.sum())} gaps of more than {max_gap_days} calendar days in {p.size} observations "
+                f"(> {MAX_GAP_FRACTION:.0%}) — series rejected"
+            )
+        csum = np.concatenate(([0], np.cumsum(gap)))
+        clean = (csum[horizon:] - csum[:-horizon]) == 0  # window t uses steps t … t+H−1
+        excluded = int(windows.size - int(clean.sum()))
+        windows = windows[clean]
+        if excluded:
+            n_eff, last = 0, -horizon
+            for t in np.flatnonzero(clean):
+                if t >= last + horizon:
+                    n_eff, last = n_eff + 1, int(t)
+        if n_eff < N_EFF_MIN:
+            raise InsufficientHistory(
+                f"n_eff = {n_eff} gap-free independent windows < {N_EFF_MIN} — suppressed ({excluded} windows span "
+                f"a gap of more than {max_gap_days} days)"
+            )
     lv, warnings = _gate_levels(n_eff, levels)
+    if excluded:
+        warnings = (
+            *warnings,
+            f"GAP_WINDOWS_EXCLUDED: {excluded} windows spanning a gap of more than {max_gap_days} calendar days "
+            "were excluded",
+        )
     meta = ForecastMeta(
         label=SCENARIO_LABEL,
         model_id="B1_EMPIRICAL_OVERLAPPING",

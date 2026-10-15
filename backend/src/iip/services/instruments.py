@@ -346,7 +346,9 @@ def add_tbill(conn: sqlite3.Connection, body: TBillIn, now: datetime) -> str:
 
 
 def add_fd(conn: sqlite3.Connection, body: FDIn, now: datetime) -> str:
-    iid = f"fd:{_slug(body.institution)}:{body.tenure_days}d"
+    # RT-27: the institution TYPE is part of the id, so e.g. "Shriram" the NBFC and a bank of the same name/slug can
+    # never overwrite each other's terms (insurance, NBFC exclusion and sovereign backing all depend on the type).
+    iid = f"fd:{body.institution_type}:{_slug(body.institution)}:{body.tenure_days}d"
     insured = body.institution_type in {"bank", "small_finance_bank"}
     with write_tx(conn):
         conn.execute(

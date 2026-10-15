@@ -18,7 +18,7 @@ from decimal import Decimal
 from enum import StrEnum
 from itertools import pairwise
 
-from iip.engine.errors import InsufficientHistory, InvalidInput
+from iip.engine.errors import DataGapsExceedGate, InsufficientHistory, InvalidInput
 from iip.engine.money import ONE, ZERO, engine_context, format_inr, money
 
 FORMULA_ID = "FEASIBILITY@1"
@@ -400,7 +400,7 @@ def _validate_grid(grid: Sequence[GridPoint]) -> None:
     with engine_context():
         share = Decimal(sum(1 for g in grid if g.suspect)) / Decimal(len(grid))
     if share > SUSPECT_MAX_SHARE:
-        raise InvalidInput(f"suspect grid points {share:.4f} > 2 % — series rejected")
+        raise DataGapsExceedGate(f"suspect grid points {share:.4f} > 2 % — series rejected (data gaps)")
 
 
 # =====================================================================================================

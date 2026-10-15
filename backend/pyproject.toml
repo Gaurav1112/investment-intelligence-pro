@@ -49,7 +49,11 @@ default-groups = ["dev", "oracle"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
-markers = ["oracle: cross-check against an independent library", "network: requires internet (skipped by default)"]
+markers = [
+    "oracle: cross-check against an independent library",
+    "network: requires internet (skipped by default)",
+    "browser: real-browser security tests (Playwright; skipped unless IIP_BROWSER_TESTS=1)",
+]
 
 [tool.ruff]
 line-length = 120

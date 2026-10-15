@@ -17,7 +17,7 @@ from decimal import Decimal
 from enum import StrEnum
 from itertools import pairwise
 
-from scipy.optimize import brentq
+from scipy.optimize import brentq, minimize_scalar
 
 from iip.engine.dates import DayCount, days_between
 from iip.engine.errors import InsufficientHistory, InvalidInput, MissingDistributionData, NumericalError
@@ -297,6 +297,7 @@ class XirrOutcome(StrEnum):
     SOLVED = "SOLVED"
     NO_SOLUTION = "NO_SOLUTION"
     MULTIPLE_ROOTS = "MULTIPLE_ROOTS"
+    NOT_DETERMINABLE = "NOT_DETERMINABLE"  # RT-28: roots hidden inside one grid cell (no sign change at its ends)
 
 
 @dataclass(frozen=True, slots=True)
@@ -381,6 +382,36 @@ def _no_solution(
     )
 
 
+def _hidden_roots(
+    f: Callable[[float], float], netted: Sequence[CashFlow], signs: Sequence[int], changes: int, tolerance: Decimal
+) -> tuple[list[tuple[Decimal, Decimal]], list[Decimal], list[tuple[Decimal, Decimal]]]:
+    """RT-28: roots inside one grid cell, where XNPV has the same sign at both ends (no bracket).
+
+    Only possible with ≥ 2 sign changes (Descartes' rule of signs, exponential-sum form). For each such cell, find the
+    interior extremum of XNPV; if XNPV crosses zero there, split the cell at it into two brackets; if it touches zero
+    (a double root), that point is a root. Returns (new brackets, new roots, the cells where roots were hidden).
+    """
+    brackets: list[tuple[Decimal, Decimal]] = []
+    roots: list[Decimal] = []
+    hidden: list[tuple[Decimal, Decimal]] = []
+    if changes < 2:
+        return brackets, roots, hidden
+    for i in range(len(XIRR_GRID) - 1):
+        if signs[i] == 0 or signs[i] != signs[i + 1]:
+            continue
+        left, right, sgn = XIRR_GRID[i], XIRR_GRID[i + 1], signs[i]
+        ext = minimize_scalar(lambda r, sgn=sgn: sgn * f(r), bounds=(float(left), float(right)), method="bounded",
+                              options={"xatol": XIRR_XTOL, "maxiter": XIRR_MAXITER})  # fmt: skip
+        x_star = float(ext.x)
+        if sgn * f(x_star) < 0:
+            brackets.extend([(left, from_float(x_star)), (from_float(x_star), right)])
+            hidden.append((left, right))
+        elif abs(_xnpv_decimal(netted, from_float(x_star))) <= tolerance:  # tangent (double) root
+            roots.append(from_float(x_star))
+            hidden.append((left, right))
+    return brackets, roots, hidden
+
+
 def xirr(flows: Sequence[CashFlow]) -> XirrResult:
     """Excel-semantics XIRR (ACT/365F from the earliest date), per the §2.6 algorithm.
 
@@ -421,10 +452,15 @@ def xirr(flows: Sequence[CashFlow]) -> XirrResult:
         if signs[i] != 0 and signs[i + 1] != 0 and signs[i] != signs[i + 1]:
             brackets.append((XIRR_GRID[i], XIRR_GRID[i + 1]))
 
+    f = _xnpv_float(netted)
+    # RT-28: two roots can hide inside ONE grid cell (same sign at both ends) — see _hidden_roots.
+    extra_brackets, extra_roots, hidden = _hidden_roots(f, netted, signs, changes, tolerance)
+    brackets.extend(extra_brackets)
+    grid_roots.extend(extra_roots)
+
     if not grid_roots and not brackets:
         return _no_solution(netted, span, changes, "no root in [-99 %, 1000 %]: IRR not meaningful", warnings)
 
-    f = _xnpv_float(netted)
     roots: list[Decimal] = list(grid_roots)
     for lo, hi in brackets:
         try:
@@ -441,6 +477,22 @@ def xirr(flows: Sequence[CashFlow]) -> XirrResult:
             raise NumericalError(f"XIRR root {r} failed Decimal verification: |XNPV| = {abs(residual)}")
         residuals.append(residual)
 
+    if hidden:
+        cells = ", ".join(f"[{lo}, {hi}]" for lo, hi in hidden)
+        return XirrResult(
+            outcome=XirrOutcome.NOT_DETERMINABLE,
+            rate=None,
+            roots=tuple(roots),
+            flows=netted,
+            span_days=span,
+            sign_changes=changes,
+            xnpv_at_rate=None,
+            headline_allowed=False,
+            reason=f"IRR not determinable: more than one root inside the scan cell(s) {cells}; "
+            "show TWR and absolute ₹ P&L instead",
+            warnings=warnings,
+            flags=("IRR_NOT_DETERMINABLE",),
+        )
     if len(roots) > 1:
         return XirrResult(
             outcome=XirrOutcome.MULTIPLE_ROOTS,

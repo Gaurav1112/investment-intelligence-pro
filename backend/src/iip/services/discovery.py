@@ -18,7 +18,7 @@ from typing import Any
 
 from iip.engine import candidates as cb
 from iip.engine import tax as tx
-from iip.engine.determinism import canonical_json, content_hash
+from iip.engine.determinism import CANONICAL_VERSION, canonical_json, content_hash
 from iip.engine.money import D, format_inr, money, pct, quantize
 from iip.engine.ranking import (
     MIN_PRESERVATION_INDEPENDENT_WINDOWS,
@@ -165,8 +165,11 @@ def build_universe(  # noqa: PLR0915 - one linear pass per instrument kind
             "SELECT i.instrument_id, i.name, i.amfi_code, m.category_raw, m.exit_load_json FROM instruments i"
             " JOIN mf_schemes m USING(instrument_id) ORDER BY i.instrument_id"
         ):
+            # RT-27: only usable rows count (not rejected/suspect, not superseded), one per date — the same filter
+            # _nav_series applies, so the gate cannot admit a scheme on rows the evaluation will never see.
             n = conn.execute(
-                "SELECT COUNT(*) FROM observations WHERE series_id=? AND superseded_by IS NULL",
+                "SELECT COUNT(DISTINCT observation_date) FROM observations WHERE series_id=? AND superseded_by IS NULL"
+                " AND quality_status IN ('ok','manual','fixture')",
                 (f"nav:{r['amfi_code']}",),
             ).fetchone()[0]
             if n < MIN_HISTORY_POINTS:
@@ -403,10 +406,14 @@ def explained_outcome(
         "what": what,
         "formula_id": ev.formula_id,
         "formula": {
-            "CAND_TBILL@1": "face = amount × 100 / P,  P = 100 / (1 + y·D/365);  proceeds = face − tax(face − amount)",
+            "CAND_TBILL@2": (
+                "P = 100 / (1 + y·D/365);  lots = ⌊amount / (10,000·P/100)⌋;  face = 10,000·lots;  "
+                "cost = face·P/100;  proceeds = face + (amount − cost) − tax(face − cost)"
+            ),
             "CAND_FD@1": "A = P(1 + r/4)^q × (1 + r·b/365) (simple below the short-tenure cut-off); proceeds = A − tax",
-            "CAND_MF_EMPIRICAL@1": (
-                "R = NAV(t+H)/NAV(t) − 1 over every past window; V = (amount − stamp)(1 + R)(1 − load) − tax"
+            "CAND_MF_EMPIRICAL@2": (
+                "R = NAV(t+H−s)/NAV(t) − 1 over every past window (s = settlement days); "
+                "V = (amount − stamp)(1 + R)(1 − load) − tax"
             ),
             "CAND_BOND_HTM@1": (
                 "n = ⌊amount / (face × dirty / 100)⌋ whole bonds; V = idle cash + n·face/100 × (Σ coupons + redemption)"
@@ -437,7 +444,7 @@ def explained_outcome(
     }
 
 
-_MONEY_KEYS = {"amount", "dicgc_exposure_at_bank", "cash_left_idle", "face_value"}
+_MONEY_KEYS = {"amount", "dicgc_exposure_at_bank", "cash_left_idle", "face_value", "uninvested_cash"}
 _RATE_KEYS = {"quoted_yield", "rate", "coupon_rate"}
 _PER_100_KEYS = {"price_per_100", "clean_price_per_100", "accrued_per_100", "dirty_purchase_per_100"}
 
@@ -810,7 +817,7 @@ def discover(  # noqa: PLR0915 - one auditable orchestration sequence
         as_of=as_of,
         payload={"service": SERVICE_VERSION},
         disclosure_keys=disclosure_keys,
-        engine_versions={"ranking": POLICY_VERSION, "candidates": cb.ENGINE_VERSION},
+        engine_versions={"ranking": POLICY_VERSION, "candidates": cb.ENGINE_VERSION, "canonical": CANONICAL_VERSION},
         llm_rephrase=llm_rephrase,
     )
 

@@ -75,10 +75,18 @@ make dev            # backend in dev mode (fixtures allowed) + Vite HMR on http:
 ## Quality gate
 
 ```bash
-make check          # backend + frontend tests, ruff, mypy --strict, tsc, production build, dependency audit
+make check          # backend + frontend tests, lockfile sync, ruff, mypy --strict, tsc, production build, dependency audit
+make test-browser   # opt-in real-browser security tests (SEC-16 cross-origin, SEC-23 XSS) in headless Chromium
 ```
 
-`make audit` runs `pip-audit --strict` on the locked Python dependencies and `pnpm audit --prod`. It fails on any known vulnerability.
+- `make audit` runs `pip-audit --strict` on the locked Python dependencies and `pnpm audit --prod`. It fails on any known
+  vulnerability.
+- `make lockcheck` (part of `make check`, SEC-85) runs `uv lock --check` and `pnpm install --frozen-lockfile
+  --lockfile-only`, and asserts the pnpm policy in `frontend/pnpm-workspace.yaml`: `onlyBuiltDependencies: []` (no
+  dependency install scripts run) and `minimumReleaseAge: 10080` (versions younger than 7 days are never resolved).
+- `make test-browser` builds the frontend, installs Playwright's Chromium on first use (about 150 MB, into
+  `~/Library/Caches/ms-playwright`), then starts the real server in production mode on a free port with a temporary data
+  directory. The tests are skipped in plain `pytest` runs unless `IIP_BROWSER_TESTS=1`.
 
 ## Backups
 
@@ -88,6 +96,21 @@ make restore-drill  # restores the newest backup into a temp file and checks it 
 ```
 
 To restore for real: stop the app, keep a copy of `~/.iip/iip.db`, then use `iip.store.db.restore(backup, ~/.iip/iip.db)`.
+
+### Encrypted backups (optional, SEC-83)
+
+```bash
+make backup-encrypted                       # → ~/.iip/backups/iip-<UTC>.db.enc (0600); prompts for a passphrase twice
+make restore-encrypted                      # newest .enc → a NEW file ~/.iip/restored-<UTC>.db (never the live DB)
+make restore-encrypted BACKUP=… DEST=…      # a specific file / destination (DEST must not exist)
+```
+
+- AES-256-GCM with a key derived by scrypt (n = 2¹⁷, r = 8, p = 1) from your passphrase (≥ 12 characters). The salt,
+  nonce and KDF parameters are in the file's header, which is authenticated too. The passphrase is never stored.
+- Set `IIP_BACKUP_PASSPHRASE` to run unattended; otherwise you are prompted. **A lost passphrase cannot be recovered.**
+- The plaintext database never touches the disk during backup. Restore decrypts and checks everything in memory (GCM tag,
+  then SQLite `integrity_check`) before writing anything: a wrong passphrase or a modified file fails cleanly and leaves
+  no partial file. To use a restored file, stop the app and move it to `~/.iip/iip.db` (keep the old one).
 
 ## Configuration (environment variables)
 
@@ -108,4 +131,25 @@ To restore for real: stop the app, keep a copy of `~/.iip/iip.db`, then use `iip
 
 - Local run, login flow, fixture demo, live AMFI NAVAll + history ingestion, backup and restore drill: **VERIFIED** on 2026-10-15
   (macOS, Apple Silicon).
-- Clean-machine `make setup` from an empty checkout: **IMPLEMENTED, NOT VERIFIED**. This machine already had the toolchain.
+- Clean-checkout `make setup` + `make check`: **VERIFIED on 2026-10-15** (macOS, Apple Silicon), details below.
+
+### Clean-checkout verification (2026-10-15)
+
+A fresh `git clone` of the branch (commit `3a49f66`) into an empty temporary directory, then:
+
+| Step | Outcome |
+|---|---|
+| `make setup` | **Pass** (exit 0, 2.4 s). `uv sync --frozen` created `backend/.venv` from `uv.lock`; `pnpm install --frozen-lockfile` honoured the new `pnpm-workspace.yaml` (no build scripts). |
+| `make check` | **Pass** (exit 0): backend pytest green, frontend 23 files / 208 tests, `make lockcheck` OK, ruff + format + `mypy --strict` (70 files) clean, `tsc` + Vite build OK, `pip-audit --strict` and `pnpm audit --prod`: no known vulnerabilities. |
+| `make test-browser` | **Pass**: 5 real-browser tests (SEC-16, SEC-23). |
+
+What this does and does not prove:
+- Reused from this machine (as allowed): the uv download cache, the pnpm content-addressed store and the Playwright
+  Chromium cache, so no package was fetched from scratch; the toolchain (uv 0.11, Python 3.12 via uv, Node 24, pnpm
+  10.28 under Volta's Node 20) was already installed. A machine **without** that toolchain, or offline, was not tested.
+- `make audit` needs network access (PyPI advisory data, npm registry).
+- Gaps found and fixed: (1) `make test` printed no backend pass count (`-q` twice); it now does. (2) Starting the
+  backend before `make build` served only the API, so every page was a silent 404; it now logs
+  `frontend build missing … run make build` at startup (`tests/api/test_frontend_dist.py`). `make run` always builds
+  first, so the normal path was not affected.
+- The temporary clone was deleted afterwards.

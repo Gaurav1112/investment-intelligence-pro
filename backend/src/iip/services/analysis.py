@@ -32,7 +32,7 @@ from iip.engine.deposits import (
     dicgc_coverage,
     fd_premature_withdrawal,
 )
-from iip.engine.determinism import content_hash
+from iip.engine.determinism import CANONICAL_VERSION, content_hash
 from iip.engine.errors import EngineError, InsufficientHistory, InvalidInput, MissingData, StaleData
 from iip.engine.feasibility import (
     EvidenceLevel,
@@ -810,7 +810,7 @@ def _run_block(request: Mapping[str, Any], output: Mapping[str, Any], versions: 
     }
 
 
-_VERSIONS = {"analysis": SERVICE_VERSION, "candidates": cb.ENGINE_VERSION}
+_VERSIONS = {"analysis": SERVICE_VERSION, "candidates": cb.ENGINE_VERSION, "canonical": CANONICAL_VERSION}
 
 
 def compare(
@@ -840,7 +840,8 @@ def compare(
     changes: list[dict[str, Any]] = []
     for a, b in pairwise(evaluable):
         assert a.built is not None and b.built is not None
-        qa, qb = a.built.candidate.outcome.q05, b.built.candidate.outcome.q05
+        # Rounded to paise first, so the displayed subtraction reconciles exactly with the displayed q05 values.
+        qa, qb = money(a.built.candidate.outcome.q05), money(b.built.candidate.outcome.q05)
         with engine_context():
             gap = qa - qb
         text = (
@@ -1891,7 +1892,10 @@ def forecast(conn: sqlite3.Connection, *, as_of: date, instrument_id: str, horiz
         out["run"] = _run_block(request, out, _VERSIONS)
         return out
     try:
-        rng = fb.empirical_horizon_distribution(s.dates, prices, horizon=steps, as_of=as_of)
+        # RT-24 (§8): gaps beyond the gate refuse the band; windows spanning a > 7-day gap are excluded.
+        rng = fb.empirical_horizon_distribution(
+            s.dates, prices, horizon=steps, as_of=as_of, max_gap_days=fb.MAX_GAP_DAYS
+        )
     except InsufficientHistory as exc:
         out["status"] = "REFUSED"
         out["refusal"] = refusal(f"{instrument_id}.forecast", "Scenario range", exc.code, str(exc))
@@ -2041,7 +2045,15 @@ def _walk_forward(s: _Series, prices: list[float], h: int) -> dict[str, Any]:
     n = len(prices)
     e = fv.default_embargo(n)
     first = fb.N_EFF_MIN * h + e  # training must hold n_eff ≥ 10 at the first origin
-    origins = list(range(first, n - 2 * h + 1, h))  # every test label T..T+H−1 must itself be observed
+    # RT-24: a held-out outcome that spans a gap of more than 7 calendar days is not an H-step return → skipped.
+    gap_before = [0]
+    for a, b in pairwise(s.dates):
+        gap_before.append(gap_before[-1] + ((b - a).days > fb.MAX_GAP_DAYS))
+    origins = [
+        o
+        for o in range(first, n - 2 * h + 1, h)  # every test label T..T+H−1 must itself be observed
+        if gap_before[o + h] == gap_before[o]
+    ]
     base = {"method_id": "WALK_FORWARD_PURGED@1", "horizon_steps": h, "embargo": e, "origins": len(origins),
             "nominal_band": "80 % (levels 0.10–0.90)"}  # fmt: skip
     if not origins:
@@ -2056,9 +2068,13 @@ def _walk_forward(s: _Series, prices: list[float], h: int) -> dict[str, Any]:
     pinballs: list[float] = []
     for sp in plan:
         cut = sp.train_max + h  # last price index whose label is fully observed (= origin − embargo)
-        b1 = fb.empirical_horizon_distribution(
-            s.dates[: cut + 1], prices[: cut + 1], horizon=h, as_of=s.dates[cut], levels=FORECAST_LEVELS_VALIDATION
-        )
+        try:
+            b1 = fb.empirical_horizon_distribution(
+                s.dates[: cut + 1], prices[: cut + 1], horizon=h, as_of=s.dates[cut],
+                levels=FORECAST_LEVELS_VALIDATION, max_gap_days=fb.MAX_GAP_DAYS,
+            )  # fmt: skip
+        except InsufficientHistory:
+            continue  # this origin's training data does not pass the gap gate; it is not scored
         qs = [v for _, v in b1.quantiles]
         y = prices[sp.origin + h] / prices[sp.origin] - 1.0
         lows.append(qs[0])
@@ -2066,6 +2082,12 @@ def _walk_forward(s: _Series, prices: list[float], h: int) -> dict[str, Any]:
         highs.append(qs[2])
         ys.append(y)
         pinballs.append(fv.mean_pinball_loss(y, qs, FORECAST_LEVELS_VALIDATION))
+    if len(ys) < len(origins):
+        base["origins_skipped_gap_gate"] = len(origins) - len(ys)
+    if not ys:
+        return {**base, "status": "insufficient_evidence",
+                "refusal": refusal(f"{s.instrument_id}.validation", "Walk-forward validation", "INSUFFICIENT_HISTORY",
+                                   "no held-out origin has gap-free training history before it")}  # fmt: skip
     cov = fv.interval_coverage(lows, highs, ys, nominal=FORECAST_NOMINAL)
     prov = s.prov
 

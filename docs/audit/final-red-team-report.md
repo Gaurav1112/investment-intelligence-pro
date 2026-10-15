@@ -265,3 +265,39 @@ The red team's claims were **verified, not accepted on trust**:
 6. **Remaining open items** (RT-17, RT-19, RT-20, RT-22–24, RT-26–28) are listed in `docs/operations/known-limitations.md` with the
    reason each is not fixed. RT-19 (evidence behind the 1 % loss gate) and RT-20 (growth under 12 months) are product
    decisions that belong to the user.
+
+
+---
+
+## Resolution of open findings (track 5), 2026-10-15
+
+Every fix below was written test-first: the new tests were run against the pre-fix source (the commit before this
+work, restored into the working tree) and **22 failed and 3 test modules failed at import** (they use the new API:
+`DataGapsExceedGate`, `CANONICAL_VERSION`, `iip.store.encrypted_backup`). For those three, the old behaviour was also
+probed directly: `canonical_json` gave `"-0"`, kept `+05:30` and accepted `0.1`; a forecast over a series with a
+3-month hole counted all 3,520 windows (65 of them across the hole) with no warning; feasibility on a series with
+19 % suspect month-ends raised `InvalidInput` out of the service. All pass after the fixes. No existing test was
+weakened; one existing hand-check (`test_tbill_contractual_after_tax`) was re-derived for whole T-bill lots, which
+is the behaviour RT-22 changes, with the same strictness.
+
+| ID | Resolution | Tests |
+|---|---|---|
+| RT-17 | `tax.compute_tax(..., rates_as_of=)` / `select_rule(..., rates_as_of=)`: rule rows, Act, slab, surcharge and cess come from the law in force on `rates_as_of` (the coverage end); the holding period is classified from the actual acquisition and transfer dates; acquisition-date conditions see the actual acquisition date, so no lot crosses the 1-Apr-2023, 23-Jul-2024 or 31-Jan-2018 boundary. `rates_as_of` after the transfer → `InvalidInput`; beyond coverage → `RuleNotFound`. The probe (bought 15-Oct-2026, sold 19-Nov-2027, ₹2,00,000) is now ₹9,750 LTCG, not ₹41,600 STCG. A grid test proves the result equals "actual dates under unchanged law" for listed equity, equity MF, debt MF, T-bill and interest across all boundaries — never lower. | `tests/redteam/test_redteam_tax_coverage.py` (16) |
+| RT-22 | (a) `mf_candidate`: redemption on `as_of + (H − settlement)`; NAV windows, independent-window count, exit load, lock-in and the tax transfer date all use it. Found while fixing: with RT-17 fixed, using the withdrawal date for tax could classify a 365-day redemption as LTCG — the test pins STCG. (b) T-bills: RBI minimum ₹10,000 face in multiples of ₹10,000 (RBI/2021-2022/124, 12-Nov-2021; RBI Retail Direct FAQ — VERIFIED-PRIMARY for that notification, currency on 2026-10-15 not re-confirmed against a later master direction); whole lots only, remainder at 0 % (`UNINVESTED_REMAINDER_AT_ZERO`), `min_investment` = one lot's cost, below it `BELOW_MINIMUM_TICKET`. | `tests/redteam/test_redteam_settlement_and_tickets.py` (7) |
+| RT-24 | B1 `max_gap_days` (service passes 7): > 2 % of observations behind a > 7-day gap → `DATA_GAPS_EXCEED_GATE` (forecast REFUSED); otherwise windows spanning a gap are excluded and n_eff is the largest set of non-overlapping gap-free windows; walk-forward skips origins whose outcome or training fails the gate. Feasibility: the spec gate (> 2 % suspect grid points) is now a REFUSED result. | `tests/redteam/test_redteam_data_gaps.py` (8) |
+| RT-26 | Policy decided and documented in `iip.engine.determinism` (`canonical_json@2`): signed zero → zero, aware datetimes → UTC, floats rejected at any depth. Exact Decimal digits are kept on purpose (published precision is provenance; the existing `test_decimal_trailing_zeros_are_significant` encodes that decision). The version is recorded as `canonical` in discovery and analysis run versions. No code compares a recomputed hash with a stored one; the full suite passed unchanged. | `tests/redteam/test_redteam_canonical.py` (9) |
+| RT-27 | `/api/discover` with `include_fixtures` in prod → 400 `FIXTURES_NOT_ALLOWED`, nothing stored. MF history gate: `COUNT(DISTINCT observation_date)` over usable, non-superseded rows. FD ids: `fd:<institution_type>:<slug>:<tenure>d`. | `tests/redteam/test_redteam_rt27.py` (5) |
+| RT-28 | `XirrOutcome.NOT_DETERMINABLE`: with ≥ 2 sign changes each same-sign grid cell is searched for an interior extremum (bounded Brent); a crossing splits the cell into two solved, Decimal-verified brackets, a touch is a double root. Spec fixture X-5 stays `MULTIPLE_ROOTS`; a genuinely rootless case stays `NO_SOLUTION`. | `tests/redteam/test_redteam_xirr.py` (5) |
+| RT-18 | Unchanged (flag); now reachable with the shipped rule table. | `test_rt17_equity_mf_candidate_past_coverage_gets_ltcg_and_exemption_flag` |
+| RT-23 | **Still open** — needs licensed portfolio credit-rating data. | — |
+
+Version bumps: `candidates@1.1.0` (`CAND_TBILL@2`, `CAND_MF_EMPIRICAL@2`), `canonical_json@2`.
+
+One pre-existing reconciliation defect surfaced while running the suite and was fixed: the compare "what would change
+the order" gap was the difference of *unrounded* q05 values while the text showed rounded ones, so the displayed
+subtraction could be off by ₹0.01 (`test_compare_order_gaps_are_q05_differences` failed once the numbers moved).
+The gap is now computed from the paise-rounded values it displays.
+
+Security items closed in the same track: SEC-16 and SEC-23 (real-browser Playwright tests, `make test-browser`),
+SEC-83 (encrypted backups), SEC-85 (pnpm policy + `make lockcheck` in `make check`). See
+`docs/testing/verification-report.md` §3.

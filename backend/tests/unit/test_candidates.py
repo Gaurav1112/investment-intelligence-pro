@@ -57,18 +57,20 @@ def test_tbill_contractual_after_tax() -> None:
     assert b.evidence is not None and not b.ineligible_reasons
     c = b.candidate
     assert c.tier is Tier.T1 and c.outcome.is_contractual and c.loss_frequency == 0
-    # Hand check: days = 181, price = 100/(1+0.065·181/365) = 96.8781…; face = 1,03,222.5…; gain ≈ 3,222.5
+    # Hand check: days = 181, price = 100/(1+0.065·181/365) = 96.877…; RT-22: whole ₹10,000-face lots only, so
+    # 10 lots (face ₹1,00,000) cost ₹96,877.…; the ₹3,122.… remainder is held at 0 %; gain = face − cost.
     days = (date(2027, 4, 15) - date(2026, 10, 16)).days
     assert days == 181
     with engine_context():
         price = D(100) / (D(1) + D("0.065") * D(days) / D(365))
-        face = AMOUNT * D(100) / price
-        gain = face - AMOUNT
-    assert b.evidence.gross_end_value == face
+        face = D("100000")
+        cost = D(10) * (D(10000) * price / D(100))  # 10 lots × cost of one lot
+        gain = face - cost
+        assert b.evidence.gross_end_value == face + (AMOUNT - cost)
     assert b.evidence.tax_mid > gain * D("0.30")  # 30 % slab + 4 % cess
     assert b.evidence.tax_mid == pytest.approx(gain * D("0.312"), abs=D("0.01"))
     with engine_context():
-        assert c.outcome.q50 == face - b.evidence.tax_mid
+        assert c.outcome.q50 == face + (AMOUNT - cost) - b.evidence.tax_mid
     assert b.evidence.tax_unverified  # TBILL-01 head of income is NV → flagged
     # Maturity 15-Apr-2027 is beyond the legislated rule coverage (31-Mar-2027): assumption is explicit, not silent.
     assert "TAX_RULES_ASSUMED_UNCHANGED_AFTER_2027-03-31" in c.flags
@@ -323,8 +325,8 @@ def test_ambiguous_live_categories_are_unknown_for_tax(category: str) -> None:
 def test_equity_ltcg_exemption_assumption_is_flagged() -> None:
     """RT-18: when the ₹1.25 lakh exemption reduces tax, the result says it assumed the exemption was unused.
 
-    Under today's rule table (coverage to 31-Mar-2027) no equity holding started today can reach LTCG, because the
-    coverage clamp shortens the holding period (RT-17, documented). A table with longer coverage exercises the flag.
+    Uses a table with longer coverage (law in force on the transfer date). Since RT-17 was fixed the shipped table
+    triggers the flag too (`test_rt17_equity_mf_candidate_past_coverage_gets_ltcg_and_exemption_flag`).
     """
     import dataclasses
 

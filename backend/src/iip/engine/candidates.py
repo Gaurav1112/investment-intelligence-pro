@@ -24,7 +24,7 @@ from iip.engine.freshness import nav_is_stale
 from iip.engine.money import ONE, ZERO, D, engine_context
 from iip.engine.ranking import CREDIT_SCALE, Candidate, OutcomeBand, Tier
 
-ENGINE_VERSION = "candidates@1.0.0"
+ENGINE_VERSION = "candidates@1.1.0"
 MIN_INDEPENDENT_WINDOWS = 10  # validation-methodology §8: below this the empirical distribution is refused
 FULL_BAND_INDEPENDENT_WINDOWS = 20  # q05/q95 need ≥ 20 independent windows; otherwise worst observed window
 MAX_NAV_STALENESS_DAYS = 7  # calculation-methodology §0: last price on or before t within 7 calendar days
@@ -87,15 +87,17 @@ def _tax_on_gain(
     """Tax payable on a single gain under the user's profile, or the conservative illustrative 30 % profile.
 
     Rates beyond ``ruleset.coverage_to`` are not yet legislated. Rather than refuse every horizon that crosses the
-    financial-year end, the transfer date is clamped to the coverage end and the result is FLAGGED. Clamping can only
-    shorten the holding period, which never yields a more favourable classification (LTCG → STCG at worst), so tax is
-    never understated by the assumption.
+    financial-year end, the gain is priced under the law in force on the coverage end (``rates_as_of``), assumed
+    unchanged, and the result is FLAGGED. The holding period is classified from the ACTUAL acquisition and transfer
+    dates (RT-17: clamping the transfer date used to turn a 400-day equity holding into STCG), and acquisition-date
+    conditions see the actual acquisition date, so no lot crosses a rule boundary. The result therefore equals "actual
+    dates under unchanged law" — the stated assumption — and never understates it.
     """
     flag: str | None = None
+    rates_as_of: date | None = None
     if transferred > ruleset.coverage_to:
         flag = f"TAX_RULES_ASSUMED_UNCHANGED_AFTER_{ruleset.coverage_to.isoformat()}"
-        transferred = ruleset.coverage_to
-        acquired = min(acquired, transferred)
+        rates_as_of = ruleset.coverage_to
     disposal = tx.Disposal(
         lot_id=lot_id,
         instrument_class=instrument_class,
@@ -107,7 +109,7 @@ def _tax_on_gain(
         debt_share=debt_share,
     )
     use = profile if profile is not None else tx.ILLUSTRATIVE_PROFILES[0]
-    report = tx.compute_tax([disposal], ruleset, use)
+    report = tx.compute_tax([disposal], ruleset, use, rates_as_of=rates_as_of)
     return report.scenarios[0].total_tax_inr, report, flag
 
 
@@ -135,6 +137,12 @@ def _ineligible(
 
 # --------------------------------------------------------------------------------------------- T-bill
 
+# RBI: "The minimum amount for bidding will be ₹10,000 (face value) and thereafter in multiples in ₹10,000"
+# (RBI/2021-2022/124, 12-Nov-2021, non-competitive bidding incl. Retail Direct; RBI Retail Direct FAQ, T-bills ₹10,000).
+TBILL_MIN_FACE_INR = D(10000)
+TBILL_LOT_FACE_INR = D(10000)
+TBILL_MIN_TICKET_SOURCE = "RBI/2021-2022/124 (12-Nov-2021): minimum ₹10,000 face, multiples of ₹10,000"
+
 
 def tbill_candidate(
     *,
@@ -148,7 +156,12 @@ def tbill_candidate(
     ruleset: tx.TaxRuleSet,
     profile: tx.TaxProfile | None,
 ) -> BuiltCandidate:
-    """Buy at the quoted money-market yield, hold to maturity, keep the cash until the withdrawal date (0 %)."""
+    """Buy at the quoted money-market yield, hold to maturity, keep the cash until the withdrawal date (0 %).
+
+    RT-22: face value is bought in whole ₹10,000 lots (RBI minimum bid and multiple); the cash that does not fill a
+    whole lot is held at 0 % (flagged ``UNINVESTED_REMAINDER_AT_ZERO``). Below the cost of one lot the candidate is
+    ``BELOW_MINIMUM_TICKET``.
+    """
     if maturity > withdrawal:
         return _ineligible(
             instrument_id, name, Tier.T1, ["HORIZON_MISMATCH: matures after your withdrawal date"], amount
@@ -157,8 +170,28 @@ def tbill_candidate(
         days = tbill_days(settlement, maturity)
         priced = tbill_price(quoted_yield, days)
         with engine_context():
-            face = amount * D(100) / priced.price
-            gain = face - amount
+            lot_cost = TBILL_LOT_FACE_INR * priced.price / D(100)
+            lots = int(amount / lot_cost)
+            while lots > 0 and lot_cost * lots > amount:  # guard the last-digit rounding of the division
+                lots -= 1
+            while lot_cost * (lots + 1) <= amount:
+                lots += 1
+        if lots * TBILL_LOT_FACE_INR < TBILL_MIN_FACE_INR:
+            reason = (
+                f"BELOW_MINIMUM_TICKET: the minimum T-bill bid is ₹{TBILL_MIN_FACE_INR:,} face value (costs "
+                f"₹{lot_cost.quantize(D('0.01'))} at this yield); {TBILL_MIN_TICKET_SOURCE}"
+            )
+            cand = Candidate(
+                instrument_id=instrument_id, name=name, tier=Tier.T1, outcome=OutcomeBand.contractual(amount),
+                loss_frequency=None, days_to_cash=0, exit_cost=ZERO, horizon_fit=False, credit_rating=None,
+                data_ok=False, min_investment=lot_cost,
+            )  # fmt: skip
+            return BuiltCandidate(cand, None, (reason,), priced.warnings)
+        with engine_context():
+            face = TBILL_LOT_FACE_INR * lots
+            cost = lot_cost * lots
+            leftover = amount - cost
+            gain = face - cost
         tax_amt, report, tax_flag = _tax_on_gain(
             gain, lot_id=instrument_id, instrument_class="TBILL", acquired=settlement, transferred=maturity,
             ruleset=ruleset, profile=profile,
@@ -166,10 +199,11 @@ def tbill_candidate(
     except EngineError as exc:
         return _ineligible(instrument_id, name, Tier.T1, [f"{exc.code}: {exc}"], amount)
     with engine_context():
-        net = face - tax_amt
+        gross = face + leftover
+        net = gross - tax_amt
     evidence = CandidateEvidence(
-        formula_id="CAND_TBILL@1",
-        gross_end_value=face,
+        formula_id="CAND_TBILL@2",
+        gross_end_value=gross,
         band_gross=None,
         tax_low=tax_amt,
         tax_mid=tax_amt,
@@ -185,17 +219,29 @@ def tbill_candidate(
             ("maturity", maturity.isoformat()),
             ("days", str(days)),
             ("price_per_100", str(priced.price)),
+            ("lots", str(lots)),
+            ("face_value", str(face)),
+            ("uninvested_cash", str(leftover)),
         ),
         assumptions=(
             "Held to maturity; face value repaid by the Government of India on the maturity date",
             "Cash from maturity to your withdrawal date earns nothing (conservative)",
-            "Fractional face value — T-bill lot sizes and bid/ask spreads are not modelled",
+            f"Face value bought in whole ₹{TBILL_LOT_FACE_INR:,} lots ({TBILL_MIN_TICKET_SOURCE}); the remainder "
+            "is held as cash at 0 % (conservative)",
         ),
         limitations=(
             "The quoted yield is the one you entered with its citation; the price you obtain may differ",
             "Selling before maturity exposes you to price risk (not modelled for this candidate)",
+            "Bid/ask spreads are not modelled",
         ),
     )
+    flags_tb: list[str] = []
+    if report.unverified_assumption:
+        flags_tb.append("TAX_RULE_UNVERIFIED")
+    if tax_flag is not None:
+        flags_tb.append(tax_flag)
+    if leftover > 0:
+        flags_tb.append("UNINVESTED_REMAINDER_AT_ZERO")
     cand = Candidate(
         instrument_id=instrument_id,
         name=name,
@@ -207,9 +253,8 @@ def tbill_candidate(
         horizon_fit=True,
         credit_rating="SOVEREIGN",
         data_ok=True,
-        flags=tuple(
-            f for f in ("TAX_RULE_UNVERIFIED" if report.unverified_assumption else None, tax_flag) if f is not None
-        ),
+        min_investment=lot_cost,
+        flags=tuple(flags_tb),
     )
     return BuiltCandidate(cand, evidence, (), priced.warnings)
 
@@ -980,8 +1025,16 @@ def mf_candidate(  # noqa: PLR0915 - one linear, auditable pipeline; splitting h
     lock_in = mf_lock_in_days(category, name)
     if is_close_ended(category, name):
         reasons.append("CLOSE_ENDED_OR_INTERVAL: units cannot be redeemed with the fund on demand before maturity")
+    # RT-22: units are redeemed `settlement_days` before the withdrawal date so the proceeds arrive by then. The NAV
+    # window, exit-load test, lock-in test and the tax transfer date all use that redemption day (conservative).
+    nav_window_days = horizon_days - settlement_days
+    redemption = as_of + timedelta(days=nav_window_days)
     if lock_in > horizon_days:
         reasons.append(f"HORIZON_MISMATCH: {lock_in}-day lock-in exceeds your {horizon_days}-day horizon")
+    elif lock_in > nav_window_days:
+        reasons.append(
+            f"HORIZON_MISMATCH: {lock_in}-day lock-in ends too late for T+{settlement_days} proceeds by your date"
+        )
     if horizon_days <= settlement_days:
         # Units bought on as_of can be redeemed at the earliest the next day; proceeds then settle T+settlement_days.
         reasons.append(
@@ -998,7 +1051,7 @@ def mf_candidate(  # noqa: PLR0915 - one linear, auditable pipeline; splitting h
     assert load is not None
 
     try:
-        dated = _horizon_windows(nav_dates, navs, horizon_days)
+        dated = _horizon_windows(nav_dates, navs, nav_window_days)
     except EngineError as exc:
         return _ineligible(instrument_id, name, tier, [f"{exc.code}: {exc}"], amount)
     windows = [r for _, r in dated]
@@ -1010,11 +1063,11 @@ def mf_candidate(  # noqa: PLR0915 - one linear, auditable pipeline; splitting h
              "backfilled)"],
             amount,
         )  # fmt: skip
-    n_ind = independent_window_count([d for d, _ in dated], horizon_days)
+    n_ind = independent_window_count([d for d, _ in dated], nav_window_days)
     if n_ind < MIN_INDEPENDENT_WINDOWS or not windows:
         return _ineligible(
             instrument_id, name, tier,
-            [f"INSUFFICIENT_HISTORY: {n_ind} independent windows of {horizon_days} days (need ≥ "
+            [f"INSUFFICIENT_HISTORY: {n_ind} independent windows of {nav_window_days} days (need ≥ "
              f"{MIN_INDEPENDENT_WINDOWS})"],
             amount,
         )  # fmt: skip
@@ -1032,7 +1085,7 @@ def mf_candidate(  # noqa: PLR0915 - one linear, auditable pipeline; splitting h
         loss_freq = Decimal(losses) / Decimal(len(windows))
         stamp = amount * D("0.00005") / D("1.00005")  # 0.005 % stamp duty on the net amount (calc-methodology §2.10)
         invested = amount - stamp
-        load_applies = horizon_days <= load.days
+        load_applies = nav_window_days <= load.days
         load_rate = load.rate if load_applies else ZERO
 
         def end_value(r: Decimal) -> tuple[Decimal, Decimal]:
@@ -1055,7 +1108,7 @@ def mf_candidate(  # noqa: PLR0915 - one linear, auditable pipeline; splitting h
                 continue
             t, rep, tflag = _tax_on_gain(
                 gain, lot_id=f"{instrument_id}#{k}", instrument_class="MUTUAL_FUND", acquired=as_of,
-                transferred=withdrawal, ruleset=ruleset, profile=profile,
+                transferred=redemption, ruleset=ruleset, profile=profile,
                 equity_share=D("0.65") if equity else ZERO, debt_share=ZERO if equity else ONE,
             )  # fmt: skip
             taxes.append(t)
@@ -1078,7 +1131,7 @@ def mf_candidate(  # noqa: PLR0915 - one linear, auditable pipeline; splitting h
         flags.append("LOW_EVIDENCE")
     flags.extend(sorted(tax_flags))
     evidence = CandidateEvidence(
-        formula_id="CAND_MF_EMPIRICAL@1",
+        formula_id="CAND_MF_EMPIRICAL@2",
         gross_end_value=None,
         band_gross=(values[0][0], values[1][0], values[2][0]),
         tax_low=taxes[0],
@@ -1095,6 +1148,8 @@ def mf_candidate(  # noqa: PLR0915 - one linear, auditable pipeline; splitting h
         inputs=(
             ("amount", str(amount)),
             ("horizon_days", str(horizon_days)),
+            ("nav_window_days", str(nav_window_days)),
+            ("redemption_date", redemption.isoformat()),
             ("nav_observations", str(len(navs))),
             ("history", f"{nav_dates[0].isoformat()} → {nav_dates[-1].isoformat()}"),
             ("exit_load", f"{(load.rate * 100).normalize()} % if redeemed within {load.days} days ({load.citation})"),
@@ -1102,6 +1157,8 @@ def mf_candidate(  # noqa: PLR0915 - one linear, auditable pipeline; splitting h
         ),
         assumptions=(
             "The distribution of past windows of this length is representative (strong assumption)",
+            f"Redeemed {settlement_days} day(s) before your withdrawal date so the T+{settlement_days} proceeds "
+            f"arrive in time: the NAV windows are {nav_window_days} days, not {horizon_days}",
             "NAV is net of scheme expenses; no expense ratio is deducted again",
             f"Tax class inferred from SEBI category '{category}'",
         ),

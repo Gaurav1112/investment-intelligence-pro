@@ -78,6 +78,11 @@ def _restrict_db_files(db: Path) -> None:
             os.chmod(p, 0o600)
 
 
+def frontend_dist() -> Path:
+    """The built UI (``make build``) served by the backend."""
+    return Path(__file__).resolve().parents[4] / "frontend" / "dist"
+
+
 def create_app(
     settings: Settings, *, clock: Callable[[], datetime] = utc_now, routers: list[APIRouter] | None = None
 ) -> Any:
@@ -147,8 +152,12 @@ def create_app(
     for router in routers or []:
         app.include_router(router)
 
-    dist = Path(__file__).resolve().parents[4] / "frontend" / "dist"
-    if dist.exists():
+    dist = frontend_dist()
+    if not (dist / "index.html").exists():
+        # Clean-machine finding: starting the backend before `make build` silently served the API only (every page
+        # 404). Say so once at startup; `make run` always builds first.
+        log.warning("frontend build missing at %s: only the API is served; run `make build`", dist)
+    else:
         index = dist / "index.html"
 
         @app.get("/{full_path:path}", include_in_schema=False)

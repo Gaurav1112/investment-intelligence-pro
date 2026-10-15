@@ -68,28 +68,53 @@ class Universe:
 # ----------------------------------------------------------------------------- universe
 
 
+# Official AMFI sources in precedence order when both report the same date (they must agree; see _nav_series).
+_NAV_SOURCE_PRECEDENCE = ("amfi.navall", "amfi.navhistory", "fixture")
+
+
 def _nav_series(conn: sqlite3.Connection, code: str) -> tuple[list[date], list[Decimal], dict[str, Any]]:
+    """One NAV per date. The same date can arrive from NAVAll AND the history report (both official AMFI).
+
+    Equal values (exact Decimal compare, so '25.9504' == '25.95040') are merged. Unequal values are a SOURCE CONFLICT:
+    the date is recorded in prov['conflicts'] and callers must not evaluate the series — never pick one silently.
+    """
     rows = conn.execute(
         "SELECT observation_date, value, source_id, source_url, retrieved_at, quality_status FROM observations"
         " WHERE series_id=? AND superseded_by IS NULL AND quality_status IN ('ok','manual','fixture')"
         " ORDER BY observation_date",
         (f"nav:{code}",),
     ).fetchall()
-    dates = [date.fromisoformat(r["observation_date"]) for r in rows]
-    navs = [Decimal(r["value"]) for r in rows]
-    prov: dict[str, Any] = {}
-    if rows:
-        last = rows[-1]
-        prov = {
+
+    def rank(r: sqlite3.Row) -> int:
+        sid = r["source_id"]
+        return _NAV_SOURCE_PRECEDENCE.index(sid) if sid in _NAV_SOURCE_PRECEDENCE else len(_NAV_SOURCE_PRECEDENCE)
+
+    by_date: dict[str, list[sqlite3.Row]] = {}
+    for r in rows:
+        by_date.setdefault(r["observation_date"], []).append(r)
+    chosen: list[sqlite3.Row] = []
+    conflicts: list[str] = []
+    for d in sorted(by_date):
+        group = sorted(by_date[d], key=rank)
+        if len({Decimal(r["value"]) for r in group}) > 1:
+            conflicts.append(f"{d}: " + ", ".join(f"{r['source_id']}={r['value']}" for r in group))
+        chosen.append(group[0])
+    dates = [date.fromisoformat(r["observation_date"]) for r in chosen]
+    navs = [Decimal(r["value"]) for r in chosen]
+    prov: dict[str, Any] = {"conflicts": conflicts}
+    if chosen:
+        last = chosen[-1]
+        prov.update({
             "source_id": last["source_id"],
             "url": last["source_url"],
             "retrieved_at": last["retrieved_at"],
             "observation_date": last["observation_date"],
             "quality_status": last["quality_status"],
-            "first_date": rows[0]["observation_date"],
-            "count": len(rows),
-            "fixture": any(r["quality_status"] == "fixture" for r in rows),
-        }
+            "first_date": chosen[0]["observation_date"],
+            "count": len(chosen),
+            "sources": sorted({r["source_id"] for r in chosen}),
+            "fixture": any(r["quality_status"] == "fixture" for r in chosen),
+        })  # fmt: skip
     return dates, navs, prov
 
 
@@ -134,6 +159,12 @@ def build_universe(
                 continue
             evaluated += 1
             dates, navs, prov = _nav_series(conn, r["amfi_code"])
+            if prov["conflicts"]:
+                tier = cb.mf_tier_from_category(r["category_raw"] or "")
+                reason = [f"SOURCE_CONFLICT: official sources disagree on {prov['conflicts'][0]}"]
+                built.append(cb._ineligible(r["instrument_id"], r["name"], tier, reason, amount))
+                sources[r["instrument_id"]] = {**prov, "kind": "mf_scheme", "category": r["category_raw"] or ""}
+                continue
             load = None
             if r["exit_load_json"]:
                 el = json.loads(r["exit_load_json"])

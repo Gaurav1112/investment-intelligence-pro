@@ -2,6 +2,7 @@
 
 from collections.abc import Iterator
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -143,3 +144,30 @@ def test_explanations_never_leak_internal_precision(conn) -> None:  # type: igno
             e = r["outcome"][k]
             for line in [*e["inputs"], e["substituted"], e["display"]]:
                 assert not long_decimal.search(line), line
+
+
+def _add_nav(conn, code: str, d: str, value: str, source: str) -> None:  # type: ignore[no-untyped-def]
+    from iip.store.observations import ObservationRow, upsert_observation
+
+    upsert_observation(conn, ObservationRow(
+        series_id=f"nav:{code}", kind="nav", value=value, unit="INR_per_unit", currency="INR", observation_date=d,
+        retrieved_at=NOW.isoformat(), source_id=source, source_url="https://portal.amfiindia.com/x",
+        quality_status="ok", raw_sha256="a" * 64))  # fmt: skip
+
+
+def test_same_date_from_two_official_sources_is_merged_when_equal(conn) -> None:  # type: ignore[no-untyped-def]
+    # Live finding 2026-10-15: NAVAll and the history report both carry 14-Oct; series must not have duplicate dates.
+    _add_nav(conn, "777", "2026-10-13", "100.10", "amfi.navhistory")
+    _add_nav(conn, "777", "2026-10-14", "100.2", "amfi.navhistory")
+    _add_nav(conn, "777", "2026-10-14", "100.20", "amfi.navall")  # same value, different precision
+    dates, navs, prov = disc._nav_series(conn, "777")
+    assert navs[-1] == Decimal("100.2")
+    assert [d.isoformat() for d in dates] == ["2026-10-13", "2026-10-14"]
+    assert prov["conflicts"] == [] and prov["source_id"] == "amfi.navall"
+
+
+def test_disagreeing_official_sources_are_a_conflict_not_a_choice(conn) -> None:  # type: ignore[no-untyped-def]
+    _add_nav(conn, "778", "2026-10-14", "100.20", "amfi.navhistory")
+    _add_nav(conn, "778", "2026-10-14", "100.25", "amfi.navall")
+    _, _, prov = disc._nav_series(conn, "778")
+    assert prov["conflicts"] and "amfi.navall=100.25" in prov["conflicts"][0]

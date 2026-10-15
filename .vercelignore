@@ -1,6 +1,6 @@
 # Never uploaded to Vercel (ADR-0013). The frontend is rebuilt there from source (scripts/vercel-build.sh).
-.git
-.claude
+/.git
+/.claude
 .env
 .env.*
 **/.venv
@@ -12,8 +12,8 @@
 **/.hypothesis
 frontend/dist
 backend/tests
-docs
-data
+/docs
+/data
 *.db
 *.db-*
 *.sqlite3

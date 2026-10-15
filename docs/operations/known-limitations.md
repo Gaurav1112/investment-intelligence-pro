@@ -36,6 +36,20 @@ Living document, last updated 2026-10-15.
 | FD premature-withdrawal penalty | REQUIRES CONFIGURATION | Bank-specific, so there is no default. If unknown, liquidity is treated as unavailable until maturity. |
 | Monthly-SIP levers, Christoffersen test, PIT histogram, loss-ratio monitor | IMPLEMENTED, NOT VERIFIED | |
 
+## Analysis endpoints (Stage D)
+
+| Item | Status | Detail |
+|---|---|---|
+| Inflation shock / real return | BLOCKED | No CPI series has been ingested (MoSPI needs user configuration). Always returns `not_applicable`. |
+| Sharpe ratio | BLOCKED | No stored 91-day T-bill yield series. Refused as `RISK_FREE_SERIES_UNAVAILABLE`, and as `REFUSED_SMOOTHED_NAV` for debt, liquid and hybrid funds. |
+| Rate/spread shocks on debt funds | BLOCKED | Scheme duration is not stored (it needs factsheet data). |
+| FD early-exit scenario | BLOCKED | The card rate for the shorter tenure is not stored. |
+| Volatility for liquid/overnight/money-market funds | Refused by design | Their NAVs are smoothed. A weekly series is needed and has not been built. |
+| Equity shock | Simplification, labelled | Applied to the fund's NAV with β = 1. Market beta is not estimated. |
+| Scenario impacts | Before tax | Tax on the changed gain is not recomputed. |
+| Forecast inputs | Note | NAVs are converted Decimal→float in the service layer before the forecasting engine, which is float-based by design. Outputs return to Decimal at the boundary. |
+| DICGC aggregation | Conservative | "Existing deposits" entered against several FDs at one bank are summed. This can overstate exposure; it never understates it. |
+
 ## Product
 
 | Item | Status | Detail |

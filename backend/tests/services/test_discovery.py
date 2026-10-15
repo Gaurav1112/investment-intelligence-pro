@@ -171,3 +171,23 @@ def test_disagreeing_official_sources_are_a_conflict_not_a_choice(conn) -> None:
     _add_nav(conn, "778", "2026-10-14", "100.25", "amfi.navall")
     _, _, prov = disc._nav_series(conn, "778")
     assert prov["conflicts"] and "amfi.navall=100.25" in prov["conflicts"][0]
+
+
+def test_reentered_tbill_yield_uses_latest_quote_only(conn) -> None:  # type: ignore[no-untyped-def]
+    """A T-bill quoted on two dates must appear once (latest quote), not twice (duplicate candidate ids)."""
+    from iip.services.instruments import Citation, TBillIn, add_tbill
+
+    cite = "https://www.rbi.org.in/Scripts/BS_PressReleaseDisplay.aspx?prid=1"
+    for as_of, y in (("2026-10-07", "0.0630"), ("2026-10-14", "0.0629")):
+        body = TBillIn(
+            name="182-day T-bill (test)",
+            tenor="182",
+            maturity=date(2027, 4, 8),
+            yield_fraction=Decimal(y),
+            citation=Citation(url=cite, as_of=date.fromisoformat(as_of)),
+        )
+        add_tbill(conn, body, NOW)
+    out = go(conn, profile())
+    rows = [r for r in out["ranked"] + out["excluded"] if r["instrument_id"] == "tbill:182d:2027-04-08"]
+    assert len(rows) == 1
+    assert rows[0]["observed"] == "2026-10-14"

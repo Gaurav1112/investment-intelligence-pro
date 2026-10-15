@@ -196,6 +196,8 @@ def build_universe(
             " o.quality_status"
             " FROM instruments i JOIN bond_terms b USING(instrument_id) JOIN observations o"
             " ON o.series_id = 'yield:' || i.instrument_id AND o.superseded_by IS NULL WHERE i.kind='tbill'"
+            " AND o.observation_date = (SELECT MAX(o2.observation_date) FROM observations o2"
+            "   WHERE o2.series_id = o.series_id AND o2.superseded_by IS NULL)"
             " ORDER BY i.instrument_id"
         ):
             quote_date = date.fromisoformat(r["observation_date"])

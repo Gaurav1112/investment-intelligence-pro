@@ -289,7 +289,7 @@ is the behaviour RT-22 changes, with the same strictness.
 | RT-27 | `/api/discover` with `include_fixtures` in prod → 400 `FIXTURES_NOT_ALLOWED`, nothing stored. MF history gate: `COUNT(DISTINCT observation_date)` over usable, non-superseded rows. FD ids: `fd:<institution_type>:<slug>:<tenure>d`. | `tests/redteam/test_redteam_rt27.py` (5) |
 | RT-28 | `XirrOutcome.NOT_DETERMINABLE`: with ≥ 2 sign changes each same-sign grid cell is searched for an interior extremum (bounded Brent); a crossing splits the cell into two solved, Decimal-verified brackets, a touch is a double root. Spec fixture X-5 stays `MULTIPLE_ROOTS`; a genuinely rootless case stays `NO_SOLUTION`. | `tests/redteam/test_redteam_xirr.py` (5) |
 | RT-18 | Unchanged (flag); now reachable with the shipped rule table. | `test_rt17_equity_mf_candidate_past_coverage_gets_ltcg_and_exemption_flag` |
-| RT-23 | **Still open** — needs licensed portfolio credit-rating data. | — |
+| RT-23 | **Resolved in track 1** (`ranking_policy@1.2.0`): the credit floor uses the lowest rating from a factsheet you enter with a citation; a stale or missing factsheet gives `CREDIT_QUALITY_UNKNOWN`, which is excluded whenever a floor is set. No licensed data feed is used. | `tests/unit/test_credit_floor_rt23.py` |
 
 Version bumps: `candidates@1.1.0` (`CAND_TBILL@2`, `CAND_MF_EMPIRICAL@2`), `canonical_json@2`.
 
@@ -301,3 +301,25 @@ The gap is now computed from the paise-rounded values it displays.
 Security items closed in the same track: SEC-16 and SEC-23 (real-browser Playwright tests, `make test-browser`),
 SEC-83 (encrypted backups), SEC-85 (pnpm policy + `make lockcheck` in `make check`). See
 `docs/testing/verification-report.md` §3.
+
+## ECC specialist review panel, 2026-10-15
+
+Eight vendored ECC reviewers (`.claude/agents/`, pinned; no installer, hooks or network) reviewed the merged
+codebase: python, fastapi, database, security, silent-failure-hunter, react, typescript and a11y-architect. Each
+finding was then checked adversarially by a separate agent with a reproduction. **21 reported, 21 confirmed, 21
+fixed**, each with a regression test that fails on the pre-fix code. The full reports are in `docs/audit/ecc-panel/`.
+
+| ID (reviewer) | Severity | Finding | Resolution |
+|---|---|---|---|
+| F1 (fastapi) / DB-2 (database) | High | Two concurrent applies of the same CSV/XLSX or CAS import batch both stored every row | The batch is claimed inside the write transaction (`previewed` → `applying`, exactly one row) and already-applied is re-checked under the lock (`pf.claim_previewed_batch`). Test: `tests/services/test_import_concurrency.py` (two-thread barrier race) |
+| PR-1 (python) / DB-1 (database) | High | After a same-day NAV correction, pruning broke `ux_obs_current`, so every later NAVAll refresh failed | The `superseded_by = NULL` update was removed; one DELETE removes the correction pair. Test: `test_prune_survives_a_same_day_nav_correction` |
+| F1 (silent-failure) | High | The DICGC check read missing "existing deposits" as ₹0 and ignored the user's own FDs at the same bank | Exposure is the entered figure plus open same-bank FD principal from your portfolios; with neither, `EXISTING_DEPOSITS_NOT_RECORDED` → T3, never zero-loss. Tests: `test_dicgc_existing.py` |
+| A11Y-1 | High | Onboarding disabled Save with no error message | Validate on submit, focused error summary linking to each field, `aria-invalid` and `aria-describedby` |
+| F2 (fastapi) | Medium | Unhandled exceptions reached uvicorn's traceback log with user values | Outermost middleware catches, logs only the class and request id, and sends a 500. Test: `test_f2_no_exception_escapes_the_asgi_app` |
+| F3 (fastapi) | Medium | NAV-history backfill had no rate limit or pacing, and its circuit breaker reset on every request | Atomic, locked per-source limiter (429 with `Retry-After`), 1-second pacing, one shared breaker on `AppState` |
+| PR-2 (python) | Medium | ELSS lock-in missed when ELSS appears only in the scheme name | The scheme name is passed to `mf_lock_in_days` in portfolio and compare |
+| SR-01 (security) | Medium | Privacy erase missed `.db.enc`, `.partial` and `restored-*.db` files | Inventoried and erased; `restore-drill` cleans its temp copy |
+| F3 (silent-failure) | Medium | A failed AMFI ISIN lookup was reported as "no stored instrument has this ISIN" | `IsinLookupFailed` → `ISIN_LOOKUP_FAILED` reason and a preview warning |
+| F2, F4 (silent-failure) | Low | Unreadable portfolios were silently skipped by the stale alert; failed ingestion runs stayed `running` | Critical `inconsistent_book` alert; runs are marked failed on error, and interrupted runs are marked at startup |
+| R-01, R-02, TS-1, TS-2 | Medium/Low | Frontend: StrictMode mutation state, stale responses, untyped `real_return` and `yield_carry`, aborted-request loading flag | Fixed with vitest coverage. Compare now shows the real return after inflation; Risk shows yield carry |
+| A11Y-2..5 | Medium | Focus loss, silent route changes, focusable dots inside `role=img`, stale values announced as current | Focus management, page titles plus focus on `#main`, chart dots hidden from assistive tech in favour of the table, freshness word in labels |

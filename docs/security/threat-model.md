@@ -339,7 +339,7 @@ An in-process token bucket keyed per route class. There is no Redis or external 
 |---|---|---|
 | `POST /api/session` | 10/min | Make token guessing pointless; logs abuse. |
 | Import upload | 10/min | Limits damage from a runaway client. |
-| Manual "refresh source" | 1 per source per 15 min (plus the circuit breaker) | **Upstream politeness**: we must not hammer AMFI/RBI. Applies to the NAVAll refresh (`amfi.navall`) and the NAV-history backfill (`amfi.navhistory`); the check-and-set is atomic across worker threads; backfill requests are paced 1 s apart; one circuit breaker is shared by the whole process (ECC panel F3, 2026-10-15). |
+| Manual "refresh source" | 1 per source per 15 min (plus the circuit breaker) | **Upstream politeness**: we must not hammer AMFI/RBI. Applies to the NAVAll refresh (`amfi.navall`) and, **per scheme**, the NAV-history backfill (`amfi.navhistory:<code>`; user decision 2026-10-15), with only one backfill running at a time (`BACKFILL_IN_PROGRESS`) so the combined rate never exceeds the 1 s pacing; the check-and-set is atomic across worker threads; backfill requests are paced 1 s apart; one circuit breaker is shared by the whole process (ECC panel F3, 2026-10-15). |
 | LLM explain | 6/min, 1 concurrent | Local CPU/GPU protection. |
 | Everything else | 300/min | A ceiling against accidental loops in the SPA. |
 

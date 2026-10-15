@@ -8,10 +8,10 @@ Status labels: **VERIFIED** (executed, with evidence) · **IMPLEMENTED, NOT VERI
 
 | Suite | Result |
 |---|---|
-| Backend `pytest` (unit, property, oracle, data, services, API, security, red-team) | **VERIFIED — 1,643 passed, 6 skipped (5 opt-in browser tests, 1 opt-in live-network test)** (final run after all tracks and the ECC panel fixes, 2026-10-15; was 1,298) |
+| Backend `pytest` (unit, property, oracle, data, services, API, security, red-team) | **VERIFIED — 1,644 passed, 6 skipped (5 opt-in browser tests, 1 opt-in live-network test)** (final run after all tracks, the ECC panel fixes and the per-scheme backfill limit, 2026-10-15; was 1,298) |
 | Backend real-browser tests (`IIP_BROWSER_TESTS=1`, `make test-browser`, Chromium) | **VERIFIED — 5 passed** (SEC-16 ×4, SEC-23 ×1) |
 | Backend `ruff check` / `ruff format --check` / `mypy --strict` (70 source files) | **VERIFIED — ruff clean, 182 files formatted, mypy --strict: no issues in 83 source files** |
-| Frontend `vitest` | **VERIFIED — 269 passed (33 files)** |
+| Frontend `vitest` | **VERIFIED — 272 passed (34 files)** |
 | Frontend `tsc` type-check and production build | **VERIFIED — tsc OK; Vite production build OK** |
 | Dependency audit (`pip-audit --strict`, `pnpm audit --prod`) | **VERIFIED — no known vulnerabilities (Python and npm) on 2026-10-15** |
 
@@ -106,7 +106,7 @@ Status labels: **VERIFIED** (executed, with evidence) · **IMPLEMENTED, NOT VERI
 
 ```
 $ cd backend && .venv/bin/pytest -p no:warnings
-1643 passed, 6 skipped in 236.17s (0:03:56)
+1644 passed, 6 skipped in 147.64s (0:02:27)
 $ IIP_BROWSER_TESTS=1 .venv/bin/pytest -p no:warnings -m browser tests/browser
 5 passed
 $ ruff check src tests && ruff format --check src tests && mypy
@@ -117,8 +117,8 @@ $ make lockcheck
 lockcheck: OK
 $ cd frontend && node --run typecheck && node --run test && node --run build
 typecheck: OK
- Test Files  33 passed (33)
-      Tests  269 passed (269)
+ Test Files  34 passed (34)
+      Tests  272 passed (272)
 ✓ built in 132ms
 $ make audit
 No known vulnerabilities found

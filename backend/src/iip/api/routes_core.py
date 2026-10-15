@@ -175,20 +175,27 @@ def router() -> APIRouter:  # noqa: PLR0915 - route table
         ).fetchone()
         if row is None:
             raise HTTPException(404, "scheme not in the local store; run the AMFI NAV ingestion first")
-        # C-16 (ECC F3): a backfill can make ~160 requests (fund-house probe + 90-day windows), so it shares the
-        # per-source limit, pauses between requests and uses the process-wide circuit breaker.
-        if (wait := st.claim_refresh("amfi.navhistory")) is not None:
-            return _rate_limited(wait)
-        fetcher = st.fetcher()
-        today = st.clock().date()
-        mf_id = ingestion.discover_fund_house_id(st.conn, fetcher, row["amc"], today.replace(day=1), pause=st.pause)
-        if mf_id is None:
-            raise HTTPException(424, "could not determine AMFI's fund-house id for this AMC")
-        summary = ingestion.backfill_history(
-            st.conn, fetcher, scheme_code=amfi_code, mf_id=mf_id,
-            start=date(today.year - body.years, today.month, 1), end=today, now=st.clock, pause=st.pause,
-        )  # fmt: skip
-        return summary.__dict__
+        # C-16 (ECC F3): a backfill can make ~160 requests (fund-house probe + 90-day windows). It pauses between
+        # requests and uses the process-wide circuit breaker. Limit (user decision 2026-10-15): once per SCHEME per
+        # 15 min, and only one backfill at a time, so several schemes can be filled back to back at the paced rate.
+        if not st.backfill_lock.acquire(blocking=False):
+            return JSONResponse({"code": "BACKFILL_IN_PROGRESS", "retry_after_s": 60}, status_code=429,
+                                headers={"Retry-After": "60"})  # fmt: skip
+        try:
+            if (wait := st.claim_refresh(f"amfi.navhistory:{amfi_code}")) is not None:
+                return _rate_limited(wait)
+            fetcher = st.fetcher()
+            today = st.clock().date()
+            mf_id = ingestion.discover_fund_house_id(st.conn, fetcher, row["amc"], today.replace(day=1), pause=st.pause)
+            if mf_id is None:
+                raise HTTPException(424, "could not determine AMFI's fund-house id for this AMC")
+            summary = ingestion.backfill_history(
+                st.conn, fetcher, scheme_code=amfi_code, mf_id=mf_id,
+                start=date(today.year - body.years, today.month, 1), end=today, now=st.clock, pause=st.pause,
+            )  # fmt: skip
+            return summary.__dict__
+        finally:
+            st.backfill_lock.release()
 
     @r.get("/data-health")
     def data_health(request: Request) -> dict[str, Any]:

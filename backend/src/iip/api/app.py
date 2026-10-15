@@ -62,6 +62,8 @@ class AppState:
         self.fetcher_factory: Callable[[], Fetcher] | None = None
         self._refresh_lock = threading.Lock()
         self._last_refresh: dict[str, datetime] = {}
+        # Only one NAV-history backfill runs at a time, so AMFI sees at most the paced rate (C-16).
+        self.backfill_lock = threading.Lock()
         migrate(self.conn, clock().isoformat())
         _restrict_db_files(self.settings.db_path)
         if ingestion.mark_interrupted_runs(self.conn, clock()):

@@ -45,14 +45,16 @@ def test_f2_no_exception_escapes_the_asgi_app(settings: Settings, caplog: pytest
     assert "ValueError" in caplog.text  # the class is logged (SEC-21), never the message
 
 
-def _seed_scheme(conn: sqlite3.Connection) -> None:
+def _seed_scheme(conn: sqlite3.Connection, code: str = "990001") -> None:
     conn.execute(
         "INSERT INTO instruments(instrument_id, kind, name, amfi_code, origin, created_at)"
-        " VALUES ('mf:990001', 'mf_scheme', 'TEST Fund - Direct Growth', '990001', 'fixture', '2026-10-15')"
+        " VALUES (?, 'mf_scheme', 'TEST Fund - Direct Growth', ?, 'fixture', '2026-10-15')",
+        (f"mf:{code}", code),
     )
     conn.execute(
         "INSERT INTO mf_schemes(instrument_id, amc, category_raw, sebi_category, plan)"
-        " VALUES ('mf:990001', 'TEST AMC', 'Liquid', 'Liquid', 'direct')"
+        " VALUES (?, 'TEST AMC', 'Liquid', 'Liquid', 'direct')",
+        (f"mf:{code}",),
     )
 
 
@@ -89,7 +91,33 @@ def test_f3_unknown_scheme_does_not_consume_the_refresh_slot(authed: tuple[TestC
     h = {"Origin": ORIGIN, "X-IIP-CSRF": csrf}
     assert client.post("/api/ingestion/backfill/123", json={"years": 1}, headers=h).status_code == 404
     st = client.app.app.state.iip  # type: ignore[attr-defined]
-    assert st.claim_refresh("amfi.navhistory") is None
+    assert st.claim_refresh("amfi.navhistory:123") is None
+
+
+def test_backfill_limit_is_per_scheme_and_one_backfill_runs_at_a_time(
+    authed: tuple[TestClient, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """User decision 2026-10-15: 1 backfill per scheme per 15 min, so several schemes can be filled back to back;
+    only one backfill runs at a time, so AMFI still sees at most the paced rate."""
+    client, csrf = authed
+    st = client.app.app.state.iip  # type: ignore[attr-defined]
+    _seed_scheme(st.conn, "990001")
+    _seed_scheme(st.conn, "990002")
+    monkeypatch.setattr(ingestion, "discover_fund_house_id", lambda *_a, **_k: 9)
+    stub = ingestion.RunSummary("run_x", "amfi.navhistory", "ok", 0, 0, 0, "stub")
+    monkeypatch.setattr(ingestion, "backfill_history", lambda *_a, **_k: stub)
+    h = {"Origin": ORIGIN, "X-IIP-CSRF": csrf}
+    assert client.post("/api/ingestion/backfill/990001", json={"years": 1}, headers=h).status_code == 200
+    assert client.post("/api/ingestion/backfill/990002", json={"years": 1}, headers=h).status_code == 200
+    assert client.post("/api/ingestion/backfill/990001", json={"years": 1}, headers=h).status_code == 429
+    with st.backfill_lock:  # another backfill in progress → refused at once, and no slot is used
+        busy = client.post("/api/ingestion/backfill/990003", json={"years": 1}, headers=h)
+    assert busy.status_code == 404  # unknown scheme is still checked first
+    _seed_scheme(st.conn, "990003")
+    with st.backfill_lock:
+        busy = client.post("/api/ingestion/backfill/990003", json={"years": 1}, headers=h)
+    assert busy.status_code == 429 and busy.json()["code"] == "BACKFILL_IN_PROGRESS"
+    assert client.post("/api/ingestion/backfill/990003", json={"years": 1}, headers=h).status_code == 200
 
 
 def test_f3_refresh_claim_is_atomic_across_threads(authed: tuple[TestClient, str]) -> None:

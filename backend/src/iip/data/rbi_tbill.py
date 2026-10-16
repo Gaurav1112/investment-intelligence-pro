@@ -8,6 +8,8 @@ Flow, per poll:
    **once** (an honest user-agent; ``rbi_press_release_request``). HTTP 418 or RBI's "Unauthorised Access" page stops
    all further page requests in this poll and opens the source's breaker: no evasion, no retry with another identity.
 4. Every yield is re-derived from its price; a mismatch abstains for that release (``TbillAbstain``).
+5. The yields are dated by the auction date the release text states. With no stated auction date the release
+   abstains (``NO_AUCTION_DATE``, step 6 of the audit); the release date is never substituted.
 
 The feed keeps only about 10 items, so a release can drop out between polls: ``NO_CUTOFF_IN_FEED`` lets Data health
 say so. Only figures and a plain-text citation are returned — never HTML, never a link to render.
@@ -121,7 +123,10 @@ def poll_tbill_cutoffs(
                 stopped = True
                 fetcher.breaker.trip(PAGE_SOURCE_ID)
                 raise TbillAbstain("ACCESS_DENIED", "RBI answered with its access-denied page; stopping")
-            releases.append(parse_cutoff_text(text, prid=prid, pub_date=item.pub_date))
+            rel = parse_cutoff_text(text, prid=prid, pub_date=item.pub_date)
+            if rel.auction_date is None:  # audit-automation.md §3.2 step 6: never date a yield by guess
+                raise TbillAbstain("NO_AUCTION_DATE", "the release text states no auction date; nothing stored")
+            releases.append(rel)
         except TbillAbstain as abstain:
             abstentions.append(TbillAbstention(prid, abstain.code, abstain.message, retry))
     return replace(

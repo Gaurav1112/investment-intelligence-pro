@@ -7,6 +7,7 @@ it is never filled with a default (requirements.md §3.6a).
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -840,19 +841,141 @@ class MfTaxClass(StrEnum):
     UNKNOWN = "unknown"
 
 
-def mf_tax_class_from_category(category: str) -> MfTaxClass:
-    """Infer the tax class from the SEBI category text (documented inference, flagged on every result)."""
-    c = category.lower()
+@dataclass(frozen=True)
+class IndexNameTable:
+    """Name patterns for index funds whose category does not decide the tax class.
+
+    The cited source of truth is ``rules/index_name_patterns.yaml`` (rule set ``IDX-NAME-2026-10``); this module keeps
+    an identical copy because the engine performs no file I/O. ``tests/unit/test_mf_classification.py`` fails if the
+    two ever differ.
+    """
+
+    rule_set: str
+    flag: str
+    applies_to_categories: tuple[str, ...]
+    patterns: tuple[tuple[str, MfTaxClass, str], ...]  # (rule_id, tax class, regex)
+    exclusions: tuple[tuple[str, str], ...]  # (rule_id, regex): any match -> UNKNOWN
+
+
+INDEX_NAME_TABLE = IndexNameTable(
+    rule_set="IDX-NAME-2026-10",
+    flag="TAX_CLASS_INFERRED_FROM_NAME",
+    applies_to_categories=("Other Scheme - Index Funds",),
+    patterns=(
+        ("IDX-EQ-NIFTY50", MfTaxClass.EQUITY_ORIENTED, r"\bnifty ?50\b"),
+        ("IDX-EQ-NIFTY-NEXT50", MfTaxClass.EQUITY_ORIENTED, r"\bnifty next ?50\b"),
+        ("IDX-EQ-NIFTY-BROAD", MfTaxClass.EQUITY_ORIENTED, r"\bnifty ?(?:100|200|500)\b"),
+        ("IDX-EQ-NIFTY-TOTAL-MARKET", MfTaxClass.EQUITY_ORIENTED, r"\bnifty total market\b"),
+        ("IDX-EQ-MIDCAP", MfTaxClass.EQUITY_ORIENTED, r"mid ?cap"),
+        ("IDX-EQ-SMALLCAP", MfTaxClass.EQUITY_ORIENTED, r"small ?cap"),
+        ("IDX-EQ-SENSEX", MfTaxClass.EQUITY_ORIENTED, r"\bsensex\b"),
+        ("IDX-DEBT-GILT", MfTaxClass.SPECIFIED_DEBT, r"\bgilt\b"),
+        ("IDX-DEBT-GSEC", MfTaxClass.SPECIFIED_DEBT, r"\bg ?sec\b"),
+        ("IDX-DEBT-SDL", MfTaxClass.SPECIFIED_DEBT, r"\bsdl\b|\bstate development loans?\b"),
+        ("IDX-DEBT-BHARAT-BOND", MfTaxClass.SPECIFIED_DEBT, r"\bbharat bond\b"),
+        ("IDX-DEBT-CRISIL-IBX", MfTaxClass.SPECIFIED_DEBT, r"\bcrisil ?ibx\b"),
+    ),
+    exclusions=(
+        (
+            "IDX-X-OVERSEAS",
+            r"\b(?:nasdaq|s ?& ?p ?500|hang seng|nyse|fang|msci|global|international|overseas|world|us|usa|china|japan"
+            r"|taiwan|europe|emerging)\b",
+        ),
+        ("IDX-X-COMMODITY", r"\b(?:gold|silver|commodit(?:y|ies))\b"),
+        ("IDX-X-FOF", r"\b(?:fund of funds?|fof)\b"),
+        ("IDX-X-MULTI-ASSET", r"\b(?:multi asset|hybrid|balanced|equity savings|arbitrage)\b"),
+    ),
+)
+_EQUITY_INDEX_LABEL = re.compile(r"^index funds? ?- ?equity\b")
+
+
+@dataclass(frozen=True)
+class MfTaxClassification:
+    """A tax class with how it was reached. ``flag`` is None exactly when the class is UNKNOWN."""
+
+    tax_class: MfTaxClass
+    flag: str | None  # TAX_CLASS_INFERRED_FROM_CATEGORY | TAX_CLASS_INFERRED_FROM_NAME | None
+    rule_id: str | None = None  # matched name rule(s) joined by "+", or the exclusion that forced UNKNOWN
+    basis: str = ""  # one sentence for the evidence trail
+
+
+def _norm_label(text: str) -> str:
+    return " ".join(text.casefold().split())
+
+
+def _norm_name(name: str) -> str:
+    return " ".join(re.sub(r"[^a-z0-9&]+", " ", name.casefold()).split())
+
+
+def _tax_class_from_category_text(category: str) -> MfTaxClass:
+    c = _norm_label(category)
     if "fund of funds" in c or "fof" in c or "overseas" in c or "international" in c or "gold" in c:
         return MfTaxClass.UNKNOWN
+    if _EQUITY_INDEX_LABEL.match(c):
+        # AMFI "Index Funds - Equity Funds": the label itself says equity; an index fund holds >= 95 % in its index.
+        return MfTaxClass.EQUITY_ORIENTED
     if any(k in c for k in ("solution oriented", "children", "retirement", "other scheme")):
-        # e.g. "Other Scheme - Index Funds" holds both equity AND debt index funds: cannot be inferred.
+        # e.g. "Other Scheme - Index Funds" holds both equity AND debt index funds: the category alone cannot tell.
         return MfTaxClass.UNKNOWN
     if "arbitrage" in c or c.startswith("equity scheme") or "elss" in c:
         return MfTaxClass.EQUITY_ORIENTED
     if c.startswith("debt scheme") or "income/debt" in c or "liquid" in c or "overnight" in c or "money market" in c:
         return MfTaxClass.SPECIFIED_DEBT
     return MfTaxClass.UNKNOWN
+
+
+def _first_exclusion(normalised_name: str, table: IndexNameTable) -> str | None:
+    for rule_id, rx in table.exclusions:
+        if re.search(rx, normalised_name):
+            return rule_id
+    return None
+
+
+def mf_tax_classification(
+    category: str, *, name: str | None = None, table: IndexNameTable = INDEX_NAME_TABLE
+) -> MfTaxClassification:
+    """Tax class from the SEBI/AMFI category, else from a cited index-name pattern (documented inference, flagged).
+
+    1. The category decides whenever it can (flag TAX_CLASS_INFERRED_FROM_CATEGORY). For "Index Funds - Equity Funds"
+       a supplied name can only demote the answer to UNKNOWN (an overseas/commodity/FoF/multi-asset name), never
+       change the class.
+    2. Only for the categories listed in the table, and only when a name is supplied: an exclusion match, a match
+       of both equity and debt patterns, or no match at all gives UNKNOWN. Exactly one class gives that class with
+       flag TAX_CLASS_INFERRED_FROM_NAME and the matched rule_id(s). Nothing is guessed.
+    """
+    by_category = _tax_class_from_category_text(category)
+    norm = _norm_name(name) if name else ""
+    if by_category is not MfTaxClass.UNKNOWN:
+        if norm and _EQUITY_INDEX_LABEL.match(_norm_label(category)):
+            excluded = _first_exclusion(norm, table)
+            if excluded is not None:
+                return MfTaxClassification(MfTaxClass.UNKNOWN, None, excluded, f"name matches exclusion {excluded}")
+        return MfTaxClassification(
+            by_category, "TAX_CLASS_INFERRED_FROM_CATEGORY", None, f"Tax class inferred from SEBI category '{category}'"
+        )
+    if not norm or _norm_label(category) not in {_norm_label(c) for c in table.applies_to_categories}:
+        return MfTaxClassification(MfTaxClass.UNKNOWN, None)
+    excluded = _first_exclusion(norm, table)
+    if excluded is not None:
+        return MfTaxClassification(MfTaxClass.UNKNOWN, None, excluded, f"name matches exclusion {excluded}")
+    hits = [(rule_id, cls) for rule_id, cls, rx in table.patterns if re.search(rx, norm)]
+    classes = {cls for _, cls in hits}
+    if len(classes) != 1:
+        return MfTaxClassification(MfTaxClass.UNKNOWN, None)
+    rule_ids = "+".join(rule_id for rule_id, _ in hits)
+    (cls,) = classes
+    return MfTaxClassification(
+        cls,
+        table.flag,
+        rule_ids,
+        f"Tax class inferred from the scheme name: index-name rule {rule_ids} ({table.rule_set}, "
+        f"rules/index_name_patterns.yaml) under category '{category}'",
+    )
+
+
+def mf_tax_class_from_category(category: str, *, name: str | None = None) -> MfTaxClass:
+    """Infer the tax class from the SEBI category text, and from the scheme name where the table allows it."""
+    return mf_tax_classification(category, name=name).tax_class
 
 
 def mf_lock_in_days(category: str, name: str = "") -> int:
@@ -888,17 +1011,18 @@ class FundCreditFacts:
     as_of: date  # the factsheet's portfolio date
 
 
-def fund_has_credit_exposure(category: str) -> bool:
+def fund_has_credit_exposure(category: str, *, name: str | None = None) -> bool:
     """Debt-holding schemes (debt, liquid, money-market, overnight, gilt, and every hybrid) carry portfolio credit risk
-    that a credit floor must check (red-team RT-23). Equity schemes do not."""
+    that a credit floor must check (red-team RT-23). Equity schemes do not. With a name, a debt index fund recognised
+    by the index-name table counts as debt-holding too."""
     c = category.lower()
     if c.startswith("equity scheme") or "elss" in c:
         return False
-    return mf_tax_class_from_category(category) is MfTaxClass.SPECIFIED_DEBT or c.startswith("hybrid scheme")
+    return mf_tax_class_from_category(category, name=name) is MfTaxClass.SPECIFIED_DEBT or c.startswith("hybrid scheme")
 
 
 def fund_credit_status(
-    category: str, facts: FundCreditFacts | None, as_of: date
+    category: str, facts: FundCreditFacts | None, as_of: date, *, name: str | None = None
 ) -> tuple[str | None, bool, str | None]:
     """(credit_rating for the ranking policy, credit_quality_unknown, why unknown).
 
@@ -907,7 +1031,7 @@ def fund_credit_status(
     long-term scale (short-term ratings such as A1+ have no agreed long-term equivalent here) — its credit quality is
     unknown and it fails any floor (never assumed safe). Equity schemes are unaffected.
     """
-    if not fund_has_credit_exposure(category):
+    if not fund_has_credit_exposure(category, name=name):
         return None, False, None
     why: str
     if facts is None or facts.lowest_rating is None:
@@ -1050,9 +1174,10 @@ def mf_candidate(  # noqa: PLR0915 - one linear, auditable pipeline; splitting h
     load = exit_load if exit_load is not None else sebi_default_exit_load(category)
     if load is None:
         reasons.append("EXIT_LOAD_UNKNOWN: enter the scheme's exit load from its SID/KIM")
-    tax_class = mf_tax_class_from_category(category)
+    classified = mf_tax_classification(category, name=name)
+    tax_class = classified.tax_class
     if tax_class is MfTaxClass.UNKNOWN:
-        reasons.append("TAX_CLASS_UNKNOWN: equity/debt share for tax cannot be inferred from the category")
+        reasons.append("TAX_CLASS_UNKNOWN: equity/debt share for tax cannot be inferred from the category or name")
     if reasons:
         return _ineligible(instrument_id, name, tier, reasons, amount)
     assert load is not None
@@ -1131,7 +1256,8 @@ def mf_candidate(  # noqa: PLR0915 - one linear, auditable pipeline; splitting h
     with engine_context():
         nets = [after - t for (_, after), t in zip(values, taxes, strict=True)]
         band = OutcomeBand(q05=min(nets), q50=nets[1], q95=max(nets))
-    flags = ["TAX_CLASS_INFERRED_FROM_CATEGORY"]
+    assert classified.flag is not None
+    flags = [classified.flag]
     if unverified:
         flags.append("TAX_RULE_UNVERIFIED")
     if n_ind < FULL_BAND_INDEPENDENT_WINDOWS:
@@ -1167,7 +1293,7 @@ def mf_candidate(  # noqa: PLR0915 - one linear, auditable pipeline; splitting h
             f"Redeemed {settlement_days} day(s) before your withdrawal date so the T+{settlement_days} proceeds "
             f"arrive in time: the NAV windows are {nav_window_days} days, not {horizon_days}",
             "NAV is net of scheme expenses; no expense ratio is deducted again",
-            f"Tax class inferred from SEBI category '{category}'",
+            classified.basis,
         ),
         limitations=(
             f"{len(windows)} overlapping windows contain only about {n_ind} independent observations",
@@ -1175,7 +1301,7 @@ def mf_candidate(  # noqa: PLR0915 - one linear, auditable pipeline; splitting h
             "Scheme survivorship: merged or wound-up schemes are not in the comparison set",
         ),
     )
-    credit_rating, credit_unknown, _ = fund_credit_status(category, credit_facts, as_of)
+    credit_rating, credit_unknown, _ = fund_credit_status(category, credit_facts, as_of, name=name)
     cand = Candidate(
         instrument_id=instrument_id,
         name=name,

@@ -85,7 +85,9 @@ def test_an_internal_error_before_the_claim_is_recorded(
 
 def test_missing_polls_make_j2_partial_never_done_and_are_reported(conn: sqlite3.Connection) -> None:
     watch_schemes(conn, navall_codes()[:2])
-    h = hooks(polls=cron.default_hooks().polls)  # production: neither poll is built yet
+    # A poll step that is not built (None). Production wires both polls now (test_j2_official_polls.py); this keeps
+    # the fail-closed path for any future step that is declared before it exists.
+    h = hooks(polls=(("rbi.tbill", None), ("mospi.cpi", None)))
     assert all(step is None for _, step in h.polls)
     res = cron.run_job(ctx_for(conn, Amfi(), h), "navall-continue")
     assert (res.state, res.code) == ("partial", "POLLS_NOT_IMPLEMENTED")

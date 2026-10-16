@@ -40,9 +40,17 @@ PollStatus = Literal["OK", "NOT_MODIFIED", "NO_CUTOFF_IN_FEED", "ABSTAINED"]
 
 @dataclass(frozen=True, slots=True)
 class TbillAbstention:
+    """One release the poll did not store.
+
+    ``retry`` is True when the reason is transient (the release page was not fetched, the fetch failed, or RBI
+    answered with its access-denied page): the content was never seen, so the release must be tried again on a
+    later poll. False means the content itself was refused (self-check, schema, dates): a permanent outcome.
+    """
+
     prid: int
     code: str
     message: str
+    retry: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,8 +74,9 @@ def poll_tbill_cutoffs(
 ) -> TbillPoll:
     """One poll of RBI's feed. Raises only on feed-level failures (fetch errors, an unparseable feed).
 
-    ``known_prids``: releases an earlier poll already handled (stored or abstained). They are skipped without any
-    page request, so a release page is fetched at most once however often the feed changes around it.
+    ``known_prids``: releases an earlier poll already handled (stored, or abstained for a permanent content reason).
+    They are skipped without any page request, so a release page is fetched at most once however often the feed
+    changes around it. A release abstained with ``retry`` set must not be added to ``known_prids``.
     """
     try:
         feed = fetcher.fetch(rbi_press_releases_rss_request(if_modified_since=if_modified_since))
@@ -91,8 +100,10 @@ def poll_tbill_cutoffs(
     stopped = False
     for item, prid in candidates:
         text = html_text(item.description)
+        retry = False
         try:
             if "YTM" not in text and not is_access_denied(text):
+                retry = True  # until the page text is in hand, any abstention is about the fetch, not the content
                 if stopped or not fetch_pages:
                     raise TbillAbstain(
                         "NO_CUTOFF_TABLE", "the feed item has no cut-off table; the page was not fetched"
@@ -104,13 +115,15 @@ def poll_tbill_cutoffs(
                     stopped = True  # one failed page request ends page fetching for this poll
                     raise TbillAbstain("PAGE_FETCH_FAILED", f"release page not fetched: {exc}") from None
                 text = html_text(page.content.decode("utf-8", errors="replace"))
+                retry = False
             if is_access_denied(text):
+                retry = True
                 stopped = True
                 fetcher.breaker.trip(PAGE_SOURCE_ID)
                 raise TbillAbstain("ACCESS_DENIED", "RBI answered with its access-denied page; stopping")
             releases.append(parse_cutoff_text(text, prid=prid, pub_date=item.pub_date))
         except TbillAbstain as abstain:
-            abstentions.append(TbillAbstention(prid, abstain.code, abstain.message))
+            abstentions.append(TbillAbstention(prid, abstain.code, abstain.message, retry))
     return replace(
         base,
         status="OK" if releases else "ABSTAINED",

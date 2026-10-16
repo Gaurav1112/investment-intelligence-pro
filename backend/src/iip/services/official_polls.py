@@ -4,7 +4,10 @@ RBI's press-release RSS feed and MoSPI's CPI (base 2024, All India, Combined, ge
 Both sources are official and the registry rows say automated fetching is permitted for personal use. Each poll:
 
 * is **conditional**: the T-bill feed is fetched with ``If-Modified-Since`` from the last feed seen, an unchanged feed
-  (same SHA-256) is a no-op, and a release already handled (stored or abstained) is never parsed or fetched again.
+  (same SHA-256) is a no-op, and a release already handled (stored, or abstained for a permanent content reason) is
+  never parsed or fetched again. A release abstained for a transient reason (page not fetched, fetch failed, access
+  denied) is NOT handled: the next poll reads the feed unconditionally and retries it, and each run reports it
+  ``failed`` (or ``partial`` beside stored releases) with the code, so it is never silently lost;
   The fetch layer sends no ``If-None-Match`` (it has no ETag support), so the payload hash stands in for the ETag.
   The CPI poll asks for one month at a time and only when that month is due (audit-automation.md §3.1 step 6);
   a payload identical to the last one seen for the month is a no-op;
@@ -174,10 +177,13 @@ def poll_rbi_tbill(conn: sqlite3.Connection, fetcher: Fetcher, now: Callable[[],
         stored, unchanged = stored + s, unchanged + u
         releases[str(rel.prid)] = _provenance(rel)
     for ab in poll.abstentions:
-        releases[str(ab.prid)] = {"outcome": f"abstained:{ab.code}"}
+        if not ab.retry:  # a permanent content refusal is handled; a transient one is retried next run (POLL-2)
+            releases[str(ab.prid)] = {"outcome": f"abstained:{ab.code}"}
+    pending = any(ab.retry for ab in poll.abstentions)
+    # With a release still pending, the feed must be read in full next run: no If-Modified-Since, no hash short cut.
     _save_state(conn, TBILL_STATE, {
-        "last_modified": None if poll.feed_last_modified is None else poll.feed_last_modified.isoformat(),
-        "sha256": poll.feed_sha256, "releases": _trim(releases),
+        "last_modified": None if pending or poll.feed_last_modified is None else poll.feed_last_modified.isoformat(),
+        "sha256": None if pending else poll.feed_sha256, "releases": _trim(releases),
     }, now())  # fmt: skip
 
     counts = {"releases": len(poll.releases), "stored": stored, "unchanged": unchanged,

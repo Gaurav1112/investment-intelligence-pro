@@ -359,3 +359,30 @@ def test_release_citation_text_is_plain_text_without_a_url() -> None:
     rel = rbi_pr.parse_cutoff_text(rbi_pr.html_text(release_html()), prid=9001, pub_date=None)
     assert "http" not in rel.citation_text and "rbi.org.in" not in rel.citation_text
     assert "2098-2099/9001" in rel.citation_text and "2099-01-07" in rel.citation_text
+
+
+def test_abstentions_say_whether_the_release_must_be_retried() -> None:
+    """POLL-2: fetch-side abstentions are transient (retry); a refusal of the release content is permanent."""
+    server = Server(
+        feed(item(TITLE, 9001, release_html(yields=(YIELDS[0], YIELDS[1], "6.1741"))),
+             item(TITLE, 9002, "<p>x</p>"), item(TITLE, 9003, "<p>x</p>")),
+        pages={9002: httpx.Response(418), 9003: html_page(release_html())},
+    )  # fmt: skip
+    poll = rbi_tbill.poll_tbill_cutoffs(make_fetcher(server))
+    assert [(a.prid, a.code, a.retry) for a in poll.abstentions] == [
+        (9001, "SELF_CHECK_MISMATCH", False),
+        (9002, "PAGE_FETCH_FAILED", True),
+        (9003, "NO_CUTOFF_TABLE", True),  # not fetched after the failure: the content was never seen
+    ]
+
+
+def test_access_denied_is_a_transient_abstention() -> None:
+    server = Server(feed(item(TITLE, 9001, "<p>x</p>")), pages={9001: html_page("<h1>Unauthorised Access</h1>")})
+    poll = rbi_tbill.poll_tbill_cutoffs(make_fetcher(server))
+    assert [(a.code, a.retry) for a in poll.abstentions] == [("ACCESS_DENIED", True)]
+
+
+def test_a_fetched_page_without_the_table_is_a_permanent_abstention() -> None:
+    server = Server(feed(item(TITLE, 9001, "<p>x</p>")), pages={9001: html_page("<p>nothing here</p>")})
+    poll = rbi_tbill.poll_tbill_cutoffs(make_fetcher(server))
+    assert [(a.code, a.retry) for a in poll.abstentions] == [("NO_CUTOFF_TABLE", False)]

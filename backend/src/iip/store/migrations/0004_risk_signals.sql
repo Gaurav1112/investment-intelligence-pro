@@ -357,3 +357,7 @@ BEGIN SELECT RAISE(ABORT, 'append-only constraint: outcomes row exists'); END;
 CREATE TRIGGER outcomes_no_delete BEFORE DELETE ON outcomes
 WHEN NOT EXISTS (SELECT 1 FROM ledger_erase_gate)
 BEGIN SELECT RAISE(ABORT, 'append-only constraint: outcomes'); END;
+
+-- Data-health window query (audit-perf-hosted RC-6, requested by A02): runs per source by start time, so the read
+-- stays an index range scan as ingestion_runs accumulates.
+CREATE INDEX IF NOT EXISTS ix_runs_source_started ON ingestion_runs(source_id, started_at);

@@ -69,6 +69,13 @@ def test_every_planned_table_and_trigger_exists(db: Any) -> None:
     assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
 
 
+def test_data_health_runs_index_exists(db: Any) -> None:
+    """RC-6 (A02 request): the per-source run window query is served by an index on (source_id, started_at)."""
+    assert "ix_runs_source_started" in _names(db, "index")
+    cols = [r["name"] for r in db.execute("PRAGMA index_info(ix_runs_source_started)")]
+    assert cols == ["source_id", "started_at"]
+
+
 def test_decisions_log_has_cas_confirmed(db: Any) -> None:
     cols = {r["name"] for r in db.execute("PRAGMA table_info(decisions_log)")}
     assert {"cas_confirmed", "cas_checked_at", "cas_import_ref"} <= cols

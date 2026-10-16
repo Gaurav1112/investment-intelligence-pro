@@ -16,12 +16,24 @@ from datetime import date
 from decimal import Decimal
 from enum import StrEnum
 from itertools import pairwise
-
-from scipy.optimize import brentq, minimize_scalar
+from typing import Any
 
 from iip.engine.dates import DayCount, days_between
 from iip.engine.errors import InsufficientHistory, InvalidInput, MissingDistributionData, NumericalError
 from iip.engine.money import ONE, ZERO, D, engine_context, from_float, rate_store
+
+
+def brentq(*args: Any, **kwargs: Any) -> Any:  # lazy scipy (A05 / RC-5): loaded on first use, not at app start
+    from scipy.optimize import brentq as solver  # noqa: PLC0415
+
+    return solver(*args, **kwargs)
+
+
+def minimize_scalar(*args: Any, **kwargs: Any) -> Any:  # lazy scipy (A05 / RC-5): loaded on first use, not at app start
+    from scipy.optimize import minimize_scalar as solver  # noqa: PLC0415
+
+    return solver(*args, **kwargs)
+
 
 ANNUALISED_FROM_SHORT_PERIOD = "ANNUALISED_FROM_SHORT_PERIOD"
 DAYS_PER_YEAR = 365

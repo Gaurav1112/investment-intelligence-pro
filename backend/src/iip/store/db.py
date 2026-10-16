@@ -313,6 +313,34 @@ def current_version(conn: sqlite3.Connection) -> int:
     return int(row["v"] or 0)
 
 
+def latest_version() -> int:
+    """The newest migration this code ships (reads the package files, not the database)."""
+    return len(_migration_files())
+
+
+def read_schema_version(conn: sqlite3.Connection) -> int:
+    """The applied schema version in ONE read-only statement (RC-5: every hosted statement is a round trip).
+
+    A database that has never been migrated has no ``schema_version`` table: that is version 0. Any other error
+    (I/O, a dropped connection) is raised, never read as "not migrated"."""
+    try:
+        row = conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return 0
+        raise
+    return int(row["v"] or 0) if row is not None else 0
+
+
+def ensure_schema(conn: sqlite3.Connection, applied_at: str) -> list[str]:
+    """Startup path (A05): read-only when the database is current; runs :func:`migrate` only when a migration is
+    pending (a fresh local database, or the first instance after a deploy that ships a migration). Returns the
+    names applied, like :func:`migrate`."""
+    if read_schema_version(conn) >= latest_version():
+        return []
+    return migrate(conn, applied_at)
+
+
 def migrate(conn: sqlite3.Connection, applied_at: str) -> list[str]:
     """Apply pending migrations in order, each in its own transaction. Returns names applied."""
     applied: list[str] = []

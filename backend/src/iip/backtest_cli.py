@@ -44,6 +44,8 @@ from iip.store.ledger import role_bindings
 from iip.store.observations import current_series
 
 __all__ = [
+    "EXIT_ABSTAINED",
+    "EXIT_REFUSED",
     "Abstained",
     "Refused",
     "code_version",
@@ -55,6 +57,9 @@ __all__ = [
 ]
 
 EXIT_REFUSED = 2
+# An engine abstention (an EngineError such as InsufficientHistory raised by the run): the data cannot support an
+# honest result. Distinct from success (0), an uncaught crash (1) and a refusal / argparse error (2) (CLI-1).
+EXIT_ABSTAINED = 3
 _STATUS = {Verification.P: "VERIFIED-PRIMARY", Verification.S: "VERIFIED-SECONDARY", Verification.NV: "NOT VERIFIED"}
 _LEVY_MAP: Mapping[str, tuple[str, str, frozenset[str]]] = {
     "STAMP-MF-01": ("stamp_duty", "buy", frozenset({"EQUITY", "DEBT", "OTHER"})),
@@ -279,6 +284,9 @@ def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] | None = 
     except Refused as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return EXIT_REFUSED
+    except EngineError as exc:  # CLI-1: abstain with the engine's reason code, never a traceback or a guess
+        print(f"ABSTAIN({exc.code}): {exc}", file=sys.stderr)
+        return EXIT_ABSTAINED
 
 
 if __name__ == "__main__":  # pragma: no cover

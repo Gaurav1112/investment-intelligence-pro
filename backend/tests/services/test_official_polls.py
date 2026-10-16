@@ -138,7 +138,7 @@ def test_tbill_release_is_stored_with_provenance(conn: sqlite3.Connection) -> No
     prov = official_polls.tbill_provenance(conn)
     assert prov["9001"] == {
         "outcome": "stored", "press_release_ref": "2098-2099/9001", "release_date": "2099-01-07",
-        "date_basis": "release_text", "auction_date": None,
+        "date_basis": "release_text", "auction_date": "2099-01-07",
         "citation_text": prov["9001"]["citation_text"], "self_check": "PASS",
     }  # fmt: skip
     assert "http" not in prov["9001"]["citation_text"]  # plain text, never a link (RBI disclaimer)
@@ -186,6 +186,17 @@ def test_tbill_self_check_mismatch_abstains_and_stores_nothing(conn: sqlite3.Con
     assert official_polls.tbill_provenance(conn)["9001"]["outcome"] == "abstained:SELF_CHECK_MISMATCH"
 
 
+def test_tbill_release_without_a_stated_auction_date_abstains_and_stores_nothing(conn: sqlite3.Connection) -> None:
+    """TBILL-DATE: no auction date in the text -> abstain with a code; the release date is never used instead."""
+    server = Server()
+    server.feed_body = feed(item(TITLE, 9001, release_html(stated_auction=False)))
+    out = run_rbi(conn, server)
+    assert (out.state, out.code) == ("failed", "ABSTAINED:NO_AUCTION_DATE")
+    assert obs(conn, "riskfree:tbill") == []
+    assert official_polls.tbill_provenance(conn)["9001"]["outcome"] == "abstained:NO_AUCTION_DATE"
+    assert runs(conn, "rbi.pr.tbill")[-1]["error"] == "ABSTAINED:NO_AUCTION_DATE"
+
+
 def test_tbill_mixed_stores_the_good_release_and_reports_the_abstention(conn: sqlite3.Connection) -> None:
     bad = (PRICES[1], PRICES[0], PRICES[2])  # swapped columns fail the self-check
     server = Server()
@@ -209,6 +220,52 @@ def test_tbill_access_denied_fails_and_trips_the_breaker(conn: sqlite3.Connectio
     assert (out.state, out.code) == ("failed", "ABSTAINED:ACCESS_DENIED")
     assert obs(conn, "riskfree:tbill") == []
     assert f.breaker.state("rbi.pr.tbill").status is BreakerStatus.OPEN  # no evasion, no retry under another identity
+
+
+def test_tbill_transient_page_failure_is_retried_next_run_not_marked_handled(conn: sqlite3.Connection) -> None:
+    """POLL-2: a release abstained for a transient reason (page fetch failed) must not be recorded as handled.
+
+    The next run re-reads the feed (no If-Modified-Since, no payload-hash short cut) and retries the release page;
+    when the page answers it is stored. Until then J2 reports failed with the code (never a silent noop)."""
+    server = Server()
+    server.feed_body = feed(item(TITLE, 9001, "<p>no table here</p>"))
+    server.pages[9001] = httpx.Response(500)
+    first = run_rbi(conn, server)
+    assert (first.state, first.code) == ("failed", "ABSTAINED:PAGE_FETCH_FAILED")
+    assert "9001" not in official_polls.tbill_provenance(conn)
+    assert runs(conn, "rbi.pr.tbill")[-1]["error"] == "ABSTAINED:PAGE_FETCH_FAILED"
+    # Still failing: reported again, not a noop.
+    again = run_rbi(conn, server)
+    assert (again.state, again.code) == ("failed", "ABSTAINED:PAGE_FETCH_FAILED")
+    # The page answers: the release is stored on the next run.
+    server.pages[9001] = html_page(release_html())
+    ok = run_rbi(conn, server)
+    assert (ok.state, ok.code) == ("done", "STORED")
+    assert len(obs(conn, "riskfree:tbill")) == 3
+    assert official_polls.tbill_provenance(conn)["9001"]["outcome"] == "stored"
+    # Now handled: the conditional poll is a noop and the page is not fetched again.
+    assert run_rbi(conn, server).state == "noop"
+    assert len([r for r in server.requests if "prid" in r.url.params]) == 3
+
+
+def test_tbill_mixed_permanent_and_transient_abstentions(conn: sqlite3.Connection) -> None:
+    """POLL-2: a permanent refusal (self-check) is handled; a transient one (page not fetched) stays pending."""
+    bad = list(YIELDS)
+    bad[0] = "5.6952"
+    server = Server()
+    server.feed_body = feed(
+        item(TITLE, 9001, release_html(PRICES, tuple(bad))),
+        item(TITLE, 9002, "<p>no table here</p>"),
+    )
+    server.pages[9002] = httpx.Response(500)
+    out = run_rbi(conn, server)
+    assert out.state == "failed" and out.counts["abstained"] == 2
+    prov = official_polls.tbill_provenance(conn)
+    assert prov["9001"]["outcome"] == "abstained:SELF_CHECK_MISMATCH" and "9002" not in prov
+    server.pages[9002] = html_page(release_html(ref="2098-2099/9002"))
+    out2 = run_rbi(conn, server)
+    assert (out2.state, out2.code) == ("done", "STORED")
+    assert out2.counts["abstained"] == 0  # 9001 is not parsed again
 
 
 def test_tbill_feed_failure_fails_honestly(conn: sqlite3.Connection) -> None:

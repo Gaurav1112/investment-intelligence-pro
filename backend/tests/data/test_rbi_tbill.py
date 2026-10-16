@@ -41,7 +41,10 @@ PR_LINK = "https://www.rbi.org.in/scripts/BS_PressReleaseDisplay.aspx?prid={}"
 
 
 def release_html(prices: tuple[str, ...] = PRICES, yields: tuple[str, ...] = YIELDS, *,
-                 date_line: str = "Jan 07, 2099", ref: str = "2098-2099/9001") -> str:  # fmt: skip
+                 date_line: str = "Jan 07, 2099", ref: str = "2098-2099/9001",
+                 stated_auction: bool = True) -> str:  # fmt: skip
+    """``stated_auction``: the text says the auction was held on ``date_line`` (the audit's step 6 needs it)."""
+    auction = f"<p>The auction was held on {date_line}.</p>" if stated_auction else ""
     cells = "".join(f"<td>{p} (YTM: {y}%)</td>" for p, y in zip(prices, yields, strict=True))
     return (
         f'<table><tr><td align="right"><b>Date : {date_line}</b></td></tr><tr><td><b>{TITLE}</b></td></tr>'
@@ -50,7 +53,7 @@ def release_html(prices: tuple[str, ...] = PRICES, yields: tuple[str, ...] = YIE
         "<td>&#8377;1,000 Crore</td></tr>"
         f"<tr><td>II.</td><td>Cut-off Price (&#8377;) and Implicit Yield at Cut-Off Price</td>{cells}</tr>"
         "</table></td></tr></table>"
-        f"<p>Press Release: {ref}</p>"
+        f"{auction}<p>Press Release: {ref}</p>"
     )
 
 
@@ -110,7 +113,7 @@ def test_self_check_formula_reproduces_the_yields_to_4dp(price: str, days: int, 
 
 
 def test_parses_a_release_with_matching_yields() -> None:
-    rel = rbi_pr.parse_cutoff_text(rbi_pr.html_text(release_html()), prid=9001,
+    rel = rbi_pr.parse_cutoff_text(rbi_pr.html_text(release_html(stated_auction=False)), prid=9001,
                                    pub_date=datetime(2099, 1, 7, 17, 0, tzinfo=IST))  # fmt: skip
     assert [y.tenor_days for y in rel.yields] == [91, 182, 364]
     assert [str(y.price) for y in rel.yields] == list(PRICES)
@@ -168,8 +171,8 @@ def test_feed_pubdate_is_used_only_when_the_text_has_no_date() -> None:
 
 
 def test_a_stated_auction_date_is_kept_and_never_inferred() -> None:
-    text = rbi_pr.html_text(release_html()).replace("Press Release:", "The auction was held on January 07, 2099. "
-                                                    "Press Release:")  # fmt: skip
+    text = rbi_pr.html_text(release_html(stated_auction=False))
+    text = text.replace("Press Release:", "The auction was held on January 07, 2099. Press Release:")
     rel = rbi_pr.parse_cutoff_text(text, prid=1, pub_date=None)
     assert rel.auction_date == date(2099, 1, 7)
 
@@ -359,3 +362,45 @@ def test_release_citation_text_is_plain_text_without_a_url() -> None:
     rel = rbi_pr.parse_cutoff_text(rbi_pr.html_text(release_html()), prid=9001, pub_date=None)
     assert "http" not in rel.citation_text and "rbi.org.in" not in rel.citation_text
     assert "2098-2099/9001" in rel.citation_text and "2099-01-07" in rel.citation_text
+
+
+def test_abstentions_say_whether_the_release_must_be_retried() -> None:
+    """POLL-2: fetch-side abstentions are transient (retry); a refusal of the release content is permanent."""
+    server = Server(
+        feed(item(TITLE, 9001, release_html(yields=(YIELDS[0], YIELDS[1], "6.1741"))),
+             item(TITLE, 9002, "<p>x</p>"), item(TITLE, 9003, "<p>x</p>")),
+        pages={9002: httpx.Response(418), 9003: html_page(release_html())},
+    )  # fmt: skip
+    poll = rbi_tbill.poll_tbill_cutoffs(make_fetcher(server))
+    assert [(a.prid, a.code, a.retry) for a in poll.abstentions] == [
+        (9001, "SELF_CHECK_MISMATCH", False),
+        (9002, "PAGE_FETCH_FAILED", True),
+        (9003, "NO_CUTOFF_TABLE", True),  # not fetched after the failure: the content was never seen
+    ]
+
+
+def test_access_denied_is_a_transient_abstention() -> None:
+    server = Server(feed(item(TITLE, 9001, "<p>x</p>")), pages={9001: html_page("<h1>Unauthorised Access</h1>")})
+    poll = rbi_tbill.poll_tbill_cutoffs(make_fetcher(server))
+    assert [(a.code, a.retry) for a in poll.abstentions] == [("ACCESS_DENIED", True)]
+
+
+def test_a_fetched_page_without_the_table_is_a_permanent_abstention() -> None:
+    server = Server(feed(item(TITLE, 9001, "<p>x</p>")), pages={9001: html_page("<p>nothing here</p>")})
+    poll = rbi_tbill.poll_tbill_cutoffs(make_fetcher(server))
+    assert [(a.code, a.retry) for a in poll.abstentions] == [("NO_CUTOFF_TABLE", False)]
+
+
+def test_a_release_without_a_stated_auction_date_abstains_and_is_never_dated_by_guess() -> None:
+    """TBILL-DATE (audit-automation.md §3.2 step 6): the observation date is the auction date stated in the text;
+    with none stated the release abstains (permanently) rather than falling back to the release date."""
+    server = Server(feed(item(TITLE, 9001, release_html(stated_auction=False))))
+    poll = rbi_tbill.poll_tbill_cutoffs(make_fetcher(server))
+    assert poll.status == "ABSTAINED" and poll.releases == ()
+    assert [(a.prid, a.code, a.retry) for a in poll.abstentions] == [(9001, "NO_AUCTION_DATE", False)]
+
+
+def test_a_stated_auction_date_is_carried_on_the_polled_release() -> None:
+    server = Server(feed(item(TITLE, 9001, release_html())))
+    (rel,) = rbi_tbill.poll_tbill_cutoffs(make_fetcher(server)).releases
+    assert rel.auction_date == date(2099, 1, 7)

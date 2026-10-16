@@ -8,7 +8,8 @@
 * ``POST /api/today/decisions`` — "I did this" (``done``), "not now" or "disagree" for one action card; idempotent
   per (card, snapshot, decision). Returns ``{card_id, decision: {decision_id, decided_at, cas_confirmed, ...}}``.
 * ``POST /api/today/snapshot`` — an explicit, user-initiated recompute (local mode has no cron). Hosted mode
-  normally gets its snapshot from job J4.
+  normally gets its snapshot from job J4. The response's ``shadow`` carries the signal-registry conflicts and
+  rejected specs of the run (``registry_conflicts`` / ``registry_rejected``: rule ids only; REG-1).
 
 State-changing routes go through the same session and CSRF middleware as every other route.
 """
@@ -81,7 +82,11 @@ def router() -> APIRouter:
             "verdict": daily.snapshot.verdict,
             "created": daily.snapshot.created,
             "card_set_changed": daily.snapshot.card_set_changed,
-            "shadow": {"rules": daily.shadow.rules, "written": daily.shadow.written},
+            "shadow": {
+                "rules": daily.shadow.rules,
+                "written": daily.shadow.written,
+                **svc.registry_problems(daily.shadow),
+            },  # REG-1: rule ids only
             "outcomes": {"scored": daily.outcomes.scored, "unscorable": daily.outcomes.unscorable},
         }
 

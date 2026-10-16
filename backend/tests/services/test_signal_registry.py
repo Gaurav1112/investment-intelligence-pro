@@ -8,6 +8,7 @@ All ids, NAVs and bindings here are SYNTHETIC and fictional.
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -111,3 +112,26 @@ def test_local_cli_run_registers_every_committed_spec(tmp_path: Path, capsys: py
         assert ledger.role_bindings(c) == {}
     finally:
         c.close()
+
+
+def test_j4_step_surfaces_registry_conflicts_and_rejections(conn: Any, tmp_path: Path,
+                                                            monkeypatch: pytest.MonkeyPatch) -> None:  # fmt: skip
+    """REG-1: what register_committed_specs refuses during J4 reaches the cron hook's outcome (rule ids only)."""
+    edited = tmp_path / "signals"
+    edited.mkdir()
+    text = (SIGNALS_DIR / "S-E@1.yaml").read_text(encoding="utf-8")
+    (edited / "S-E@1.yaml").write_text(text.replace("10-month trend filter", "10 month trend filter"), "utf-8")
+    signal_registry.register_committed_specs(conn, now=fx.NOW, directory=edited)  # a different text for S-E@1
+    fx.seed_two_goals(conn)
+    out = rs.cron_snapshot_step(conn, datetime.fromisoformat(LATER))
+    assert out.registry_conflicts == ("S-E@1",) and out.registry_rejected == ()
+
+    real = signal_registry.register_committed_specs
+
+    def with_rejection(c: Any, *, now: str, directory: Path = SIGNALS_DIR) -> signal_registry.RegistryResult:
+        res = real(c, now=now, directory=directory)
+        return signal_registry.RegistryResult(res.registered, res.already_registered, res.conflicts, ("S-Q@1.yaml",))
+
+    monkeypatch.setattr(signal_registry, "register_committed_specs", with_rejection)
+    later = rs.cron_snapshot_step(conn, datetime.fromisoformat("2026-10-18T05:00:00+00:00"))
+    assert later.registry_conflicts == ("S-E@1",) and later.registry_rejected == ("S-Q@1",)  # file name -> id only

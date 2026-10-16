@@ -263,7 +263,8 @@ class ShadowRun:
 def run_shadow(conn: sqlite3.Connection, *, as_of: date, snapshot_id: str, now: str) -> ShadowRun:
     """Evaluate every registered S rule for ``as_of`` and append the rows. Idempotent: a key already recorded is
     left as it is (the ledger is append-only; the first write for a data date stands). Statements: rules, role
-    bindings, the month-end grid (chunked), the existing-key check and the batched insert."""
+    bindings, the month-end grid (chunked), then the append (ONE chunked existing-key read and the batched insert;
+    run_shadow does not read the keys a second time itself)."""
     rules = load_s_rules(conn)
     if not rules:
         return ShadowRun(0, 0, 0, 0, 0)
@@ -273,18 +274,9 @@ def run_shadow(conn: sqlite3.Connection, *, as_of: date, snapshot_id: str, now: 
     for rule in rules:
         ev = _abstain("spec_unparseable") if rule.spec is None else evaluate_rule(rule.spec, bindings, grid, as_of)
         rows.append(build_row(rule, ev, as_of, snapshot_id, now))
-    keys = [(r.rule_id, r.version, r.as_of_date, r.scope_id) for r in rows]
-    existing = {
-        (x["rule_id"], int(x["version"]), x["as_of_date"], x["scope_id"])
-        for x in ledger.select_by_keys(
-            conn, "rule_evaluations", ("rule_id", "version", "as_of_date", "scope_id"), keys,
-            "rule_id, version, as_of_date, scope_id",
-        )
-    }  # fmt: skip
-    new = [r for r, k in zip(rows, keys, strict=True) if k not in existing]
-    written = ledger.append_rule_evaluations(conn, new)
+    written = ledger.append_rule_evaluations(conn, rows, keep_existing=True)
     evaluated = sum(1 for r in rows if r.condition_met is not None)
-    return ShadowRun(len(rules), written, len(rows) - len(new), evaluated, len(rows) - evaluated)
+    return ShadowRun(len(rules), written, len(rows) - written, evaluated, len(rows) - evaluated)
 
 
 def payload(row: Mapping[str, Any]) -> dict[str, Any]:

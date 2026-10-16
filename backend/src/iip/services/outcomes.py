@@ -124,9 +124,10 @@ class _Due:
     equity: dict[str, bool | None]
 
 
-def _unscorable(key: dict[str, Any], end: str, reason: str, inputs_hash: str, now: str) -> ledger.Outcome:
+def _unscorable(key: dict[str, Any], end: str, reason: str, inputs_hash: str, due: _Due) -> ledger.Outcome:
     return ledger.Outcome(**key, horizon_end=end, status="unscorable", edge_after_cost_tax=None,
-                          unscorable_reason=reason, inputs_hash=inputs_hash, scored_at=now)  # fmt: skip
+                          unscorable_reason=reason, inputs_hash=inputs_hash, scored_at=due.now,
+                          resolved_on=due.as_of.isoformat())  # fmt: skip
 
 
 def _score_one(r: Any, p: dict[str, Any], due: _Due) -> ledger.Outcome | str:
@@ -142,7 +143,7 @@ def _score_one(r: Any, p: dict[str, Any], due: _Due) -> ledger.Outcome | str:
         if date.fromisoformat(end) > due.as_of:
             return "not_yet_due"
         reason = f"evaluation_abstained:{p.get('reason')}"
-        return _unscorable(key, end, reason, content_hash({"reason": reason}), due.now)
+        return _unscorable(key, end, reason, content_hash({"reason": reason}), due)
     horizon_end = date.fromisoformat(horizon_end_s)
     if horizon_end > due.as_of:
         return "not_yet_due"
@@ -171,14 +172,15 @@ def _score_one(r: Any, p: dict[str, Any], due: _Due) -> ledger.Outcome | str:
         "navs": {k: [str(a), str(b)] for k, (a, b) in sorted(navs.items())}, "equity": eq, "basis": due.basis,
     })  # fmt: skip
     if reason_or_none is not None:
-        return _unscorable(key, horizon_end_s, reason_or_none, inputs_hash, due.now)
+        return _unscorable(key, horizon_end_s, reason_or_none, inputs_hash, due)
     months = int(p["horizon_months"])
     held = net_return(*navs["held"], equity=bool(eq["held"]), months=months, basis=due.basis)
     bench = net_return(*navs["benchmark"], equity=bool(eq["benchmark"]), months=months, basis=due.basis)
     with engine_context():
         edge = ZERO if legs["held"] == legs["benchmark"] else held - bench
     return ledger.Outcome(**key, horizon_end=horizon_end_s, status="scored", edge_after_cost_tax=edge,
-                          unscorable_reason=None, inputs_hash=inputs_hash, scored_at=due.now)  # fmt: skip
+                          unscorable_reason=None, inputs_hash=inputs_hash, scored_at=due.now,
+                          resolved_on=due.as_of.isoformat())  # fmt: skip
 
 
 def score_outcomes(
@@ -189,16 +191,20 @@ def score_outcomes(
     basis: CostTaxBasis | None,
     limit: int = 2000,
 ) -> OutcomeRun:
-    """Score every due evaluation once. Statements: the unscored read, the grid, the category read and one batched
-    insert (the append is a no-op for anything already scored)."""
-    rows = ledger.unscored_evaluations(conn, as_of_before=as_of.isoformat(), limit=limit)
+    """Score every due evaluation once. Statements: the due read (rows that can progress, plus the counts of those
+    that cannot), the grid, the category read and one batched insert (the append is a no-op for anything already
+    scored). Every outcome written records ``resolved_on`` = ``as_of``, the DATA date it became known (graft TA-1;
+    the first pass that resolves it stands, a later re-run does not move the date)."""
+    due_read = ledger.due_evaluations(conn, as_of.isoformat(), has_basis=basis is not None, limit=limit)
+    rows = due_read.rows
     payloads = [json.loads(r["payload_json"]) for r in rows]
     instruments = sorted({i for p in payloads for i in (p.get("instruments") or {}).values()})
     grid = {k: dict(v) for k, v in ledger.series_grid(conn, instruments).items()} if instruments else {}
     equity = _equity_flags(conn, instruments) if instruments and basis is not None else {}
     due = _Due(as_of, now, basis, grid, equity)
     out: list[ledger.Outcome] = []
-    counts = {"not_yet_due": 0, "waiting_for_basis": 0, "waiting_for_data": 0}
+    counts = {"not_yet_due": due_read.not_yet_due, "waiting_for_basis": due_read.waiting_for_basis,
+              "waiting_for_data": 0}  # fmt: skip
     for r, p in zip(rows, payloads, strict=True):
         result = _score_one(r, p, due)
         if isinstance(result, str):
@@ -208,6 +214,7 @@ def score_outcomes(
     ledger.append_outcomes(conn, out)
     scored = sum(1 for o in out if o.status == "scored")
     return OutcomeRun(
-        considered=len(rows), scored=scored, unscorable=len(out) - scored, not_yet_due=counts["not_yet_due"],
+        considered=len(rows) + due_read.not_yet_due + due_read.waiting_for_basis, scored=scored,
+        unscorable=len(out) - scored, not_yet_due=counts["not_yet_due"],
         waiting_for_basis=counts["waiting_for_basis"], waiting_for_data=counts["waiting_for_data"],
     )  # fmt: skip

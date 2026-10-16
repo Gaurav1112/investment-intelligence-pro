@@ -1,5 +1,5 @@
 # Compliance Guard copy rules — versioned (ADR-0009). Source: docs/security/regulatory-readiness.md §7.
-version: "compliance_phrases@1.0.0"
+version: "compliance_phrases@1.1.0"
 source: docs/security/regulatory-readiness.md#7-copy-rules-for-the-compliance-guard-deterministic
 block:
   guarantees:
@@ -63,6 +63,38 @@ block:
     - '\bresearch analysts?\b'
     - '\bportfolio managers?\b'
     - '\bwealth managers?\b'
+# Surface-aware BLOCK rules (B04; design-risk-first.md §7.3 and §9.4; PLAN.md §8 U-11). The `block` list above applies
+# on EVERY surface. Each category below applies only on the surfaces it lists:
+#   private = the owner's logged-in view; export = a file the owner downloads; share = a link or copy meant for
+#   someone else; public = any unauthenticated page; ping = a push notification body.
+# `opt_in` names the owner vocabulary setting that lifts the category on the PRIVATE surface only. Export, share,
+# public and ping keep the BLOCK whatever the owner chose. Neutral wording is the default (U-11).
+surface_block:
+  trading_calls:
+    surfaces: [private, export, share, public, ping]
+    opt_in: badges
+    patterns:
+      - '(?-i:\b(?:BUY|SELL)\b)'
+      - '\b(?:buy|sell)\s+(?:signals?|calls?|ratings?|badges?|alerts?|recommendations?)\b'
+      - '\b(?:buy|sell)\s*/\s*(?:buy|sell|hold)\b'
+  signal_wording:
+    surfaces: [export, share, public, ping]
+    patterns:
+      - '\b(?:entry|exit) conditions? (?:is |are |was |were )?(?:met|triggered|active)\b'
+      - '\b(?:entry|exit) signals?\b'
+      - '\btrading (?:calls?|signals?|tips?)\b'
+  ping_content:
+    surfaces: [ping]
+    patterns:
+      - '₹'
+      - '\b(?:rs|inr)\b'
+      - '\b(?:rupees?|paise|lakhs?|lacs?|crores?|cr)\b'
+      - '\d[\d,]*\.\d+'
+      - '\d{1,3}(?:,\d{2,3})+'
+      - '\d+(?:\.\d+)?\s*%'
+      - '\b(?:buy|buys|buying|bought|sell|sells|selling|sold|redeem\w*|invest\w*|switch\w*|purchas\w*|exit\w*|hold\w*)\b'
+      - '\b(?:funds?|schemes?|navs?|folios?|isins?|units?|sips?|etfs?|stocks?|shares?|bonds?|gold|equity|debt)\b'
+      - '\b(?:gains?|loss(?:es)?|returns?|profits?|tax(?:es)?|prices?|amounts?|value)\b'
 warn:
   - '\boutperform(ed|s)?\b'
   - '\bbeats? the (index|benchmark)\b'

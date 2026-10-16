@@ -7,6 +7,16 @@ Order of checks for every HTTP request:
   4. CSRF for state-changing methods: X-IIP-CSRF + Origin/Sec-Fetch-Site + content type.
   5. Security headers on every response; Cache-Control: no-store on /api.
 No CORS headers are ever emitted.
+
+Scheduled jobs (research-automation-infra.md §3, PLAN rank 10): ``GET|POST /api/cron/{job}`` is the ONE route that
+also accepts the generated deployment host (``$VERCEL_URL``), authenticates with ``Authorization: Bearer
+<CRON_SECRET>`` instead of a session, and skips CSRF (no cookie, no ambient credential). Every other route keeps the
+exact host allowlist. Wrong secrets are rate-limited (401, then 429 while the limit is exhausted); the correct secret
+is checked first and always passes, so junk bearers cannot suppress the public cron schedule. With no secret
+configured the route answers 404.
+
+Session lookups (database statements when hosted) run in the thread pool, never on the event loop, and a hosted
+session's ``last_seen`` is written at most once per ``LAST_SEEN_THROTTLE_S``.
 """
 
 from __future__ import annotations
@@ -15,15 +25,19 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import secrets
 import time
 from collections import deque
-from collections.abc import Awaitable, Callable, MutableMapping
+from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 from dataclasses import dataclass, field
 from http.cookies import SimpleCookie
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
-from iip.api.settings import Settings
+from starlette.concurrency import run_in_threadpool
+
+from iip.api.settings import MIN_HOSTED_TOKEN_CHARS, Settings, StartupRefused
 
 log = logging.getLogger("iip.api")
 
@@ -52,6 +66,15 @@ PUBLIC_ROUTES = frozenset({("POST", "/api/session"), ("GET", "/api/health")})
 MULTIPART_ROUTES = frozenset({"/api/holdings/import", "/api/holdings/import-cas"})
 IDLE_TIMEOUT_S = 8 * 3600
 ABSOLUTE_TIMEOUT_S = 24 * 3600
+# PARAMETER (PLAN A03): a hosted session's last_seen is written at most once per this many seconds. The idle timeout
+# is measured from the stored value, so it can end up to this much earlier than 8 h after the true last request.
+LAST_SEEN_THROTTLE_S = 5 * 60
+# The cron exception matches exactly one lower-case path segment; anything else is an ordinary route.
+CRON_PATH = re.compile(r"/api/cron/[a-z][a-z0-9-]{0,39}")
+CRON_METHODS = frozenset({"GET", "POST"})
+CRON_RATE_KEY = "cron"
+CRON_RATE_LIMIT = 10  # wrong secrets per window, like login (research-automation-infra.md §3 "Rate limits")
+CRON_RATE_WINDOW_S = 60.0
 
 
 @dataclass
@@ -104,6 +127,13 @@ class LoginLimiter(Protocol):
     def allow(self) -> bool: ...
 
 
+class FailureLimiter(Protocol):
+    """Counts failures only: ``exhausted`` looks without recording, ``allow`` records one hit."""
+
+    def allow(self) -> bool: ...
+    def exhausted(self) -> bool: ...
+
+
 def _id_hash(session_id: str) -> str:
     return hashlib.sha256(session_id.encode()).hexdigest()
 
@@ -145,6 +175,8 @@ class DbSessionStore:
         if now - last_seen > IDLE_TIMEOUT_S or now - created > ABSOLUTE_TIMEOUT_S:
             c.execute("DELETE FROM web_sessions WHERE id_hash=?", (key,))
             return None
+        if now - last_seen < LAST_SEEN_THROTTLE_S:
+            return Session(session_id, str(row["csrf"]), created, last_seen)
         c.execute("UPDATE web_sessions SET last_seen=? WHERE id_hash=?", (now, key))
         return Session(session_id, str(row["csrf"]), created, now)
 
@@ -177,6 +209,15 @@ class DbRateLimiter:
         )
         return int(cur.rowcount) == 1
 
+    def exhausted(self) -> bool:
+        now = self.clock()
+        row = (
+            self.conn()
+            .execute("SELECT COUNT(*) FROM rate_hits WHERE key=? AND at > ?", (self.key, now - self.window_s))
+            .fetchone()
+        )
+        return int(row[0]) >= self.limit
+
 
 @dataclass
 class RateLimiter:
@@ -193,6 +234,43 @@ class RateLimiter:
             return False
         self.hits.append(now)
         return True
+
+    def exhausted(self) -> bool:
+        now = self.clock()
+        return sum(1 for t in self.hits if now - t <= self.window_s) >= self.limit
+
+
+@dataclass(frozen=True)
+class CronAuth:
+    """The narrow scheduled-job exception. ``deployment_host`` is the bare ``$VERCEL_URL`` host (no scheme/port)."""
+
+    secret: str = field(repr=False)
+    deployment_host: str
+    limiter: FailureLimiter = field(repr=False)
+
+
+_HOST_RE = re.compile(r"[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+")
+
+
+def cron_auth_from_env(settings: Settings, environ: Mapping[str, str], limiter: FailureLimiter) -> CronAuth | None:
+    """Build the cron exception from ``CRON_SECRET``, ``VERCEL_URL`` and ``VERCEL_ENV``; None means the route is off.
+
+    Off (404) when: not hosted, no secret, no ``VERCEL_URL``, or ``VERCEL_ENV`` is not ``production`` (Vercel runs
+    crons only against production). A secret that is set but too short, equal to the access token, or a malformed
+    ``VERCEL_URL`` refuses startup instead of silently weakening the boundary."""
+    secret = environ.get("CRON_SECRET", "")
+    if not settings.hosted or not secret.strip():  # blank = unset, as the outer gate in root app.py (A04) reads it
+        return None
+    if len(secret) < MIN_HOSTED_TOKEN_CHARS:
+        raise StartupRefused(f"CRON_SECRET must be at least {MIN_HOSTED_TOKEN_CHARS} characters")
+    if hmac.compare_digest(secret.encode(), settings.access_token.encode()):
+        raise StartupRefused("CRON_SECRET must differ from IIP_ACCESS_TOKEN")
+    host = environ.get("VERCEL_URL", "").strip().lower()
+    if not host or environ.get("VERCEL_ENV", "") != "production":
+        return None
+    if not _HOST_RE.fullmatch(host) or urlsplit(f"//{host}").netloc != host:
+        raise StartupRefused("VERCEL_URL must be a bare host name such as <project>-<hash>.vercel.app")
+    return CronAuth(secret=secret, deployment_host=host, limiter=limiter)
 
 
 def _headers(scope: Scope) -> list[tuple[bytes, bytes]]:
@@ -232,10 +310,13 @@ HSTS = (b"strict-transport-security", b"max-age=63072000; includeSubDomains")
 
 
 class SecurityMiddleware:
-    def __init__(self, app: ASGIApp, settings: Settings, sessions: SessionBackend) -> None:
+    def __init__(
+        self, app: ASGIApp, settings: Settings, sessions: SessionBackend, *, cron: CronAuth | None = None
+    ) -> None:
         self.app = app
         self.settings = settings
         self.sessions = sessions
+        self.cron = cron
         # Hosted (HTTPS only, ADR-0013): browsers must never fall back to plain HTTP for this origin.
         self.extra_headers: tuple[tuple[bytes, bytes], ...] = (HSTS,) if settings.hosted else ()
 
@@ -248,13 +329,16 @@ class SecurityMiddleware:
             return
         if scope["type"] != "http":  # no websockets (C-01: no other listeners)
             return
-        hosts = _header_values(scope, b"host")
-        if len(hosts) != 1 or hosts[0].lower() not in self.settings.allowed_hosts:
-            await self._deny(send, 400, "BAD_HOST")
-            return
-
         method: str = scope["method"]
         path: str = scope["path"]
+        is_cron = CRON_PATH.fullmatch(path) is not None
+        allowed_hosts = self.settings.allowed_hosts
+        if is_cron and self.cron is not None:  # SEC-cron-2: the deployment host is accepted on this path ONLY
+            allowed_hosts = allowed_hosts | {self.cron.deployment_host}
+        hosts = _header_values(scope, b"host")
+        if len(hosts) != 1 or hosts[0].lower() not in allowed_hosts:
+            await self._deny(send, 400, "BAD_HOST")
+            return
 
         lengths = _header_values(scope, b"content-length")
         if lengths:
@@ -266,11 +350,17 @@ class SecurityMiddleware:
                 await self._deny(send, 400, "BAD_CONTENT_LENGTH")
                 return
 
+        if is_cron:
+            await self._cron(scope, receive, send, method)
+            return
+
         is_api = path.startswith("/api/") or path == "/api"
         session: Session | None = None
         if is_api and (method, path) not in PUBLIC_ROUTES and method != "OPTIONS":
             if self.settings.auth:
-                session = self.sessions.get(_cookie(scope, SESSION_COOKIE))
+                # Hosted lookups are database statements: run them in the thread pool so a slow lookup never stalls
+                # other requests on the event loop (PLAN rank 3).
+                session = await run_in_threadpool(self.sessions.get, _cookie(scope, SESSION_COOKIE))
                 if session is None:
                     await self._deny(send, 401, "UNAUTHENTICATED")
                     return
@@ -285,8 +375,34 @@ class SecurityMiddleware:
             await self._deny(send, 403, "CSRF_REJECTED")
             return
 
-        scope.setdefault("state", {})["session"] = session
+        state = scope.setdefault("state", {})
+        state["session"] = session
+        state["cron"] = False
         await self._dispatch(scope, self._capped_receive(receive), send, is_api=is_api)
+
+    async def _cron(self, scope: Scope, receive: Receive, send: Send, method: str) -> None:
+        """Bearer-only, cookie-free path for scheduled jobs. The handler decides the work from database state."""
+        cron = self.cron
+        if cron is None:
+            await self._deny(send, 404, "NOT_FOUND")
+            return
+        if method not in CRON_METHODS:
+            await self._deny(send, 405, "METHOD_NOT_ALLOWED")
+            return
+        # The bearer is checked FIRST (constant time) and a correct secret always passes: only wrong attempts count
+        # toward the shared limit and only they get 429. Locking out the correct secret would let anyone with no
+        # secret suppress every scheduled job (the schedule is public in vercel.json; Vercel does not retry a cron
+        # call), and it adds nothing against guessing: the secret has at least MIN_HOSTED_TOKEN_CHARS of entropy.
+        auth = _header_values(scope, b"authorization")
+        scheme, _, presented = (auth[0] if len(auth) == 1 else "").partition(" ")
+        if not (scheme.lower() == "bearer" and hmac.compare_digest(presented.encode(), cron.secret.encode())):
+            allowed = await run_in_threadpool(cron.limiter.allow)
+            await self._deny(send, 401 if allowed else 429, "UNAUTHENTICATED" if allowed else "RATE_LIMITED")
+            return
+        state = scope.setdefault("state", {})
+        state["session"] = None
+        state["cron"] = True
+        await self._dispatch(scope, self._capped_receive(receive), send, is_api=True)
 
     async def _dispatch(self, scope: Scope, receive: Receive, send: Send, *, is_api: bool) -> None:
         """Run the app with the security headers added to its response; no exception escapes (see below)."""

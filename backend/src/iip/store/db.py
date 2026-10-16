@@ -11,11 +11,14 @@ Two drivers share one SQL dialect (SQLite):
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import sqlite3
 import time
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
+from functools import lru_cache
 from importlib import resources
 from pathlib import Path
 from typing import Any, cast
@@ -136,7 +139,7 @@ def _translate(exc: Exception) -> sqlite3.Error:
 class _Cursor:
     def __init__(self, cur: Any) -> None:
         self._cur = cur
-        desc = cur.description
+        desc = getattr(cur, "description", None)  # None for a script (libSQL returns no cursor for one)
         self.description = desc
         self._keys: tuple[str, ...] = tuple(d[0] for d in desc) if desc else ()
         index: dict[str, int] = {}
@@ -149,10 +152,10 @@ class _Cursor:
         return None if values is None else Row(self._keys, self._index, values)
 
     def fetchone(self) -> Row | None:
-        return self._row(self._cur.fetchone())
+        return None if self._cur is None else self._row(self._cur.fetchone())
 
     def fetchall(self) -> list[Row]:
-        return [Row(self._keys, self._index, v) for v in self._cur.fetchall()]
+        return [] if self._cur is None else [Row(self._keys, self._index, v) for v in self._cur.fetchall()]
 
     def fetchmany(self, size: int | None = None) -> list[Row]:
         rows = self._cur.fetchmany(size) if size is not None else self._cur.fetchmany()
@@ -163,15 +166,16 @@ class _Cursor:
 
     @property
     def rowcount(self) -> int:
-        return int(self._cur.rowcount)
+        return -1 if self._cur is None else int(self._cur.rowcount)
 
     @property
     def lastrowid(self) -> int | None:
-        value = self._cur.lastrowid
+        value = None if self._cur is None else self._cur.lastrowid
         return None if value is None else int(value)
 
     def close(self) -> None:
-        self._cur.close()
+        if self._cur is not None:
+            self._cur.close()
 
 
 BUSY_RETRY_S = 10.0  # like sqlite3's busy_timeout: libSQL does not wait on a locked database, so we do
@@ -251,6 +255,9 @@ class LibsqlConnection:
             self.rollback()
 
     def executescript(self, script: str) -> _Cursor:
+        """Run a multi-statement script in ONE round trip. NOTE: libSQL stops at the first failing statement
+        WITHOUT raising, so a caller must verify the effect (see :func:`_apply_migration`). The driver returns no
+        cursor for a script, so the result carries no rows (and costs no extra round trip)."""
         try:
             return _Cursor(self._raw.executescript(script))
         except Exception as exc:
@@ -312,36 +319,247 @@ def current_version(conn: sqlite3.Connection) -> int:
     return int(row["v"] or 0)
 
 
+def latest_version() -> int:
+    """The newest migration this code ships (reads the package files, not the database)."""
+    return len(_migration_files())
+
+
+# One read-only statement: the applied version AND every schema object with its CREATE text (A05/RC-5: the startup
+# budget is this read plus the interrupted-run probe; pragma table functions would add statements to the trace).
+_SCHEMA_STATE = (
+    "SELECT (SELECT MAX(version) FROM schema_version) AS v, (SELECT json_group_array(json_array(type, name, sql))"
+    " FROM sqlite_master WHERE name NOT LIKE 'sqlite_%') AS s"
+)
+_CONSTRAINT_HEADS = frozenset({"CONSTRAINT", "PRIMARY", "UNIQUE", "CHECK", "FOREIGN"})
+
+
+def _table_columns(create_sql: str) -> list[str]:
+    """Column names of a stored ``CREATE TABLE`` text: the first word of each top-level item of the column list
+    (comments, quoted text and nested parentheses skipped; table constraints are not columns). Applied the same way
+    to the database's text and to the shipped migrations' text."""
+    body = create_sql[create_sql.index("(") + 1 :]
+    items: list[str] = []
+    cur: list[str] = []
+    depth, i = 0, 0
+    while i < len(body):
+        ch = body[i]
+        if body.startswith("--", i):
+            i = body.find("\n", i)
+            i = len(body) if i < 0 else i
+            continue
+        if body.startswith("/*", i):
+            i = body.find("*/", i)
+            i = len(body) if i < 0 else i + 2
+            continue
+        if ch in "'\"`[":
+            close = "]" if ch == "[" else ch
+            j = body.find(close, i + 1)
+            j = len(body) - 1 if j < 0 else j
+            cur.append(body[i : j + 1])
+            i = j + 1
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            if depth == 0:
+                break
+            depth -= 1
+        elif ch == "," and depth == 0:
+            items.append("".join(cur))
+            cur = []
+            i += 1
+            continue
+        cur.append(ch)
+        i += 1
+    items.append("".join(cur))
+    names: list[str] = []
+    for item in items:
+        words = item.split()
+        if words and words[0].upper() not in _CONSTRAINT_HEADS:
+            names.append(words[0].strip("\"`[]'"))
+    return names
+
+
+def _schema_entries(rows: list[list[str | None]]) -> frozenset[str]:
+    out: set[str] = set()
+    for kind, name, sql in rows:
+        out.add(f"{kind}:{name}")
+        if kind == "table" and sql:
+            out.update(f"column:{name}.{col}" for col in _table_columns(sql))
+    return frozenset(out)
+
+
+@lru_cache(maxsize=1)
+def expected_schema() -> frozenset[str]:
+    """The tables, indexes, triggers, views and columns the shipped migrations create, from applying them to an
+    in-memory database (the package files are fixed for the life of the process, so this runs once)."""
+    mem = sqlite3.connect(":memory:")
+    try:
+        mem.execute(_SCHEMA_VERSION_DDL)
+        for _, _, sql in _migration_files():
+            for statement in _split_sql(sql):
+                mem.execute(statement)
+        row = mem.execute(_SCHEMA_STATE).fetchone()
+        return _schema_entries(json.loads(row[1]))
+    finally:
+        mem.close()
+
+
+def _read_schema_state(conn: sqlite3.Connection) -> tuple[int, frozenset[str]]:
+    """(applied version, schema entries) in ONE read-only statement; (0, empty) before the first migration."""
+    try:
+        row = conn.execute(_SCHEMA_STATE).fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return 0, frozenset()
+        raise
+    if row is None:
+        return 0, frozenset()
+    return int(row[0] or 0), _schema_entries(json.loads(row[1] or "[]"))
+
+
+def verify_schema(actual: frozenset[str]) -> None:
+    """Refuse a database whose schema lacks anything the shipped migrations create. ``migrate`` skips a version
+    already recorded, so a migration edited after a database applied it (0004 during wave 2) left that database
+    without the new tables/columns/indexes until a later runtime failure. Extra objects are allowed."""
+    missing = sorted(expected_schema() - actual)
+    if missing:
+        shown = ", ".join(missing[:8]) + (f" and {len(missing) - 8} more" if len(missing) > 8 else "")
+        raise MigrationError(
+            f"the database schema does not match the shipped migrations; missing {shown}. It was migrated with "
+            "different migration files: recreate it (or restore a backup made by this version)."
+        )
+
+
+def read_schema_version(conn: sqlite3.Connection) -> int:
+    """The applied schema version in ONE read-only statement (RC-5: every hosted statement is a round trip).
+
+    A database that has never been migrated has no ``schema_version`` table: that is version 0. Any other error
+    (I/O, a dropped connection) is raised, never read as "not migrated"."""
+    try:
+        row = conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return 0
+        raise
+    return int(row["v"] or 0) if row is not None else 0
+
+
+MIGRATION_WAIT_S = 60.0  # how long a cold start waits for ANOTHER instance's migration before reporting the lock
+
+
+def ensure_schema(conn: sqlite3.Connection, applied_at: str, *, wait_s: float = MIGRATION_WAIT_S) -> list[str]:
+    """Startup path (A05): read-only when the database is current; runs :func:`migrate` only when a migration is
+    pending (a fresh local database, or the first instance after a deploy that ships a migration). Returns the
+    names applied, like :func:`migrate`.
+
+    Two instances can cold-start together after a deploy. The one that takes the write lock migrates; the other's
+    lock wait (``BUSY_RETRY_S`` / ``busy_timeout``) can run out first. A busy/locked error is therefore read as
+    "another instance is migrating": re-read the version and retry (the retry re-checks the version under the
+    lock, so nothing is applied twice) for up to ``wait_s`` seconds. A lock that never frees is still raised."""
+    deadline = time.monotonic() + wait_s
+    while True:
+        version, actual = _read_schema_state(conn)
+        if version >= latest_version():
+            verify_schema(actual)
+            return []
+        try:
+            applied = migrate(conn, applied_at)
+            verify_schema(_read_schema_state(conn)[1])
+            return applied
+        except sqlite3.OperationalError as exc:
+            if not _busy(exc) or time.monotonic() >= deadline:
+                raise
+            if conn.in_transaction:  # never leave this connection holding a half-open transaction
+                conn.execute("ROLLBACK")
+            time.sleep(0.05)
+
+
 def migrate(conn: sqlite3.Connection, applied_at: str) -> list[str]:
-    """Apply pending migrations in order, each in its own transaction. Returns names applied."""
+    """Apply pending migrations in order, each in its own transaction (BEGIN IMMEDIATE, the version re-checked
+    under the lock, the statements, the ``schema_version`` row, COMMIT). Returns names applied."""
     applied: list[str] = []
-    conn.execute(_SCHEMA_VERSION_DDL)
-    have = current_version(conn)
+    if read_schema_version(conn) == 0:  # DDL only when the table may be missing: it takes the write lock
+        conn.execute(_SCHEMA_VERSION_DDL)
+    have = read_schema_version(conn)
     for version, name, sql in _migration_files():
         if version <= have:
             continue
         conn.execute("BEGIN IMMEDIATE")
-        if current_version(conn) >= version:  # another process (a parallel cold start) applied it first
-            conn.execute("ROLLBACK")
-            continue
         try:
-            for statement in _split_sql(sql):
-                conn.execute(statement)
-            conn.execute(
-                "INSERT INTO schema_version(version, name, applied_at) VALUES (?, ?, ?)",
-                (version, name, applied_at),
-            )
-        except Exception:
-            conn.execute("ROLLBACK")
+            if read_schema_version(conn) >= version:  # another process (a parallel cold start) applied it first
+                conn.execute("ROLLBACK")
+                continue
+            _apply_migration(conn, version, name, sql, applied_at)
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
             raise
         conn.execute("COMMIT")
         applied.append(name)
     return applied
 
 
+def _sql_text(value: str) -> str:
+    """A SQL string literal (quotes doubled). Used only for the package-file name and the service's timestamp."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _apply_migration(conn: sqlite3.Connection, version: int, name: str, sql: str, applied_at: str) -> None:
+    """Apply ONE migration inside the caller's open write transaction, including its ``schema_version`` row.
+
+    On a libSQL connection (hosted: every statement is a round trip, ~0.4 s on Turso) the statements and the
+    version row go as ONE script, then ONE read verifies it. libSQL's ``executescript`` stops at the first failing
+    statement WITHOUT raising (checked against the installed driver), so the version row is the script's LAST
+    statement: it exists only if every statement before it ran. When it is missing the transaction is rolled back
+    and re-opened, and the statements are replayed one by one to raise the real error (nothing is half-applied).
+    The sqlite3 driver (local, no round-trip cost; its ``executescript`` would COMMIT the open transaction) runs
+    the statements one at a time."""
+    statements = _split_sql(sql)
+    insert = "INSERT INTO schema_version(version, name, applied_at) VALUES (?, ?, ?)"
+    if isinstance(conn, LibsqlConnection):
+        # Literals, not bound values (a script takes none): an int, the package file name and the service's
+        # timestamp, each quoted by _sql_text.
+        row = (
+            f"INSERT INTO schema_version(version, name, applied_at) VALUES ({int(version)}, {_sql_text(name)},"  # noqa: S608
+            f" {_sql_text(applied_at)})"
+        )
+        conn.executescript(";\n".join([*statements, row]) + ";")
+        if read_schema_version(conn) >= version:
+            return
+        conn.execute("ROLLBACK")
+        conn.execute("BEGIN IMMEDIATE")
+        for statement in statements:
+            conn.execute(statement)
+        raise MigrationError(f"{name}: the batched script stopped early but every statement ran on replay")
+    for statement in statements:
+        conn.execute(statement)
+    conn.execute(insert, (version, name, applied_at))
+
+
+_TRIGGER_START = re.compile(r"CREATE\s+(?:TEMP\s+|TEMPORARY\s+)?TRIGGER\b", re.IGNORECASE)
+_TRIGGER_END = re.compile(r"\bEND$", re.IGNORECASE)
+
+
 def _split_sql(sql: str) -> list[str]:
+    """Split a migration on ``;``. A ``CREATE TRIGGER … BEGIN …; END`` is kept whole: its pieces are joined until one
+    ends in ``END`` (so a trigger body must not contain a CASE … END expression; migration 0004 documents this)."""
     lines = [ln for ln in sql.splitlines() if not ln.strip().startswith("--")]
-    return [s.strip() for s in "\n".join(lines).split(";") if s.strip()]
+    out: list[str] = []
+    pending: list[str] = []
+    for piece in "\n".join(lines).split(";"):
+        pending.append(piece)
+        statement = ";".join(pending).strip()
+        if not statement:
+            pending = []
+            continue
+        if _TRIGGER_START.match(statement) and not _TRIGGER_END.search(statement):
+            continue
+        out.append(statement)
+        pending = []
+    if pending and ";".join(pending).strip():
+        out.append(";".join(pending).strip())  # an unterminated trigger: let SQLite report it
+    return out
 
 
 def integrity_ok(conn: sqlite3.Connection) -> bool:

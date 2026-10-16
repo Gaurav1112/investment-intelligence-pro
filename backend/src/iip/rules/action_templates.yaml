@@ -1,0 +1,181 @@
+# Action-card templates — versioned (ADR-0009). Owner: wave-2 package A16.
+# Sources: docs/research/wave1/design-risk-first.md §7.2–7.3 (templates, vocabulary);
+#          docs/research/wave1/design-evidence-first.md §3.1 (linter: no forecast language in policy text);
+#          docs/research/wave1/design-judgement.md §2.2 graft 11; PLAN.md §8 U-11 (neutral wording, no BUY/SELL).
+#
+# Rules enforced by iip.engine.actions.cards.parse_templates (a single failure rejects the whole file):
+#   * static text holds NO digits and no number words: every number is a typed slot filled from a CardNumber that
+#     carries a fact_id or formula_id;
+#   * no forecast language and no trade-call words in any card class;
+#   * POLICY text says "your rule" and names {rule_ref}; SIGNAL text says "entry condition met" or
+#     "exit condition met" and names {rule_ref};
+#   * every {slot} in text is declared under slots, and every declared slot is used.
+# Slot types: inr | pct | pp | units | months | years | days | count | date (numbers), name (an entity name from the
+# user's data), text (free text, no digits), rule_ref (filled from the card's rule id and version, never by callers).
+# The page footer is the compliance guard's required footer (compliance_phrases.yaml → required.footer).
+version: "action_templates@1.1.0"
+source: docs/research/wave1/design-risk-first.md#72-templates-rulesaction_templatesyaml-no-llm-in-the-numeric-path
+footer_ref: footer
+
+linter:
+  forecast:
+    applies_to: all
+    patterns:
+      - '\bwill (return|returns|give|earn|make|double|triple|grow|rise|fall|drop|gain|lose|beat|outperform|recover|deliver|generate|compound|appreciate)\b'
+      - '\bexpected (return|returns|gain|gains|growth|profit|profits|value|yield|cagr|xirr)\b'
+      - '\b(likely|unlikely|poised|bound|set|expected) to (return|rise|fall|grow|gain|beat|outperform|recover|double|rally)\b'
+      - '\b(could|should|may|might|can) (earn|gain|grow|rise|rally|recover|outperform|double|beat|return)\b'
+      - '\bprobabilit(y|ies)\b'
+      - '\bforecast\w*\b'
+      - '\bpredict\w*\b'
+      - '\bproject(ed|ion|ions)\b'
+      - '\boutperform\w*\b'
+      - '\bupside\b'
+      - '\bpotential (gain|gains|return|returns|upside|profit|profits)\b'
+      - '\b(future|forward) returns?\b'
+      - '\bon track\b'
+      - '\bbeat (the )?(market|index|benchmark|inflation)\b'
+      - '\bdouble your money\b'
+      - '\bmultibagger\b'
+      - '\bguarantee\w*\b'
+      - '\bassured\b'
+  trade_call:
+    applies_to: all
+    patterns:
+      - '\b(buy|buys|buying|bought|sell|sells|selling|sold)\b'
+      - '\bstop[- ]?loss\b'
+      - '\btarget price\b'
+      - '\bbook (profit|profits|gains)\b'
+      - '\baccumulate\b'
+      - '\bexit (now|the fund|this fund|the scheme|this scheme|your position)\b'
+      - '\b(bullish|bearish)\b'
+      - '\b(act|invest|switch|redeem) now\b'
+  literal_number:
+    applies_to: all
+    patterns:
+      - '\d'
+      - '\b(zero|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundreds?|thousands?|lakhs?|lacs?|crores?|millions?|billions?|percent|per\s?cent|percentage points?|bps|basis points?)\b'
+      - '\b(double[ds]?|doubling|triple[ds]?|tripling|twice|thrice|half|halve[ds]?|dozens?)\b'
+
+voice:
+  POLICY:
+    must_match: ['\byour rule\b']
+    must_have_slots: [rule_ref]
+  SIGNAL:
+    must_match: ['\b(entry|exit) condition met\b']
+    must_have_slots: [rule_ref]
+
+templates:
+  data_attention:
+    kind: DATA_ATTENTION
+    card_class: STATUS
+    text: "Data for {source_name} is older than its freshness limit (last value dated {last_date}). Cards that depend on it abstain until it refreshes."
+    slots: {source_name: name, last_date: date}
+
+  emergency_shortfall:
+    kind: EMERGENCY_SHORTFALL
+    card_class: POLICY
+    text: "Your emergency reserve is {shortfall} short of the {months} of essential expenses you chose. Your rule {rule_ref} says: put the next {shortfall} of contributions into {reserve_fund} before anything else."
+    slots: {shortfall: inr, months: months, rule_ref: rule_ref, reserve_fund: name}
+
+  goal_date_breach:
+    kind: GOAL_DATE_BREACH
+    card_class: POLICY
+    text: "{goal_name} is due on {goal_date}, inside your safety horizon of {h_safe}, and {at_risk} of it sits in instruments that can fall in value. Your rule {rule_ref} says: send new contributions for this goal to {safe_sleeve} and review those holdings."
+    slots: {goal_name: name, goal_date: date, h_safe: years, at_risk: inr, rule_ref: rule_ref, safe_sleeve: name}
+
+  goal_date_duration:
+    kind: GOAL_DATE_DURATION
+    card_class: POLICY
+    text: "{holding_name} has a Macaulay duration of {duration}, and {goal_name} is {years_to_goal} away (due {goal_date}). A holding whose duration is longer than the time left to the goal can fall in value when interest rates rise. Your rule {rule_ref} says: send new contributions for this goal to {safe_sleeve} and review this holding at your next rebalance. No redemption is needed."
+    slots: {holding_name: name, duration: years, goal_name: name, years_to_goal: years, goal_date: date, rule_ref: rule_ref, safe_sleeve: name}
+
+  loss_budget_breach:
+    kind: LOSS_BUDGET_BREACH
+    card_class: POLICY
+    text: "Your loss limit for {goal_name} is {loss_limit}. In the worst fall in the available history of the funds you hold, this goal would have lost {stress_loss}. Your rule {rule_ref} says: send the next {redirect_amount} of contributions to {debt_sleeve}. No redemption is needed."
+    slots: {goal_name: name, loss_limit: inr, stress_loss: inr, rule_ref: rule_ref, redirect_amount: inr, debt_sleeve: name}
+
+  limit_breach:
+    kind: LIMIT_BREACH
+    card_class: POLICY
+    text: "{holding_name} is {actual_share} of {scope_name}, above your limit of {limit_share}; {excess} is over the limit. Your rule {rule_ref} says: redirect new contributions elsewhere until it is back within the limit."
+    slots: {holding_name: name, actual_share: pct, scope_name: name, limit_share: pct, excess: inr, rule_ref: rule_ref}
+
+  rebalance_due:
+    kind: REBALANCE_DUE
+    card_class: POLICY
+    text: "Review date for {goal_name}: {sleeve_name} is {actual_weight} against your {target_weight} target (band {band}). Your rule {rule_ref} says: redirecting {sip_months} of contributions closes most of the gap. Redeeming instead would cost {tax_cost} in tax and {exit_load} in exit load."
+    slots: {goal_name: name, sleeve_name: name, actual_weight: pct, target_weight: pct, band: pp, rule_ref: rule_ref, sip_months: months, tax_cost: inr, exit_load: inr}
+
+  next_rupee:
+    kind: NEXT_RUPEE
+    card_class: POLICY
+    text: "For your next contribution of {contribution}, your rule {rule_ref} says: invest {amount} for {goal_name} in the {sleeve_name} sleeve, through {scheme_name}."
+    slots: {contribution: inr, rule_ref: rule_ref, amount: inr, goal_name: name, sleeve_name: name, scheme_name: name}
+
+  next_rupee_sleeve_only:
+    kind: NEXT_RUPEE
+    card_class: POLICY
+    text: "For your next contribution of {contribution}, your rule {rule_ref} says: invest {amount} for {goal_name} in the {sleeve_name} sleeve. No scheme is chosen yet; see Needs from you."
+    slots: {contribution: inr, rule_ref: rule_ref, amount: inr, goal_name: name, sleeve_name: name}
+
+  ltcg_harvest:
+    kind: LTCG_HARVEST
+    card_class: POLICY
+    text: "{unused_allowance} of your {exemption_limit} long-term gains allowance is unused this financial year. Your rule {rule_ref} says: redeeming {units} units of {scheme_name} (oldest lots, all long-term) and reinvesting uses it, deferring about {tax_deferred} of tax. Exit load {exit_load}; stamp duty {stamp_duty}."
+    slots: {unused_allowance: inr, exemption_limit: inr, rule_ref: rule_ref, units: units, scheme_name: name, tax_deferred: inr, exit_load: inr, stamp_duty: inr}
+
+  lt_date:
+    kind: LT_DATE
+    card_class: POLICY
+    text: "A lot of {scheme_name} turns long-term on {lt_date}. Your rule {rule_ref} says: wait until then before redeeming it; redeeming earlier costs {extra_tax} more in tax."
+    slots: {scheme_name: name, lt_date: date, rule_ref: rule_ref, extra_tax: inr}
+
+  reg_to_direct:
+    kind: REG_TO_DIRECT
+    card_class: POLICY
+    text: "{scheme_name} is held in its Regular plan. Over the last {window}, the measured gap between its Regular and Direct NAVs was {nav_gap} a year. Your rule {rule_ref} says: redirect the SIP to the Direct plan first. Switching the existing units now costs {switch_cost}; waiting until {wait_date} lowers that to {wait_cost}."
+    slots: {scheme_name: name, window: months, nav_gap: pct, rule_ref: rule_ref, switch_cost: inr, wait_date: date, wait_cost: inr}
+
+  lower_cost_same_exposure:
+    kind: LOWER_COST_SAME_EXPOSURE
+    card_class: POLICY
+    text: "{scheme_name} tracks the same index as {alternative_name}, whose annual cost is {cost_gap} lower. Your rule {rule_ref} says: review whether to redirect new contributions to it."
+    slots: {scheme_name: name, alternative_name: name, cost_gap: pp, rule_ref: rule_ref}
+
+  review_flag:
+    kind: REVIEW_FLAG
+    card_class: DESCRIPTIVE
+    text: "Review flag: net of costs, {scheme_name} trailed the cheapest index fund on its benchmark over both the last {window_short} and the last {window_long}. Rule {rule_ref}. This is a prompt to review, not an instruction to redeem."
+    slots: {scheme_name: name, window_short: years, window_long: years, rule_ref: rule_ref}
+
+  signal_entry:
+    kind: SIGNAL_TILT
+    card_class: SIGNAL
+    text: "Entry condition met: rule {rule_ref}, data as of {as_of}. Evidence card {evidence_ref}. Your rule caps any tilt at {tilt_cap} of equity."
+    slots: {rule_ref: rule_ref, as_of: date, evidence_ref: name, tilt_cap: pct}
+
+  signal_exit:
+    kind: SIGNAL_TILT
+    card_class: SIGNAL
+    text: "Exit condition met: rule {rule_ref}, data as of {as_of}. Evidence card {evidence_ref}."
+    slots: {rule_ref: rule_ref, as_of: date, evidence_ref: name}
+
+  abstain_missing_input:
+    kind: ABSTAIN
+    card_class: STATUS
+    text: "No card from rule {rule_ref} today: it abstains because {missing_input} is missing. Add it under Needs from you."
+    slots: {rule_ref: rule_ref, missing_input: text}
+
+  abstain_no_signal:
+    kind: ABSTAIN
+    card_class: STATUS
+    text: "No trend or timing signal is active. Reason: no rule has passed the evidence gates ({gate_name} needs {needed_months} of out-of-sample data and has {have_months}). This is the expected result, not an error."
+    slots: {gate_name: name, needed_months: months, have_months: months}
+
+  no_action_needed:
+    kind: NO_ACTION_NEEDED
+    card_class: STATUS
+    text: "Nothing needs doing today. All your rules are within their limits (data as of {as_of})."
+    slots: {as_of: date}

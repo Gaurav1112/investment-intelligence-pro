@@ -11,9 +11,12 @@ Controls, applied on every request and on every redirect hop:
   compression bomb cannot expand past the cap; other encodings are refused;
 * timeouts (connect 5 s, read 30 s, total 90 s per attempt), retries with exponential backoff and full jitter from an
   injectable seed, and a per-source circuit breaker;
-* no cookies, a fixed generic User-Agent, no proxy/netrc from the environment, and no Authorization header — except a
-  bearer token on a request to a source that REQUIRES CONFIGURATION (``SourceRequest.authenticated``, MoSPI only).
-  Authenticated requests never follow a redirect, so neither the token nor a credential body can leave the host.
+* no cookies, a fixed honest User-Agent (never a browser string), no proxy/netrc from the environment, and no
+  Authorization header — except a bearer token on a request to a source that REQUIRES CONFIGURATION
+  (``SourceRequest.authenticated``; no registered source needs one today). Authenticated requests never follow a
+  redirect, so neither a token nor a credential body can leave the host;
+* conditional GETs (``If-Modified-Since``): HTTP 304 is ``NotModified``, a healthy exchange, not a failure;
+* HTTP 418 (RBI's WAF answer to unwanted clients) opens the source's breaker at once: we stop, never evade.
 
 The public API takes a ``registry.SourceRequest`` (built only by typed builders), never a URL string.
 """
@@ -90,6 +93,16 @@ class NoData(FetchError):
 
 
 _NO_DATA_SNIFF_BYTES = 64 * 1024
+
+
+class NotModified(FetchError):
+    """HTTP 304 to a conditional GET: nothing new since ``if_modified_since``. Counts as a success for the breaker."""
+
+    code = "NOT_MODIFIED"
+
+
+#: Statuses after which we stop asking the source (breaker opened at once): 418 is RBI's WAF refusal.
+STOP_STATUSES = frozenset({418})
 
 
 class CircuitOpen(FetchError):
@@ -417,8 +430,14 @@ class Fetcher:
             payload = self._run(request, attempts)
         except FetchOffline:
             raise  # an offline machine is not the source's fault
-        except NoData:
-            self.breaker.record_success(spec.id)  # the source is healthy; it just has nothing for this query
+        except (NoData, NotModified):
+            self.breaker.record_success(spec.id)  # the source is healthy; it just has nothing new for this query
+            raise
+        except FetchFailed as exc:
+            if exc.status in STOP_STATUSES:
+                self.breaker.trip(spec.id)  # the source refuses us: stop until the cooldown, never evade
+            else:
+                self.breaker.record_failure(spec.id)
             raise
         except (FetchError, FetchRefused):
             self.breaker.record_failure(spec.id)
@@ -458,6 +477,8 @@ class Fetcher:
             extra["Authorization"] = f"Bearer {request.bearer_token}"
         if request.body is not None:
             extra["Content-Type"] = "application/json"
+        if request.if_modified_since is not None:
+            extra["If-Modified-Since"] = email.utils.format_datetime(request.if_modified_since.astimezone(UTC), True)
         with httpx.Client(
             transport=self._transport,
             follow_redirects=False,
@@ -505,6 +526,8 @@ class Fetcher:
         s = resp.status_code
         if s == 200:
             return
+        if s == 304:
+            raise NotModified("not modified since the last retrieval")
         if s >= 500 or s in _RETRYABLE_STATUSES:
             retry_after = _parse_retry_after(resp.headers.get("retry-after")) if s in (429, 503) else None
             raise FetchFailed(f"HTTP {s}", code=f"HTTP_{s}", retryable=True, status=s, retry_after=retry_after)

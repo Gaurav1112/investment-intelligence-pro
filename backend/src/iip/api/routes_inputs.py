@@ -58,9 +58,7 @@ def router() -> APIRouter:
         st = _state(request)
         if body.base_year not in (2012, 2024):
             raise HTTPException(422, {"code": "INVALID_INPUT", "message": "base_year must be 2012 or 2024"})
-        config = mospi.config_from_env()
-        if config.method is None:
-            raise HTTPException(409, {"code": "REQUIRES_CONFIGURATION", **mospi.status(config)})
+        config = mospi.config_from_env()  # always anonymous (A07): no configuration gate
         try:
             rec = mospi.fetch_cpi_month(
                 config, st.fetcher(), base_year=body.base_year, year=body.year,

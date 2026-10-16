@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
-import { pageTitle, Shell } from "./App";
+import { pageTitle, ROUTES, Shell } from "./App";
 import { ProfileProvider } from "./lib/profile";
 
 const json = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { "Content-Type": "application/json" } });
@@ -33,12 +33,16 @@ function renderShell() {
 
 describe("page titles and route focus (A11Y-3)", () => {
   it("pageTitle names every nav page and the link-only pages", () => {
-    expect(pageTitle("/")).toBe("Overview");
+    expect(pageTitle("/")).toBe("Today");
+    expect(pageTitle("/overview")).toBe("Overview");
     expect(pageTitle("/discover")).toBe("Discovery");
     expect(pageTitle("/data-health")).toBe("Data health");
     expect(pageTitle("/settings")).toBe("Settings");
     expect(pageTitle("/i/mf:900001")).toBe("Instrument detail");
     expect(pageTitle("/evidence/42")).toBe("Evidence");
+    expect(pageTitle("/goals")).toBe("Goals");
+    expect(pageTitle("/signals")).toBe("Signals");
+    expect(pageTitle("/signals/S-E/1")).toBe("Rule detail");
   });
 
   it("sets document.title per route and moves focus to the main landmark on navigation (not on first load)", async () => {
@@ -64,6 +68,22 @@ describe("page titles and route focus (A11Y-3)", () => {
 });
 
 describe("App shell", () => {
+  it("'/' is Today: the first nav link, and the brand links to it (C01)", () => {
+    renderShell();
+    const nav = screen.getByRole("navigation", { name: "Main" });
+    const first = nav.querySelector("a");
+    expect(first).toHaveTextContent("Today");
+    expect(first).toHaveAttribute("href", "/");
+    expect(screen.getByRole("link", { name: "Overview" })).toHaveAttribute("href", "/overview");
+  });
+
+  it("routes '/' to the Today page and '/overview' to Overview", () => {
+    expect(ROUTES.find((r) => r.path === "/")?.name).toBe("Today");
+    expect(ROUTES.find((r) => r.path === "/overview")?.name).toBe("Overview");
+    expect(ROUTES.find((r) => r.path === "/goals")?.name).toBe("Goals");
+    expect(ROUTES.find((r) => r.path === "/signals/:ruleId/:version")?.name).toBe("Rule detail");
+  });
+
   it("has a skip link to the main landmark and labelled landmarks", () => {
     renderShell();
     expect(screen.getByRole("link", { name: "Skip to content" })).toHaveAttribute("href", "#main");

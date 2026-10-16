@@ -17,7 +17,7 @@ import {
   useExplain,
   type OnExplain,
   type Picked,
-} from "./Compare";
+} from "../components/analysisCommon";
 
 const HORIZON_RE = /^\d{1,4}$/;
 

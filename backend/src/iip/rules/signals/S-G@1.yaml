@@ -1,0 +1,52 @@
+# Pre-registered 2026-10-16 (PLAN.md WP B05). Rules only: role names, no scheme, no results.
+# Cash-flow only, no sales of the risk asset. X (the drawdown threshold) is fixed at a single value before data is seen.
+id: S-G
+version: 1
+class: S
+family: drawdown_topup
+status: PRE_REGISTERED
+title: Drawdown top-up of new cash into an index fund
+universe_kind: fixed_roles
+roles:
+  risk: {role: index_fund.nifty50.direct, tax_class: EQUITY}
+  reserve: {role: liquid_fund.direct, tax_class: DEBT}
+rule:
+  kind: drawdown_topup
+  params: {threshold: "0.20", window_months: 12, topup_multiple: "1"}
+  slots: [risk, reserve]
+  formula: >-
+    Each month the SIP contribution c goes to risk. The initial reserve R sits in the liquid fund. If
+    C_m ≤ 0.80 × max(C_{m−11..m}), also move min(R_left, 1 × c) from the reserve to risk.
+benchmark:
+  kind: sip_schedule
+  params: {topup_multiple: "1"}
+  slots: [risk, reserve]
+  description: the same SIP, with the same reserve deployed at 1 × c per month from the start (fixed schedule)
+observation: month_end_nav
+decision_every_months: 1
+horizon_months: 1
+capital: {initial_inr: "120000", contribution_inr: "10000"}
+walk_forward:
+  lag: 1
+  purge: 1
+  embargo: 1
+  fill_rule: {name: next_day_nav_t3_switch, nav_offset: 1, switch_cash_gap: 3}
+  hac_lag: 0
+vault: {fraction: "0.20", min_months: 36}
+regimes:
+  - {id: a_regular_plan_era, start: null, end: 2013-03-31}
+  - {id: b_direct_pre_2020, start: 2013-04-01, end: 2019-12-31}
+  - {id: c_2020_to_vault, start: 2020-01-01, end: null}
+neighbours:
+  - {threshold: "0.15", window_months: 12, topup_multiple: "1"}
+  - {threshold: "0.25", window_months: 12, topup_multiple: "1"}
+cost_stress: {cost_multiplier: "1.5", slippage_multiplier: "2"}
+tilt_bounds: {min: "0.0", max: "0.0"}
+variants_counted: 1
+post_publication_from: null
+expected_outcome: >-
+  Unknown; likely ABSTAIN (fail G5): few trigger events (2020, possibly 2008 on Regular-plan history).
+evidence:
+  - {doc: docs/research/wave1/design-evidence-first.md, section: "§4.3 SIG-DD-01"}
+  - {doc: docs/research/wave1/design-risk-first.md, section: "§6.1"}
+gates: [G1, G2, G3, G4, G5, G6, G7, G8, G9, G10, G11, G12, G13, G14]

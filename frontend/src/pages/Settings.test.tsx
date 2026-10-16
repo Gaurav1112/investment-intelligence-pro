@@ -154,3 +154,84 @@ describe("Settings in hosted mode (walkthrough 2026-10-15)", () => {
     expect(screen.getByText(/stored on this computer/)).toBeInTheDocument();
   });
 });
+
+describe("Settings: notifications (C04, U-09 default off)", () => {
+  const NOTIFY = { channel: "off", available: ["off", "telegram"], ping_template: "IIP: daily report ready (data as of DD-Mon). Open the app." };
+
+  it("fails closed to Off when the server has no notification settings yet", async () => {
+    stubFetch(realistic); // /api/settings/notifications → 404
+    renderPage();
+    const off = await screen.findByRole("radio", { name: /^Off — no notifications/ });
+    expect(off).toBeChecked();
+    expect(screen.getByRole("radio", { name: /Telegram/ })).toBeDisabled();
+    expect(screen.getByRole("radio", { name: /Web Push/ })).toBeDisabled();
+    expect(screen.getByText(/Notification settings are not available on this server yet/)).toBeInTheDocument();
+  });
+
+  it("defaults to Off, lists rejected channels as not offered, and shows that a ping carries no amounts", async () => {
+    stubFetch((url, method) => (url === "/api/settings/notifications" ? json(NOTIFY) : realistic(url, method)));
+    renderPage();
+    expect(await screen.findByRole("radio", { name: /^Off — no notifications/ })).toBeChecked();
+    expect(screen.getByRole("radio", { name: /Web Push/ })).toBeDisabled(); // not in `available`
+    expect(screen.queryByRole("radio", { name: /ntfy|Gmail|email/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/ntfy\.sh public topics/)).toBeInTheDocument();
+    const preview = screen.getByTestId("ping-preview");
+    expect(preview.textContent).toBe(NOTIFY.ping_template);
+    expect(preview.textContent).not.toMatch(/₹|buy|sell/i);
+  });
+
+  it("enables Telegram only after acknowledging that Telegram stores the ping, and sends that acknowledgement", async () => {
+    const calls = stubFetch((url, method) =>
+      url === "/api/settings/notifications" ? json(method === "PUT" ? { ...NOTIFY, channel: "telegram" } : NOTIFY) : realistic(url, method),
+    );
+    renderPage();
+    await userEvent.click(await screen.findByRole("radio", { name: /Telegram/ }));
+    const save = screen.getByRole("button", { name: "Save notification setting" });
+    expect(save).toBeDisabled();
+    await userEvent.click(screen.getByRole("checkbox", { name: /Telegram stores/ }));
+    expect(save).toBeEnabled();
+    await userEvent.click(save);
+    await waitFor(() => expect(calls.some((c) => c.url === "/api/settings/notifications" && c.method === "PUT")).toBe(true));
+    expect(calls.find((c) => c.method === "PUT" && c.url === "/api/settings/notifications")!.body).toEqual({
+      channel: "telegram",
+      acknowledge_third_party_storage: true,
+    });
+    expect(await screen.findByText(/Saved\. Pings go to Telegram/)).toBeInTheDocument();
+  });
+});
+
+describe("Settings: vocabulary (C04, U-11 neutral by default)", () => {
+  it("fails closed to neutral wording when the server has no vocabulary setting", async () => {
+    stubFetch(realistic);
+    renderPage();
+    expect(await screen.findByRole("radio", { name: /Neutral wording/ })).toBeChecked();
+    expect(screen.getByRole("radio", { name: /BUY\/SELL badges/ })).toBeDisabled();
+  });
+
+  it("opts in to badges only with the private-view acknowledgement; exports and shares stay neutral", async () => {
+    const calls = stubFetch((url, method) =>
+      url === "/api/settings/vocabulary" ? json(method === "PUT" ? { mode: "badges" } : { mode: "neutral" }) : realistic(url, method),
+    );
+    renderPage();
+    const neutral = await screen.findByRole("radio", { name: /Neutral wording/ });
+    await waitFor(() => expect(screen.getByRole("radio", { name: /BUY\/SELL badges/ })).toBeEnabled());
+    expect(neutral).toBeChecked();
+    expect(screen.getByText(/exports, shares and any page without a login always keep the neutral wording/i)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("radio", { name: /BUY\/SELL badges/ }));
+    const save = screen.getByRole("button", { name: "Save wording" });
+    expect(save).toBeDisabled();
+    await userEvent.click(screen.getByRole("checkbox", { name: /only inside my logged-in view/ }));
+    await userEvent.click(save);
+    await waitFor(() => expect(calls.some((c) => c.url === "/api/settings/vocabulary" && c.method === "PUT")).toBe(true));
+    expect(calls.find((c) => c.method === "PUT" && c.url === "/api/settings/vocabulary")!.body).toEqual({ mode: "badges", acknowledge_private_only: true });
+  });
+});
+
+describe("Settings: data rights panel (C04)", () => {
+  it("shows the data-rights panel on the Settings page", async () => {
+    stubFetch(realistic);
+    renderPage();
+    expect(await screen.findByRole("heading", { name: "Data sources and rights" })).toBeInTheDocument();
+    expect(screen.getByRole("table", { name: /Every data source/ })).toBeInTheDocument();
+  });
+});

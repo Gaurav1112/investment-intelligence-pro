@@ -15,10 +15,35 @@ from starlette.testclient import TestClient
 from iip.api.app import create_app
 from iip.api.routes import all_routers
 from iip.api.settings import Settings
+from iip.data.parsers.amfi_navall import parse_navall
+from iip.services import ingestion as ing
+from tests.data.conftest import load_fixture, make_payload
 
 ORIGIN = "https://iip.example.test"
 TOKEN = secrets.token_urlsafe(32)
 NOW = datetime(2026, 10, 15, 6, 0, tzinfo=UTC)
+
+
+def navall_codes(*, direct_growth: bool = True) -> list[int]:
+    """Codes of the synthetic NAVAll fixture: the open-ended Direct-Growth ones (the LOCAL minimised scope) or all."""
+    payload = make_payload("amfi.navall", load_fixture("amfi_navall_excerpt.txt"),
+                           "https://portal.amfiindia.com/spages/NAVAll.txt", NOW)  # fmt: skip
+    recs = parse_navall(payload).records
+    return sorted({r.scheme_code for r in recs if not direct_growth or ing.in_minimised_scope(r, set())})
+
+
+def watch_schemes(conn: Any, codes: list[int], at: datetime = NOW) -> None:
+    """Put fictional schemes on the watchlist: U-01, hosted NAVAll stores held and watched schemes only."""
+    for code in codes:
+        conn.execute(
+            "INSERT INTO instruments(instrument_id, kind, name, amfi_code, origin, created_at)"
+            " VALUES (?, 'mf_scheme', ?, ?, 'source', ?) ON CONFLICT(instrument_id) DO NOTHING",
+            (ing.instrument_id(code), f"Fictional scheme {code}", str(code), at.isoformat()),
+        )
+        conn.execute(
+            "INSERT INTO watchlist(instrument_id, added_at) VALUES (?, ?) ON CONFLICT(instrument_id) DO NOTHING",
+            (ing.instrument_id(code), at.isoformat()),
+        )
 
 
 def hosted_settings(db: Path, **overrides: Any) -> Settings:

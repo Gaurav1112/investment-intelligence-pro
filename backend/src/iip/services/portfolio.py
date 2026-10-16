@@ -40,6 +40,7 @@ from iip.engine.stats.metrics import hhi_from_values
 from iip.services import ingestion
 from iip.services.explain import source_ref
 from iip.services.instruments import TBILL_STALE_DAYS, _slug
+from iip.store import ledger
 from iip.store.db import backup as db_backup
 from iip.store.db import current_version, is_remote, write_tx
 
@@ -1378,10 +1379,37 @@ assert all(t.isidentifier() for t in PUBLIC_TABLES)
 # Precomputed from identifier-checked constants: no SQL is ever built from runtime values (SEC-65).
 _COUNT_SQL = {t: "SELECT COUNT(*) FROM " + t for t in (*USER_TABLES, *PUBLIC_TABLES)}  # noqa: S608 - identifier-asserted constants
 _DELETE_SQL = {t: "DELETE FROM " + t for t in USER_TABLES}  # noqa: S608 - identifier-asserted constants
+# Migration 0004 user tables (goals, decisions, snapshots, ...): counted here, deleted only through
+# ledger.erase_user_rows, which opens the append-only erase gate inside the caller's transaction (SEC-81).
+_COUNT_SQL_0004 = {t: "SELECT COUNT(*) FROM " + t for t in ledger.USER_TABLES_0004}  # noqa: S608 - identifier-asserted constants
+# SEC-80: the export holds EVERY user table. Tables without a hand-written section below are exported whole, in
+# primary-key order read from the schema at run time (so a column added later is exported too).
+_EXPORT_RAW_TABLES: tuple[str, ...] = ("import_snapshots", *ledger.USER_TABLES_0004)
+_SELECT_ALL_SQL = {t: "SELECT * FROM " + t for t in _EXPORT_RAW_TABLES}  # noqa: S608 - identifier-asserted constants
+
+
+def _user_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    """Row counts of every user table: the pre-0004 tables and migration 0004's (goals, decisions, snapshots, ...)."""
+    counts = {t: int(conn.execute(_COUNT_SQL[t]).fetchone()[0]) for t in USER_TABLES}
+    counts.update({t: int(conn.execute(_COUNT_SQL_0004[t]).fetchone()[0]) for t in ledger.USER_TABLES_0004})
+    return counts
+
+
+def _rows_in_key_order(conn: sqlite3.Connection, table: str) -> list[dict[str, Any]]:
+    """Every row of ``table`` (a constant statement), ordered in Python by the primary key read from the schema
+    (every column when there is none), so the export is deterministic without building SQL at run time (SEC-65)."""
+    info = conn.execute("SELECT name, pk FROM pragma_table_info(?)", (table,)).fetchall()
+    keys = [str(r["name"]) for r in sorted(info, key=lambda r: int(r["pk"])) if int(r["pk"]) > 0]
+    rows = [dict(r) for r in conn.execute(_SELECT_ALL_SQL[table])]
+
+    def order(row: dict[str, Any]) -> tuple[tuple[str, Any], ...]:
+        return tuple(("", "") if row[k] is None else (type(row[k]).__name__, row[k]) for k in (keys or sorted(row)))
+
+    return sorted(rows, key=order)
 
 
 def inventory(conn: sqlite3.Connection, data_dir: Path) -> dict[str, Any]:
-    user = {t: int(conn.execute(_COUNT_SQL[t]).fetchone()[0]) for t in USER_TABLES}
+    user = _user_counts(conn)
     public = {t: int(conn.execute(_COUNT_SQL[t]).fetchone()[0]) for t in PUBLIC_TABLES}
     pending = len([b for b in _batches(conn) if b["status"] == "previewed"])
     backups = (
@@ -1416,6 +1444,8 @@ def export_all(conn: sqlite3.Connection, now: datetime) -> dict[str, Any]:
             for r in conn.execute("SELECT * FROM settings ORDER BY key")
         ],
     }
+    for table in _EXPORT_RAW_TABLES:
+        sections[table] = _rows_in_key_order(conn, table)
     return {
         "format": "iip.privacy_export@1",
         "generated_at": now.isoformat(),
@@ -1447,7 +1477,7 @@ def export_transactions_csv(conn: sqlite3.Connection) -> bytes:
 def erase(conn: sqlite3.Connection, data_dir: Path, *, delete_backups: bool) -> dict[str, Any]:
     """Delete every user row (SEC-81), with ``secure_delete`` on, then VACUUM and truncate the WAL so the bytes
     are gone from the database files. Public market data and the schema are kept."""
-    counts = {t: int(conn.execute(_COUNT_SQL[t]).fetchone()[0]) for t in USER_TABLES}
+    counts = _user_counts(conn)
     if is_remote(conn):
         return _erase_hosted(conn, counts)
     previous = int(conn.execute("PRAGMA secure_delete").fetchone()[0])
@@ -1456,6 +1486,7 @@ def erase(conn: sqlite3.Connection, data_dir: Path, *, delete_backups: bool) -> 
         with write_tx(conn):
             for t in USER_TABLES:
                 conn.execute(_DELETE_SQL[t])
+            ledger.erase_user_rows(conn)
         conn.execute("VACUUM")
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     finally:
@@ -1488,6 +1519,7 @@ def _erase_hosted(conn: sqlite3.Connection, counts: dict[str, int]) -> dict[str,
     with write_tx(conn):
         for t in USER_TABLES:
             conn.execute(_DELETE_SQL[t])
+        ledger.erase_user_rows(conn)
         conn.execute("DELETE FROM job_progress")
     log.info("user data erased tables=%d (hosted)", len(counts))
     return {

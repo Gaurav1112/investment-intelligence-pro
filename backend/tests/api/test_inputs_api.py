@@ -141,39 +141,47 @@ def test_inflation_shock_and_sharpe_unblocked_over_http(api: API) -> None:  # no
 
 
 def test_mospi_status_and_fetch(api: API, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: F811
+    """A07: MoSPI's CPI API is credential-free. With no env the status is ready (anonymous) and a fetch proceeds
+    without a 409; legacy credential variables are ignored, never sent, and never echoed back."""
     c, h = api
     for var in ("IIP_MOSPI_TOKEN", "IIP_MOSPI_USER", "IIP_MOSPI_PASSWORD"):
         monkeypatch.delenv(var, raising=False)
     st = c.get("/api/inputs/mospi/status").json()
-    assert st["status"] == "REQUIRES_CONFIGURATION" and st["verified"] is False
-    r = c.post("/api/inputs/mospi/fetch", json={"base_year": 2024, "year": 2026, "month": 9}, headers=h)
-    assert r.status_code == 409 and r.json()["detail"]["code"] == "REQUIRES_CONFIGURATION"
+    assert st["status"] == "CONFIGURED" and st["method"] == "anonymous" and st["env_vars"] == []
+    assert st["requires_configuration"] is False and st["verified"] is False
 
-    monkeypatch.setenv("IIP_MOSPI_TOKEN", "tok-test")
-    assert c.get("/api/inputs/mospi/status").json()["status"] == "CONFIGURED"
+    # Synthetic base-2024 record (fictional values), in the API's envelope.
     record = {
-        "baseyear": "2024",
-        "year": 2026,
+        "base_year": "2024",
+        "series": "Current",
+        "year": "2026",
         "month": "September",
         "state": "All India",
         "sector": "Combined",
-        "group": "General",
-        "subgroup": "General",
+        "division": "CPI (General)",
         "index": "123.4",
         "inflation": "1.11",
-        "status": "F",
     }
+    seen: list[httpx.Request] = []
 
-    def handler(_r: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, headers={"content-type": "application/json"}, json={"data": [record]})
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append(req)
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            json={"data": [record], "meta_data": {"totalRecords": 1}, "statusCode": True},
+        )
 
     c.app.app.state.iip.fetcher_factory = lambda: Fetcher(  # type: ignore[attr-defined]
         transport=httpx.MockTransport(handler), resolver=lambda _h: ["23.0.0.1"], clock=lambda: NOW,
         retry=RetryPolicy(max_attempts=1), sleep=lambda _s: None,
     )  # fmt: skip
+    monkeypatch.setenv("IIP_MOSPI_TOKEN", "tok-test")  # a legacy variable: ignored, never sent
     r = c.post("/api/inputs/mospi/fetch", json={"base_year": 2024, "year": 2026, "month": 9}, headers=h)
     assert r.status_code == 200, r.text
     assert r.json()["status"] == "stored" and r.json()["verified"] is False
+    assert seen and all("authorization" not in req.headers for req in seen)
+    assert all("tok-test" not in str(req.url) for req in seen)
     pts = c.get("/api/inputs/cpi").json()["series"][1]["points"]
     assert pts[0]["index"] == "123.4" and pts[0]["source_id"] == "mospi.cpi" and pts[0]["quality_status"] == "ok"
     assert "tok-test" not in json.dumps(c.get("/api/inputs/mospi/status").json())

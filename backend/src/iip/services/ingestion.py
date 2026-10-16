@@ -1,9 +1,15 @@
 """Ingestion pipeline: registry → fetch → parse → validate → normalised store, with a run ledger (ADR-0004).
 
 Data minimisation (AMFI ToU: personal use; do not store a "significant portion"):
-* latest NAV is kept only for Direct-plan Growth-option open-ended schemes, plus anything held or watched;
+* local: latest NAV is kept only for Direct-plan Growth-option open-ended schemes, plus anything held or watched;
+* hosted (``ingest_navall_resumable``, U-01): ONLY held and watched schemes, no name heuristic
+  (:data:`HOSTED_NAVALL_SCOPE`). A fully sold, unwatched scheme is not refreshed but keeps its stored NAVs (SOLD-1,
+  user decision 2026-10-16: :func:`refresh_scheme_codes` decides what is refreshed, :func:`tracked_scheme_codes`
+  what is kept);
 * NAV history is backfilled only on explicit request for individual schemes, keeping just that scheme's rows;
-* raw payloads are hashed and recorded in the run ledger, not archived.
+* raw payloads are hashed and recorded in the run ledger, not archived;
+* the core universe U1 (``rules/core_universe.yaml``, roles only) is tracked automatically ONLY after the user confirms
+  its role bindings (U-07) and ONLY in local mode (U-01): hosted stores held and watched schemes, never U1.
 """
 
 from __future__ import annotations
@@ -11,14 +17,19 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import json
+import re
 import secrets
 import sqlite3
 import time
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Any, cast
+
+import yaml
 
 from iip.data.fetch import Fetcher, FetchError, NoData
 from iip.data.models import DataError, Observation, ParseResult, SchemeRecord
@@ -37,6 +48,7 @@ from iip.data.validators import run_all
 from iip.engine.freshness import nav_is_stale
 from iip.store.coordination import clear_job, clear_jobs, load_job, save_job
 from iip.store.db import write_tx
+from iip.store.ledger import RoleBinding, bind_roles
 from iip.store.observations import ObservationRow, upsert_observations_batch
 
 
@@ -85,6 +97,31 @@ def sync_sources(conn: sqlite3.Connection) -> None:
                     spec.freshness.stale_max,
                 ),
             )
+
+
+def record_failed_run(
+    conn: sqlite3.Connection, source_id: str, now: datetime, error: str, *, once: bool = False
+) -> bool:
+    """Record a failure that happened BEFORE a run could start (e.g. a scheduled job's fetch or a missing poll step),
+    so Data health's last run and the "ingestion run failed" alert show it. ``error`` is a code, never a value
+    (C-13). ``once``: skip when the newest run of the source already failed with the same error (a standing gap,
+    such as a step that is not built, is reported once, not daily). Nothing is written for a source that is not in
+    the stored registry yet. True when a row was written."""
+    if once:
+        last = conn.execute(
+            "SELECT status, error FROM ingestion_runs WHERE source_id=? ORDER BY started_at DESC, run_id DESC LIMIT 1",
+            (source_id,),
+        ).fetchone()
+        if last is not None and last["status"] == "failed" and last["error"] == error:
+            return False
+    run_id = f"run_{now.strftime('%Y%m%dT%H%M%SZ')}_{secrets.token_hex(4)}"
+    with write_tx(conn):
+        cur = conn.execute(
+            "INSERT INTO ingestion_runs(run_id, source_id, started_at, finished_at, status, error)"
+            " SELECT ?, ?, ?, ?, 'failed', ? WHERE EXISTS (SELECT 1 FROM sources WHERE source_id=?)",
+            (run_id, source_id, now.isoformat(), now.isoformat(), error, source_id),
+        )
+    return int(cur.rowcount) == 1
 
 
 def _start_run(conn: sqlite3.Connection, source_id: str, now: datetime) -> str:
@@ -145,12 +182,60 @@ def mark_interrupted_runs(conn: sqlite3.Connection, now: datetime, *, started_be
 
 
 def tracked_scheme_codes(conn: sqlite3.Connection) -> set[int]:
+    """Schemes whose stored NAVs are KEPT: watched, or with any transaction (held now or sold since). Pruning and the
+    hosted purge never remove these, so a sold fund's history stays for past returns and tax records (SOLD-1).
+    Which schemes are REFRESHED is :func:`refresh_scheme_codes`."""
     rows = conn.execute(
         "SELECT i.amfi_code FROM instruments i WHERE i.amfi_code IS NOT NULL AND ("
         " i.instrument_id IN (SELECT instrument_id FROM watchlist) OR"
         " i.instrument_id IN (SELECT instrument_id FROM transactions))"
     ).fetchall()
     return {int(r["amfi_code"]) for r in rows}
+
+
+# Transaction types that move units (portfolio.fifo_positions); dividends (IDCW payouts) move none.
+_UNIT_SIGN = {"buy": 1, "sell": -1}
+
+
+def refresh_scheme_codes(conn: sqlite3.Connection) -> set[int]:
+    """Schemes the hosted/automatic NAV ingestion REFRESHES (user decision 2026-10-16, SOLD-1): watched, or held now
+    (net units across ALL portfolios above zero). A fully sold, unwatched scheme keeps its stored history
+    (:func:`tracked_scheme_codes`) but gets no new NAVs; buying it again or watching it resumes refreshing.
+
+    Units are summed as Decimal (never float), so a position sold to exactly zero is not "held" by rounding. When a
+    ledger row cannot be read as units (or carries units under a type that is not modelled), the scheme counts as
+    held: refreshing one scheme too many is harmless, while stopping a held scheme's refresh would lose data."""
+    rows = conn.execute(
+        "SELECT i.amfi_code, t.txn_type, t.units FROM transactions t JOIN instruments i USING(instrument_id)"
+        " WHERE i.amfi_code IS NOT NULL"
+    ).fetchall()
+    net: dict[int, Decimal] = {}
+    unsure: set[int] = set()
+    for r in rows:
+        code = int(r["amfi_code"])
+        net.setdefault(code, Decimal(0))
+        sign = _UNIT_SIGN.get(str(r["txn_type"]))
+        if sign is None:
+            if r["units"] not in (None, "") and str(r["txn_type"]) != "dividend":
+                unsure.add(code)
+            continue
+        try:
+            units = Decimal(str(r["units"]))
+        except (InvalidOperation, ValueError):
+            unsure.add(code)
+            continue
+        if not units.is_finite():
+            unsure.add(code)
+            continue
+        net[code] += sign * units
+    held = {c for c, u in net.items() if u > 0} | unsure
+    watched = {
+        int(r["amfi_code"])
+        for r in conn.execute(
+            "SELECT i.amfi_code FROM instruments i JOIN watchlist w USING(instrument_id) WHERE i.amfi_code IS NOT NULL"
+        )
+    }
+    return held | watched
 
 
 def in_minimised_scope(rec: SchemeRecord, tracked: set[int]) -> bool:
@@ -259,7 +344,9 @@ def ingest_navall(conn: sqlite3.Connection, fetcher: Fetcher, now: Callable[[], 
         _finish_run(conn, run_id, now(), "failed", 0, 0, None, f"{type(exc).__name__}: {exc}")
         return RunSummary(run_id, source, "failed", 0, 0, 0, f"{type(exc).__name__}: {exc}")
     with _failing_run(conn, run_id, now):
-        tracked = tracked_scheme_codes(conn)
+        # Local only (the hosted path is ingest_navall_resumable): a CONFIRMED core universe is tracked like a holding,
+        # so its daily NAVs are kept and never pruned (U-01 local-first, U-07 confirmation).
+        tracked = tracked_scheme_codes(conn) | core_universe_codes(conn, hosted=False)
         scope = {r.scheme_code for r in result.records if in_minimised_scope(r, tracked)}
         observations = _validated(result)
         with write_tx(conn):
@@ -348,6 +435,47 @@ def prune_untracked_history(conn: sqlite3.Connection, tracked: set[int]) -> int:
             (json.dumps(keep),),
         )
         removed = cur.rowcount
+    return int(removed)
+
+
+# Tables that refer to instruments, split for the hosted purge (U-01). A scheme's instrument row is KEPT while any
+# user-entered row refers to it (deleting it would cascade away the user's own data); derived market data goes with
+# it. tests/hosted/test_u01_hosted_scope.py fails if a new table refers to instruments without being listed here.
+HOSTED_PURGE_KEEPS_IF_REFERENCED = ("transactions", "watchlist", "fund_facts", "holding_goal_map", "rule_role_bindings")
+HOSTED_PURGE_DERIVED = ("mf_schemes", "series_grid", "bond_terms", "deposit_terms")
+
+
+# The purge statements, built once from the module constants above (no input in the text; the scheme codes are a
+# bound JSON parameter).
+_UNTRACKED_SCHEMES = (
+    "SELECT instrument_id FROM instruments WHERE kind='mf_scheme' AND amfi_code IS NOT NULL"
+    " AND amfi_code NOT IN (SELECT value FROM json_each(?))"
+)
+_PURGE_NAVS = (
+    "DELETE FROM observations WHERE kind='nav' AND series_id LIKE 'nav:%'"
+    " AND substr(series_id, 5) NOT IN (SELECT value FROM json_each(?))"
+)
+_PURGE_SERIES_GRID = "DELETE FROM series_grid WHERE instrument_id IN (" + _UNTRACKED_SCHEMES + ")"  # noqa: S608
+_KEEP_REFERENCED = "".join(
+    " AND instrument_id NOT IN (SELECT instrument_id FROM " + t + ")"  # noqa: S608
+    for t in HOSTED_PURGE_KEEPS_IF_REFERENCED
+)
+_PURGE_INSTRUMENTS = "DELETE FROM instruments WHERE instrument_id IN (" + _UNTRACKED_SCHEMES + ")" + _KEEP_REFERENCED  # noqa: S608
+
+
+def purge_untracked_hosted(conn: sqlite3.Connection, tracked: set[int]) -> int:
+    """Hosted data minimisation (U-01, ADR-0017: the hosted store keeps held and watched schemes ONLY). Removes, for
+    every AMFI scheme that is neither held nor watched: ALL its NAV observations (NAVAll and NAV history, latest
+    included), its month-end series and — unless user-entered data refers to it — its instrument and mf_schemes rows.
+    This also clears rows a pre-fix hosted refresh stored for the whole Direct-Growth set. Returns the NAVs removed.
+
+    Local keeps :func:`prune_untracked_history` (latest NAV kept for browsing; backfills and the core universe kept).
+    One transaction; every series is deleted whole, so a correction pair goes together (self-referencing FK holds)."""
+    codes = json.dumps(sorted(str(c) for c in tracked))
+    with write_tx(conn):
+        removed = conn.execute(_PURGE_NAVS, (codes,)).rowcount
+        conn.execute(_PURGE_SERIES_GRID, (codes,))
+        conn.execute(_PURGE_INSTRUMENTS, (codes,))
     return int(removed)
 
 
@@ -726,6 +854,9 @@ def run_batch_backfill_locally(
             return out
 
 
+# U-01 (PLAN §8): the hosted NAVAll path stores rows for held and watched schemes only. The scheduled jobs (cron
+# J1/J2/J4) store NAVAll hosted only while this says so (cron.default_hooks).
+HOSTED_NAVALL_SCOPE = "held_watched"
 NAVALL_JOB = "navall"
 NAVALL_STAGE = "navall:stage:"  # job_progress keys of the staged blocks: navall:stage:0000, navall:stage:0001, …
 NAVALL_CHUNK = 100  # schemes per block: one transaction of ~8 statements on a remote database (ADR-0013)
@@ -745,9 +876,10 @@ def _clear_navall(conn: sqlite3.Connection) -> None:
 def _stage_navall(
     conn: sqlite3.Connection, fetcher: Fetcher, now: Callable[[], datetime], chunk: int
 ) -> dict[str, object]:
-    """First call of a hosted run: fetch NAVAll ONCE, keep only the minimised scope (the same schemes and validated
-    observations :func:`ingest_navall` would store) and stage it in blocks of ``chunk`` schemes, with the progress
-    row, in one transaction. Continuations read the staged blocks and never fetch again. Returns the progress state,
+    """First call of a hosted run: fetch NAVAll ONCE, keep only the HOSTED scope - held and watched schemes, nothing
+    else (U-01; the local Direct-Growth name heuristic does not apply hosted) - with the same validated observations
+    :func:`ingest_navall` would store for them, and stage it in blocks of ``chunk`` schemes, with the progress row,
+    in one transaction. Continuations read the staged blocks and never fetch again. Returns the progress state,
     or the final result if the fetch or parse failed."""
     run_id = _start_run(conn, "amfi.navall", now())
     try:
@@ -758,8 +890,9 @@ def _stage_navall(
         summary = RunSummary(run_id, "amfi.navall", "failed", 0, 0, 0, f"{type(exc).__name__}: {exc}")
         return {"done": True, "phase": "complete", "schemes_done": 0, "schemes_total": 0, **summary.__dict__}
     with _failing_run(conn, run_id, now):
-        tracked = tracked_scheme_codes(conn)
-        records = {r.scheme_code: r for r in result.records if in_minimised_scope(r, tracked)}
+        # U-01: held/watched only; SOLD-1: a fully sold, unwatched scheme is not refreshed (its history is kept).
+        tracked = refresh_scheme_codes(conn)
+        records = {r.scheme_code: r for r in result.records if r.scheme_code in tracked}
         scope = sorted(records)
         rows: dict[int, list[list[object]]] = {}
         for o in _validated(result):
@@ -786,8 +919,8 @@ def ingest_navall_resumable(
     conn: sqlite3.Connection, fetcher: Fetcher, now: Callable[[], datetime], remaining: Callable[[], float],
     monotonic: Callable[[], float] = time.monotonic, chunk: int = NAVALL_CHUNK,
 ) -> dict[str, object]:  # fmt: skip
-    """Hosted NAVAll ingestion in bounded steps (ADR-0013): the same scope, validation and storage as
-    :func:`ingest_navall`, in blocks of ``chunk`` schemes.
+    """Hosted NAVAll ingestion in bounded steps (ADR-0013): the same validation and storage as
+    :func:`ingest_navall`, in blocks of ``chunk`` schemes, for held and watched schemes ONLY (U-01).
 
     * The first call fetches and stages the minimised scope (:func:`_stage_navall`); continuations make NO request.
     * Before EVERY block, the first included, the step stops unless ``remaining()`` seconds cover the block at the
@@ -841,7 +974,7 @@ def ingest_navall_resumable(
             if int(str(state["next_block"])) < blocks:
                 return {"done": False, "phase": "storing", "schemes_done": _done(state), "schemes_total": total,
                         "seconds_per_scheme": state["seconds_per_scheme"]}  # fmt: skip
-            pruned = prune_untracked_history(conn, tracked_scheme_codes(conn))
+            pruned = purge_untracked_hosted(conn, tracked_scheme_codes(conn))
     except BaseException:
         _clear_navall(conn)
         raise
@@ -849,7 +982,7 @@ def ingest_navall_resumable(
     rows_ok, rows_rejected = int(str(state["rows_ok"])), int(str(state["rows_rejected"]))
     status = "ok" if rows_rejected == 0 else "partial"
     _finish_run(conn, run_id, now(), status, rows_ok, rows_rejected, str(state["sha256"]), "")
-    detail = f"{total} schemes in the minimised scope; {pruned} older NAVs of untracked schemes pruned"
+    detail = f"{total} held or watched schemes stored; {pruned} NAVs of schemes no longer held or watched removed"
     summary = RunSummary(run_id, "amfi.navall", status, rows_ok, rows_rejected, int(str(state["stored"])), detail)
     return {"done": True, "phase": "complete", "schemes_done": total, "schemes_total": total,
             "seconds_per_scheme": state["seconds_per_scheme"], **summary.__dict__}  # fmt: skip
@@ -900,3 +1033,459 @@ def latest_freshness(conn: sqlite3.Connection, code: int, as_of: datetime) -> tu
         return "FIXTURE", row["observation_date"]
     observed = date.fromisoformat(row["observation_date"])
     return ("STALE" if nav_is_stale(observed, as_of.date()) else "END_OF_DAY"), row["observation_date"]
+
+
+# ----------------------------------------------------------------------------- core universe U1 (PLAN.md row B06)
+# Roles come from rules/core_universe.yaml (roles only: no scheme names, codes or ISINs in the public repo). The role ->
+# scheme binding is user configuration in the database (rule_role_bindings). Decisions: U-07 (a deterministic proposal,
+# nothing tracked until the user confirms) and U-01 (local-first: confirmation and tracking refuse to run hosted).
+
+CORE_UNIVERSE_FILE = Path(__file__).resolve().parent.parent / "rules" / "core_universe.yaml"
+CORE_CONFIRMED_KEY = "core_universe.confirmed"
+CORE_RULE_OF_CHOICE = "user_confirmed"
+_ROLE_ID = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+$")
+# A scheme code (AMFI codes are 5-6 digits) or an ISIN must never appear in the committed role file.
+_FORBIDDEN_IN_SPEC = re.compile(r"(?<![\d-])\d{5,}(?![\d-])|\bIN[A-Z0-9]{9}\d\b")
+_AMFI_SUFFIX = re.compile(r"\s*\(amfi \d+\)\s*$")
+
+
+class CoreUniverseError(Exception):
+    """A core-universe request was refused. ``code`` is stable; the message names no values."""
+
+    def __init__(self, code: str, message: str, status: int = 422) -> None:
+        super().__init__(message)
+        self.code, self.message, self.status = code, message, status
+
+
+@dataclass(frozen=True)
+class CoreRole:
+    role: str
+    exposure: str
+    asset_class: str
+    category_any: tuple[re.Pattern[str], ...]
+    name_all: tuple[re.Pattern[str], ...]
+    name_none: tuple[re.Pattern[str], ...]
+
+    def matches(self, name: str, category: str) -> bool:
+        n, c = _match_text(_AMFI_SUFFIX.sub("", name.casefold())), _match_text(category)
+        return (
+            any(p.search(c) for p in self.category_any)
+            and all(p.search(n) for p in self.name_all)
+            and not any(p.search(n) for p in self.name_none)
+        )
+
+
+@dataclass(frozen=True)
+class CoreUniverseSpec:
+    universe_id: str
+    status: str
+    max_schemes: int
+    history_floor: date
+    selection_rule: str
+    roles: tuple[CoreRole, ...]
+
+    def role(self, role_id: str) -> CoreRole | None:
+        return next((r for r in self.roles if r.role == role_id), None)
+
+
+def _match_text(text: str) -> str:
+    return " ".join(re.sub(r"[^a-z0-9&]+", " ", text.casefold()).split())
+
+
+def _patterns(raw: object, what: str) -> tuple[re.Pattern[str], ...]:
+    if not isinstance(raw, list) or not all(isinstance(p, str) and p for p in raw):
+        raise ValueError(f"core universe: {what} must be a list of non-empty regular expressions")
+    try:
+        return tuple(re.compile(p) for p in raw)
+    except re.error as exc:
+        raise ValueError(f"core universe: bad pattern in {what}") from exc
+
+
+def parse_core_universe(text: str) -> CoreUniverseSpec:
+    """Validate the role file. Fails closed on anything that looks like a scheme code or ISIN, on duplicate roles,
+    on more roles than ``max_schemes``, and on a plan/option other than Direct-Growth."""
+    if _FORBIDDEN_IN_SPEC.search(text):
+        raise ValueError("core universe: the role file must not contain scheme codes or ISINs")
+    data = yaml.safe_load(text)
+    if not isinstance(data, dict) or data.get("schema_version") != 1:
+        raise ValueError("core universe: schema_version 1 expected")
+    if data.get("plan") != "direct" or data.get("option") != "growth":
+        raise ValueError("core universe: one Direct-plan Growth-option scheme per role")
+    max_schemes = data.get("max_schemes")
+    if not isinstance(max_schemes, int) or isinstance(max_schemes, bool) or not 1 <= max_schemes <= 40:
+        raise ValueError("core universe: max_schemes must be an integer in 1..40 (U-07)")
+    roles: list[CoreRole] = []
+    for raw in data.get("roles") or []:
+        role = str(raw.get("role", ""))
+        if not _ROLE_ID.fullmatch(role):
+            raise ValueError(f"core universe: bad role id {role!r}")
+        category_any = _patterns(raw.get("category_any"), f"{role}.category_any")
+        name_all = _patterns(raw.get("name_all"), f"{role}.name_all")
+        if not category_any or not name_all:
+            raise ValueError(f"core universe: {role} needs category_any and name_all patterns")
+        roles.append(CoreRole(role, str(raw.get("exposure", "")), str(raw.get("asset_class", "")), category_any,
+                              name_all, _patterns(raw.get("name_none", []), f"{role}.name_none")))  # fmt: skip
+    ids = [r.role for r in roles]
+    if not roles or len(set(ids)) != len(ids):
+        raise ValueError("core universe: roles must be present and unique")
+    if len(roles) > max_schemes:
+        raise ValueError("core universe: more roles than max_schemes")
+    return CoreUniverseSpec(
+        universe_id=str(data.get("universe_id", "U1")), status=str(data.get("status", "NOT VERIFIED")),
+        max_schemes=max_schemes, history_floor=date.fromisoformat(str(data["history_floor"])),
+        selection_rule=str(data.get("selection_rule", "")), roles=tuple(roles),
+    )  # fmt: skip
+
+
+def load_core_universe(path: Path | None = None) -> CoreUniverseSpec:
+    return parse_core_universe((path or CORE_UNIVERSE_FILE).read_text(encoding="utf-8"))
+
+
+def _is_growth(option: str | None, name: str) -> bool:
+    text = _match_text(f"{option or ''} {name}")
+    return "growth" in text.split() and "idcw" not in text and "dividend" not in text
+
+
+@dataclass(frozen=True)
+class RoleProposal:
+    role: str
+    exposure: str
+    status: str  # PROPOSED | NO_CANDIDATE
+    instrument_id: str | None = None
+    amfi_code: int | None = None
+    name: str | None = None
+    first_nav_date: str | None = None
+    expense_ratio: str | None = None
+    candidates: int = 0
+    decided_by: str | None = None  # only_candidate | longest_stored_history | lowest_expense_ratio | lowest_amfi_code
+
+
+_DIRECT_SCHEMES = (
+    "SELECT i.instrument_id, i.name, i.amfi_code, m.category_raw, m.option_type, m.expense_ratio, m.plan, m.amc,"
+    " (SELECT MIN(o.observation_date) FROM observations o WHERE o.series_id = 'nav:' || i.amfi_code"
+    "  AND o.quality_status != 'rejected') AS first_nav"
+    " FROM instruments i JOIN mf_schemes m ON m.instrument_id = i.instrument_id"
+    " WHERE i.kind = 'mf_scheme' AND i.amfi_code IS NOT NULL"
+)
+
+
+def _rank_key(row: sqlite3.Row) -> tuple[Any, ...]:
+    er: Decimal | None
+    try:
+        er = Decimal(row["expense_ratio"]) if row["expense_ratio"] else None
+    except InvalidOperation:
+        er = None
+    return (row["first_nav"] is None, row["first_nav"] or "", er is None, er or Decimal(0), int(row["amfi_code"]))
+
+
+def _decided_by(ranked: list[sqlite3.Row]) -> str:
+    if len(ranked) == 1:
+        return "only_candidate"
+    a, b = _rank_key(ranked[0]), _rank_key(ranked[1])
+    if a[:2] != b[:2]:
+        return "longest_stored_history"
+    if a[2:4] != b[2:4]:
+        return "lowest_expense_ratio"
+    return "lowest_amfi_code"
+
+
+def propose_core_universe(conn: sqlite3.Connection, spec: CoreUniverseSpec | None = None) -> list[RoleProposal]:
+    """The deterministic U1 proposal over the schemes stored locally (one read statement; NOTHING is written).
+
+    Per role: Direct-plan Growth-option schemes whose name and category match the role, ranked by the earliest stored
+    NAV date (longest stored history), then the lowest stored expense ratio, then the lowest AMFI code (a stable
+    tie-break, not a quality signal). ``decided_by`` says which key decided. A role without a candidate is
+    NO_CANDIDATE. A scheme is proposed for at most one role (the first role in file order that ranks it first)."""
+    spec = spec or load_core_universe()
+    rows = [
+        r for r in conn.execute(_DIRECT_SCHEMES + " AND m.plan = 'direct'").fetchall()
+        if _is_growth(r["option_type"], r["name"])
+    ]  # fmt: skip
+    taken: set[str] = set()
+    out: list[RoleProposal] = []
+    for role in spec.roles:
+        ranked = sorted(
+            (r for r in rows if r["instrument_id"] not in taken and role.matches(r["name"], r["category_raw"] or "")),
+            key=_rank_key,
+        )
+        if not ranked:
+            out.append(RoleProposal(role.role, role.exposure, "NO_CANDIDATE"))
+            continue
+        top = ranked[0]
+        taken.add(top["instrument_id"])
+        out.append(RoleProposal(
+            role.role, role.exposure, "PROPOSED", top["instrument_id"], int(top["amfi_code"]), top["name"],
+            top["first_nav"], top["expense_ratio"], len(ranked), _decided_by(ranked),
+        ))  # fmt: skip
+    return out
+
+
+def _confirmed(conn: sqlite3.Connection) -> dict[str, Any] | None:
+    row = conn.execute("SELECT value_json FROM settings WHERE key=?", (CORE_CONFIRMED_KEY,)).fetchone()
+    if row is None:
+        return None
+    value = json.loads(row["value_json"])
+    return value if isinstance(value, dict) and value.get("mode") == "local" else None
+
+
+def confirm_core_universe(
+    conn: sqlite3.Connection, bindings: Mapping[str, str], *, hosted: bool, now: datetime,
+    spec: CoreUniverseSpec | None = None,
+) -> dict[str, Any]:  # fmt: skip
+    """Record the user's confirmation of role -> scheme bindings (U-07); merges with roles confirmed earlier.
+
+    Refused hosted (U-01). Each instrument must be a stored Direct-plan Growth-option scheme, bound to one role only;
+    the confirmed set never exceeds ``max_schemes``. The bindings and the confirmation commit in ONE transaction."""
+    if hosted:
+        raise CoreUniverseError(
+            "CORE_UNIVERSE_LOCAL_ONLY",
+            "the core universe is tracked only in local mode (decision U-01); hosted stores held and watched schemes",
+            409,
+        )
+    spec = spec or load_core_universe()
+    if not bindings:
+        raise CoreUniverseError("NOTHING_TO_CONFIRM", "no role binding was given")
+    unknown = sorted(r for r in bindings if spec.role(r) is None)
+    if unknown:
+        raise CoreUniverseError("UNKNOWN_ROLE", f"not a core-universe role: {', '.join(unknown)}")
+    previous = _confirmed(conn) or {}
+    roles = sorted(set(previous.get("roles", [])) | set(bindings))
+    if len(roles) > spec.max_schemes:
+        raise CoreUniverseError("TOO_MANY_SCHEMES", f"at most {spec.max_schemes} core-universe schemes (U-07)")
+    current = {
+        r["role"]: r["instrument_id"] for r in conn.execute("SELECT role, instrument_id FROM rule_role_bindings")
+    }
+    final = {role: bindings.get(role, current.get(role)) for role in roles}
+    ids = [i for i in final.values() if i]
+    if len(set(ids)) != len(ids):
+        raise CoreUniverseError("DUPLICATE_INSTRUMENT", "one scheme can be bound to one core-universe role only")
+    wanted = sorted(set(bindings.values()))
+    found = {
+        r["instrument_id"]: r
+        for r in conn.execute(
+            _DIRECT_SCHEMES + " AND i.instrument_id IN (SELECT value FROM json_each(?))",  # noqa: S608 - constant
+            (json.dumps(wanted),),
+        ).fetchall()
+    }
+    for iid in wanted:
+        row = found.get(iid)
+        if row is None:
+            raise CoreUniverseError("UNKNOWN_INSTRUMENT", f"{iid} is not a stored mutual-fund scheme", 404)
+        if row["plan"] != "direct":
+            raise CoreUniverseError("NOT_DIRECT_PLAN", f"{iid} is not a Direct-plan scheme")
+        if not _is_growth(row["option_type"], row["name"]):
+            raise CoreUniverseError("NOT_GROWTH_OPTION", f"{iid} is not a Growth-option scheme")
+    at = now.isoformat()
+    record = {"roles": roles, "confirmed_at": at, "mode": "local", "universe_id": spec.universe_id}
+    with write_tx(conn):
+        bind_roles(conn, [RoleBinding(role, iid, CORE_RULE_OF_CHOICE, at) for role, iid in sorted(bindings.items())])
+        conn.execute(
+            "INSERT INTO settings(key, value_json) VALUES (?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json",
+            (CORE_CONFIRMED_KEY, json.dumps(record, sort_keys=True)),
+        )
+    return {**record, "bindings": final}
+
+
+def withdraw_core_universe(conn: sqlite3.Connection) -> bool:
+    """Stop tracking U1 (the bindings stay as configuration; history already stored is kept like any backfill)."""
+    with write_tx(conn):
+        cur = conn.execute("DELETE FROM settings WHERE key=?", (CORE_CONFIRMED_KEY,))
+    return int(cur.rowcount) == 1
+
+
+def core_universe_codes(conn: sqlite3.Connection, *, hosted: bool) -> set[int]:
+    """AMFI codes of the CONFIRMED core universe (one statement). Always empty hosted (U-01) and before the user
+    confirms (U-07)."""
+    if hosted:
+        return set()
+    rec = _confirmed(conn)
+    if rec is None:
+        return set()
+    rows = conn.execute(
+        "SELECT i.amfi_code FROM rule_role_bindings b JOIN instruments i ON i.instrument_id = b.instrument_id"
+        " WHERE b.role IN (SELECT value FROM json_each(?)) AND i.amfi_code IS NOT NULL",
+        (json.dumps(rec.get("roles", [])),),
+    ).fetchall()
+    return {int(r["amfi_code"]) for r in rows}
+
+
+@dataclass(frozen=True)
+class CoreGap:
+    amfi_code: int
+    amc: str
+    last_history_date: str | None
+    start: date
+
+
+def core_universe_gaps(conn: sqlite3.Connection, *, hosted: bool, floor: date | None = None) -> list[CoreGap]:
+    """Per confirmed U1 scheme: the NAV-history window still to fetch (one statement). It starts the day after the
+    newest stored ``amfi.navhistory`` row, or at the history floor when there is none (Direct plans: 2013-01-01)."""
+    codes = core_universe_codes(conn, hosted=hosted)
+    if not codes:
+        return []
+    start_floor = floor or load_core_universe().history_floor
+    rows = conn.execute(
+        "SELECT i.amfi_code, m.amc, (SELECT MAX(o.observation_date) FROM observations o"
+        "  WHERE o.series_id = 'nav:' || i.amfi_code AND o.source_id = 'amfi.navhistory') AS last"
+        " FROM instruments i JOIN mf_schemes m ON m.instrument_id = i.instrument_id"
+        " WHERE i.amfi_code IN (SELECT value FROM json_each(?))",
+        (json.dumps(sorted(str(c) for c in codes)),),
+    ).fetchall()
+    out = []
+    for r in sorted(rows, key=lambda r: int(r["amfi_code"])):
+        last = r["last"]
+        start = date.fromisoformat(last) + timedelta(days=1) if last else start_floor
+        out.append(CoreGap(int(r["amfi_code"]), str(r["amc"] or ""), last, max(start, start_floor)))
+    return out
+
+
+def track_core_universe(
+    conn: sqlite3.Connection, fetcher: Fetcher, *, now: Callable[[], datetime],
+    pause: Callable[[float], object] | None, hosted: bool, floor: date | None = None,
+    max_id: int = MAX_FUND_HOUSE_ID,
+) -> dict[str, Any]:  # fmt: skip
+    """Automatic U1 history gap fill (no manual backfill): every confirmed scheme is fetched from its gap start to
+    today, one pass per fund house (the batch backfill), batched by start date. Local only (U-01); a no-op until the
+    user confirms (U-07). Only the bound schemes' rows are kept (AMFI terms)."""
+    if hosted:
+        raise CoreUniverseError(
+            "CORE_UNIVERSE_LOCAL_ONLY", "core-universe tracking runs only in local mode (decision U-01)", 409
+        )
+    if _confirmed(conn) is None:
+        return {"status": "NOT_CONFIRMED", "schemes": 0, "batches": [], "skipped": []}
+    if backfill_in_progress(conn):
+        raise CoreUniverseError("BACKFILL_IN_PROGRESS", "another backfill is running; try again later", 409)
+    end = now().date()
+    gaps = core_universe_gaps(conn, hosted=False, floor=floor)
+    skipped = [{"amfi_code": g.amfi_code, "reason": "AMC_UNKNOWN"} for g in gaps if not g.amc]
+    todo = [g for g in gaps if g.amc and g.start <= end]
+    by_start: dict[date, dict[str, list[int]]] = {}
+    for g in todo:
+        by_start.setdefault(g.start, {}).setdefault(g.amc, []).append(g.amfi_code)
+    batches: list[dict[str, Any]] = []
+    for start in sorted(by_start):
+        start_batch_backfill(conn, groups=by_start[start], skipped=[], start=start, end=end, now=now)
+        out = run_batch_backfill_locally(conn, fetcher, now=now, pause=pause, max_id=max_id)
+        batches.append({"start": start.isoformat(), "end": end.isoformat(), "status": out["status"],
+                        "stored": out["stored"], "run_id": out["run_id"],
+                        "schemes": sorted(c for codes in by_start[start].values() for c in codes)})  # fmt: skip
+    statuses = {b["status"] for b in batches}
+    if not batches:
+        status = "up_to_date"
+    elif statuses == {"ok"}:
+        status = "ok"
+    elif statuses == {"failed"}:
+        status = "failed"
+    else:
+        status = "partial"
+    return {"status": status, "schemes": len(todo), "batches": batches, "skipped": skipped,
+            "up_to_date": len(gaps) - len(todo) - len(skipped)}  # fmt: skip
+
+
+# ----------------------------------------------------------------------------- operator task: NSE holiday calendars
+# verify-references.md R6 / §9 and PLAN.md §4 rank 14: the XBOM trading-calendar oracle ends 2026-12-31 and fails
+# closed after it, and no task existed to load the 2027 NSE holiday circular. NSE's terms restrict automated use, so the
+# list is entered BY HAND from the circular; this module only records the task and stores the entered list.
+
+HOLIDAY_CALENDAR_KEY = "calendar.nse_holidays:"
+HOLIDAY_TASK_LEAD_MONTH = 10  # PARAMETER: next year's task opens on 1-Oct (NSE's circular date is NOT VERIFIED)
+
+
+@dataclass(frozen=True)
+class OperatorTask:
+    task_id: str
+    title: str
+    due: str
+    status: str  # OPEN | DONE
+    detail: str
+
+
+def nse_holidays(conn: sqlite3.Connection, year: int) -> frozenset[date] | None:
+    """The hand-entered NSE trading holidays of ``year``, or ``None`` when none were entered (callers abstain)."""
+    row = conn.execute("SELECT value_json FROM settings WHERE key=?", (f"{HOLIDAY_CALENDAR_KEY}{year}",)).fetchone()
+    if row is None:
+        return None
+    return frozenset(date.fromisoformat(d) for d in json.loads(row["value_json"])["dates"])
+
+
+def record_nse_holidays(
+    conn: sqlite3.Connection, year: int, dates: Sequence[date], *, circular_ref: str, now: datetime
+) -> int:
+    """Store the NSE holiday list of one year, typed from NSE's circular. Every date must fall in ``year``; the
+    circular reference (number or URL) is required. Status stays NOT VERIFIED (typed by hand). Returns the count."""
+    ref = (circular_ref or "").strip()
+    if not ref or len(ref) > 300:
+        raise ValueError("the NSE circular reference is required")
+    days = sorted(set(dates))
+    if not days or any(not isinstance(d, date) or isinstance(d, datetime) or d.year != year for d in days):
+        raise ValueError(f"every holiday must be a date in {year}")
+    value = {"dates": [d.isoformat() for d in days], "circular_ref": ref, "entered_at": now.isoformat(),
+             "status": "NOT VERIFIED"}  # fmt: skip
+    with write_tx(conn):
+        conn.execute(
+            "INSERT INTO settings(key, value_json) VALUES (?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json",
+            (f"{HOLIDAY_CALENDAR_KEY}{year}", json.dumps(value, sort_keys=True)),
+        )
+    return len(days)
+
+
+def holiday_calendar_tasks(conn: sqlite3.Connection, today: date) -> list[OperatorTask]:
+    """Open/done tasks for the NSE holiday lists the app needs: this year, and next year from 1-Oct. The 2027 task
+    (due 2026-12-31, when the XBOM oracle stops) is the one PLAN.md §4 rank 14 asks for."""
+    years = [today.year] + ([today.year + 1] if today.month >= HOLIDAY_TASK_LEAD_MONTH else [])
+    out: list[OperatorTask] = []
+    for y in years:
+        done = nse_holidays(conn, y) is not None
+        out.append(OperatorTask(
+            task_id=f"NSE_HOLIDAY_CALENDAR_{y}", title=f"Load the NSE {y} trading-holiday list by hand",
+            due=f"{y - 1}-12-31", status="DONE" if done else "OPEN",
+            detail=("Entered from NSE's circular." if done else
+                    f"Download NSE's {y} holiday circular yourself (no automated fetch: NSE terms), then enter its "
+                    "dates with record_nse_holidays. Until then business-day counts for that year abstain or "
+                    "fall back to weekdays only (CALENDAR_UNVERIFIED)."),
+        ))  # fmt: skip
+    return out
+
+
+# ----------------------------------------------------------------------------- local command line (U-01 local-first)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """``python -m iip.services.ingestion track-core-universe [--db PATH]``: the local U1 gap fill, for a scheduler
+    on the user's own machine (e.g. launchd). Refuses hosted configuration (IIP_DEPLOY=vercel). Prints counts only."""
+    import argparse  # noqa: PLC0415 - command line only
+    import os  # noqa: PLC0415
+
+    from iip.store.db import connect  # noqa: PLC0415
+
+    parser = argparse.ArgumentParser(prog="python -m iip.services.ingestion")
+    parser.add_argument("command", choices=["track-core-universe"])
+    parser.add_argument("--db", type=Path, default=None, help="SQLite file (default: $IIP_DATA_DIR/iip.db)")
+    args = parser.parse_args(argv)
+    if os.environ.get("IIP_DEPLOY", "local") != "local":
+        print("refused: core-universe tracking runs only in local mode (decision U-01)")
+        return 2
+    db = args.db or Path(os.environ.get("IIP_DATA_DIR", str(Path.home() / ".iip"))) / "iip.db"
+    if not db.exists():
+        print("refused: no local database; start the app once (make run)")
+        return 2
+    conn = connect(db)
+    try:
+        sync_sources(conn)
+        out = track_core_universe(
+            conn, Fetcher(), now=lambda: datetime.now().astimezone(), pause=time.sleep, hosted=False
+        )
+    except CoreUniverseError as exc:
+        print(f"refused: {exc.code}")
+        return 1
+    finally:
+        conn.close()
+    stored = sum(int(b["stored"]) for b in out["batches"])
+    print(f"core universe: {out['status']}; {out['schemes']} scheme(s) to fill; {stored} NAV row(s) stored")
+    return 0 if out["status"] in ("ok", "up_to_date", "NOT_CONFIRMED") else 1
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised by hand
+    raise SystemExit(main())

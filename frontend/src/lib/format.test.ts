@@ -63,6 +63,11 @@ describe("pct", () => {
     ["0", "0.00 %"],
     ["0.00534", "+0.53 %"],
     ["0.12", "+12.00 %"],
+    // Fewer than two fraction digits: the point moves past the last digit and must pad (was "5.00 %" for "0.5").
+    ["0.5", "+50.00 %"],
+    ["1", "+100.00 %"],
+    ["-0.1", "−10.00 %"],
+    ["2.5", "+250.00 %"],
   ])("%s → %s", (v, out) => expect(pct(v)).toBe(out));
 });
 

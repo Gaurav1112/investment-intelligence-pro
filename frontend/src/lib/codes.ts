@@ -27,6 +27,7 @@ const LABELS: Record<string, string> = {
   FIXTURE_NOT_MARKET_DATA: "FIXTURE — not market data",
   TAX_RULE_UNVERIFIED: "Tax rule not yet verified",
   TAX_CLASS_INFERRED_FROM_CATEGORY: "Tax class inferred from category",
+  TAX_CLASS_INFERRED_FROM_NAME: "Tax class inferred from the index named in the scheme name",
   LOW_EVIDENCE: "Low evidence",
   EXCEEDS_DICGC_LIMIT_AT_THIS_BANK: "Partly outside DICGC cover",
   NOT_DICGC_INSURED: "Not DICGC insured",

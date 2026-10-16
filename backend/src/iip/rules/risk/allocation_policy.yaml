@@ -1,0 +1,78 @@
+# L5 target allocation policy — STRUCTURE ONLY.  design-risk-first.md §5.6; audit-journey.md C2; package A11.
+#
+# The target weights are USER DECISIONS recorded with a date (decision U-04; stored in the policy_versions table,
+# package A10).  The engine never invents them, so this public file ships NO target values: the loader refuses a
+# file with any target in it.  User targets are validated against this structure by
+# loader.parse_user_targets(); each is then capped by the loss-budget equity cap (w = min(policy, e_cap)).
+#
+# Every row carries source_url, verification_status and effective_from (the loader rejects a row without them).
+
+schema_version: 1
+table_version: allocation-policy@2026-10-16.r1
+targets_source: USER_DECISION
+
+sleeves: [EQUITY, DEBT, GOLD, CASH_LIKE]
+
+# Objectives are the existing ranking objectives (engine/ranking.py Objective, A-E).
+objectives: [A_capital_preservation, B_income, C_liquidity, D_growth, E_aggressive_growth]
+
+# Horizon bands: years to the goal date, lower bound inclusive, upper bound exclusive (null = open-ended).
+horizon_bands:
+  - rule_id: POLICY-HORIZON-H0
+    band_id: H0_UNDER_1Y
+    min_years: "0"
+    max_years: "1"
+    effective_from: 2026-10-16
+    source_url: doc:docs/research/wave1/audit-journey.md
+    verification_status: PARAMETER
+    notes: 'Band edges follow the audit-journey C2 sketch (< 1 y, 1-3 y, > 5 y); the 3-5 y band fills the gap.'
+  - rule_id: POLICY-HORIZON-H1
+    band_id: H1_1_TO_3Y
+    min_years: "1"
+    max_years: "3"
+    effective_from: 2026-10-16
+    source_url: doc:docs/research/wave1/audit-journey.md
+    verification_status: PARAMETER
+  - rule_id: POLICY-HORIZON-H2
+    band_id: H2_3_TO_5Y
+    min_years: "3"
+    max_years: "5"
+    effective_from: 2026-10-16
+    source_url: doc:docs/research/wave1/audit-journey.md
+    verification_status: PARAMETER
+  - rule_id: POLICY-HORIZON-H3
+    band_id: H3_5Y_PLUS
+    min_years: "5"
+    max_years: null
+    effective_from: 2026-10-16
+    source_url: doc:docs/research/wave1/audit-journey.md
+    verification_status: PARAMETER
+
+# Rebalancing parameters with cited defaults (U-04 default until decided: ±5 pp, annual review, cash-flow-only).
+parameters:
+  - rule_id: POLICY-BAND
+    parameter: band_abs
+    value: "0.05"
+    effective_from: 2026-10-16
+    source_url: doc:docs/research/wave1/design-risk-first.md#56-l5-target-allocation-and-bands--policyrebalance1
+    verification_status: PARAMETER
+    notes: >-
+      Absolute ±5 percentage points. Vanguard Nov-2015 edition ("annual or semiannual monitoring, with rebalancing
+      at 5% thresholds"); US evidence, transfer to India NOT VERIFIED.
+  - rule_id: POLICY-REVIEW
+    parameter: review_cadence
+    value: ANNUAL
+    effective_from: 2026-10-16
+    source_url: doc:docs/research/wave1/PLAN.md#3-decisions-only-you-can-make
+    verification_status: PARAMETER
+    notes: 'U-04 default until decided.'
+  - rule_id: POLICY-SELLING
+    parameter: rebalance_mode
+    value: CASH_FLOW_ONLY
+    effective_from: 2026-10-16
+    source_url: doc:docs/research/wave1/PLAN.md#3-decisions-only-you-can-make
+    verification_status: PARAMETER
+    notes: 'U-04 default until decided; sales are never triggered by a drawdown.'
+
+# Must stay empty in the repo: targets come from the user's dated decisions.
+targets: []

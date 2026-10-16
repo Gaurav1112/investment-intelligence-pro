@@ -20,6 +20,9 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from iip.api.security import (
+    CRON_RATE_KEY,
+    CRON_RATE_LIMIT,
+    CRON_RATE_WINDOW_S,
     SESSION_COOKIE,
     DbRateLimiter,
     DbSessionStore,
@@ -28,13 +31,14 @@ from iip.api.security import (
     SecurityMiddleware,
     SessionBackend,
     SessionStore,
+    cron_auth_from_env,
 )
 from iip.api.settings import Settings, ensure_access_token
 from iip.data.fetch import CircuitBreaker, Fetcher
 from iip.services import ingestion
 from iip.store import coordination
 from iip.store.coordination import DbLease
-from iip.store.db import connect, connect_libsql, current_version, migrate
+from iip.store.db import connect, connect_libsql, current_version, ensure_schema
 
 log = logging.getLogger("iip.api")
 APP_VERSION = "0.1.0"
@@ -82,6 +86,7 @@ class AppState:
         self.job_budget_s = HOSTED_JOB_BUDGET_S
         self.sessions: SessionBackend
         self.login_limiter: LoginLimiter
+        self.cron_limiter: DbRateLimiter  # hosted only (the cron route does not exist locally)
         # Only one NAV-history backfill runs at a time, so AMFI sees at most the paced rate (C-16).
         self.backfill_lock: threading.Lock | DbLease
         self.navall_lock: threading.Lock | DbLease  # hosted only: one resumable NAVAll job at a time
@@ -92,6 +97,10 @@ class AppState:
             epoch = self.epoch
             self.sessions = DbSessionStore(lambda: self.conn, clock=epoch)
             self.login_limiter = DbRateLimiter(lambda: self.conn, "login", limit=10, window_s=60, clock=epoch)
+            # A03 / SEC-cron-3: wrong cron secrets are rate-limited in the database, like login.
+            self.cron_limiter = DbRateLimiter(
+                lambda: self.conn, CRON_RATE_KEY, limit=CRON_RATE_LIMIT, window_s=CRON_RATE_WINDOW_S, clock=epoch
+            )
             self.backfill_lock = DbLease(lambda: self.conn, "backfill", ttl_s=LEASE_TTL_S, clock=epoch)
             self.navall_lock = DbLease(lambda: self.conn, "navall", ttl_s=LEASE_TTL_S, clock=epoch)
         else:
@@ -102,13 +111,19 @@ class AppState:
             self.token = ensure_access_token(settings) if settings.auth else ""
             self.backfill_lock = threading.Lock()
             self.navall_lock = threading.Lock()
-        migrate(self.conn, clock().isoformat())
+        # A05 / RC-5: a cold start on a current database issues read-only statements only (schema version, then the
+        # interrupted-run probe). It writes only when there is something to write: a pending migration, or a run
+        # that really was cut off.
+        ensure_schema(self.conn, clock().isoformat())
         if not self.hosted:
             _restrict_db_files(self.settings.db_path)
         # Hosted: another instance may be running a job right now, so only runs older than any function could live
         # are "interrupted"; locally one process means every 'running' row was cut off.
-        started_before = clock() - timedelta(seconds=LEASE_TTL_S) if self.hosted else None
-        if ingestion.mark_interrupted_runs(self.conn, clock(), started_before=started_before):
+        now = clock()
+        started_before = now - timedelta(seconds=LEASE_TTL_S) if self.hosted else None
+        if _has_interrupted_runs(self.conn, now, started_before) and ingestion.mark_interrupted_runs(
+            self.conn, now, started_before=started_before
+        ):
             log.warning("ingestion runs left 'running' by a previous process were marked failed (interrupted)")
 
     def epoch(self) -> float:
@@ -150,6 +165,22 @@ class AppState:
             for c in self._all:
                 c.close()
             self._all.clear()
+
+
+def _has_interrupted_runs(conn: sqlite3.Connection, now: datetime, started_before: datetime | None) -> bool:
+    """Read-only twin of the ``WHERE`` clause in :func:`ingestion.mark_interrupted_runs`, so startup issues its
+    ``UPDATE`` (a write, and a hosted round trip) only when at least one row would change. Keep the two in step:
+    ``tests/api/test_startup_readonly.py`` checks that a live resumable job's run causes no write."""
+    if started_before is None:
+        row = conn.execute("SELECT 1 FROM ingestion_runs WHERE status='running' LIMIT 1").fetchone()
+    else:
+        row = conn.execute(
+            "SELECT 1 FROM ingestion_runs WHERE status='running'"
+            " AND started_at < ? AND run_id NOT IN (SELECT json_extract(state_json, '$.run_id') FROM job_progress"
+            " WHERE updated_at >= ? AND json_extract(state_json, '$.run_id') IS NOT NULL) LIMIT 1",
+            (started_before.isoformat(), (now - timedelta(hours=1)).isoformat()),
+        ).fetchone()
+    return row is not None
 
 
 def _restrict_db_files(db: Path) -> None:
@@ -256,4 +287,7 @@ def create_app(
                 return FileResponse(candidate)
             return FileResponse(index)
 
-    return SecurityMiddleware(app, settings, state.sessions)
+    # The cron bearer exception (A03) exists only hosted; cron_auth_from_env returns None (route answers 404) unless
+    # CRON_SECRET, VERCEL_URL and VERCEL_ENV=production are all set, and refuses startup on a weak secret.
+    cron = cron_auth_from_env(settings, os.environ, state.cron_limiter) if settings.hosted else None
+    return SecurityMiddleware(app, settings, state.sessions, cron=cron)

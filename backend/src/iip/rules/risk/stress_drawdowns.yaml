@@ -1,0 +1,155 @@
+# L3 stress table — design-risk-first.md §5.2, graft 4 of design-judgement.md §2.1; package A11.
+#
+# Each row is a HISTORICAL worst observed peak-to-trough fall for a risk class.  It is not a forecast: "the worst
+# fall in the available history of X was Y", and the worst observed fall is not the worst possible fall.
+#
+# User decision U-08 (PLAN.md §3/§8, default "Local config"): the index-derived constants are NOT stored in this
+# public file.  Rows with value_source LOCAL_CONFIG carry only the schema, the citation pointer and the status;
+# their numbers are read from the user's local file
+#     <IIP_DATA_DIR>/config/stress_drawdowns.local.yaml          (see loader.local_stress_values_path)
+# with this shape (values are quoted decimal fractions; floats are refused):
+#     schema_version: 1
+#     values:
+#       - risk_class: EQ_BROAD
+#         stress: "0.xxx"            # fraction of value lost, (0, 1]
+#         recovery_years: "x.x"      # optional, peak -> recovery, null when not recovered / unknown
+# A LOCAL_CONFIG class with no local value is REQUIRES CONFIGURATION: its cited value is None and the engine
+# (A12) uses the AMFI-recomputed drawdown alone or abstains.  Stress per class = max(cited, AMFI-recomputed).
+# Why: the niftyindices terms forbid copying material without permission, and whether derived statistics fall
+# under that clause is NOT VERIFIED (ADR-0017; verify MOM-8).
+#
+# Row fields (the loader rejects a row without source_url, verification_status or effective_from):
+#   value_source  LOCAL_CONFIG | TABLE (value in this file) | ALIAS (another class × multiplier) | FORMULA
+#   verification_status  P | S | NV (as the tax table) | PARAMETER (a fixed design choice, not a measurement)
+#                        | REQUIRES_CONFIGURATION
+#   back_calculated  the index history before its launch date is back-calculated by the index provider
+#
+# All equity classes are added with correlation 1 (no diversification credit) — enforced in engine/risk (A12).
+
+schema_version: 1
+table_version: stress-drawdowns@2026-10-16.r1
+values_source_decision: U-08
+
+classes:
+  - rule_id: STRESS-EQ_LARGE
+    risk_class: EQ_LARGE
+    description: Large-cap equity (Nifty 50 / Sensex index funds, large-cap funds)
+    value_source: LOCAL_CONFIG
+    episode: "2008"
+    back_calculated: false
+    effective_from: 2026-10-15
+    source_url: doc:docs/research/return-target-feasibility.md#24-drawdowns-and-recovery-c
+    verification_status: S
+    notes: >-
+      Citation pointer: Nifty 50 TRI 2008 episode, computed by the research companion (feasibility §2.4 [C]).
+      Value kept out of the public repo (U-08).
+  - rule_id: STRESS-EQ_BROAD
+    risk_class: EQ_BROAD
+    description: Broad equity (flexi, multi, focused, value, contra, ELSS, Nifty 500 / total market)
+    value_source: LOCAL_CONFIG
+    episode: "2000-01"
+    back_calculated: false
+    effective_from: 2026-10-15
+    source_url: doc:docs/research/return-target-feasibility.md#24-drawdowns-and-recovery-c
+    verification_status: S
+    notes: 'Citation pointer: Nifty 500 TRI 2000-01 episode (feasibility §2.4 [C]). Value kept out of the repo (U-08).'
+  - rule_id: STRESS-EQ_MID
+    risk_class: EQ_MID
+    description: Mid-cap equity
+    value_source: LOCAL_CONFIG
+    episode: "2008"
+    back_calculated: true
+    effective_from: 2026-10-15
+    source_url: doc:docs/research/return-target-feasibility.md#24-drawdowns-and-recovery-c
+    verification_status: S
+    notes: 'Citation pointer: Midcap 150 TRI 2008 episode; pre-2016 history back-calculated. Value local (U-08).'
+  - rule_id: STRESS-EQ_SMALL
+    risk_class: EQ_SMALL
+    description: Small-cap equity
+    value_source: LOCAL_CONFIG
+    episode: "2008"
+    back_calculated: true
+    effective_from: 2026-10-15
+    source_url: doc:docs/research/return-target-feasibility.md#24-drawdowns-and-recovery-c
+    verification_status: S
+    notes: 'Citation pointer: Smallcap 250 TRI 2008 episode; back-calculated history. Value local (U-08).'
+  - rule_id: STRESS-EQ_FACTOR
+    risk_class: EQ_FACTOR
+    description: Momentum and other factor / strategy index funds (U3 sleeve)
+    value_source: LOCAL_CONFIG
+    episode: "whitepaper"
+    back_calculated: true
+    effective_from: 2026-10-15
+    source_url: doc:docs/research/wave1/research-evidence-allocation.md
+    verification_status: S
+    notes: >-
+      Citation pointer: NSE Indices momentum whitepaper (Apr-2026) drawdown quote, research-evidence-allocation.md
+      §6. Recovery NOT VERIFIED. Value local (U-08).
+  - rule_id: STRESS-EQ_SECTOR_THEMATIC
+    risk_class: EQ_SECTOR_THEMATIC
+    description: Sector and thematic equity
+    value_source: LOCAL_CONFIG
+    episode: "2008"
+    back_calculated: false
+    effective_from: 2026-10-15
+    source_url: doc:docs/research/return-target-feasibility.md#25-concentrated-sector-bets-c
+    verification_status: S
+    notes: 'Citation pointer: worst sector TRI in feasibility §2.5 [C] ("not recovered"). Value local (U-08).'
+  - rule_id: STRESS-GOLD
+    risk_class: GOLD
+    description: Gold ETFs and gold fund-of-funds
+    value_source: LOCAL_CONFIG
+    episode: "2013-15"
+    back_calculated: false
+    effective_from: 2026-10-15
+    source_url: doc:docs/research/wave1/design-risk-first.md#52-l3-stress-table--rulesriskstress_drawdownsyaml
+    verification_status: NV
+    notes: >-
+      The research figure was computed from an unofficial AMFI mirror; NOT VERIFIED until recomputed in-app from
+      AMFI NAV history (the engine's max(cited, recomputed) rule covers it). Value local (U-08).
+  - rule_id: STRESS-HYBRID
+    risk_class: HYBRID
+    description: Any hybrid scheme
+    value_source: ALIAS
+    alias_of: EQ_BROAD
+    multiplier: "1.0"
+    effective_from: 2026-10-15
+    source_url: doc:docs/research/wave1/design-risk-first.md#52-l3-stress-table--rulesriskstress_drawdownsyaml
+    verification_status: PARAMETER
+    notes: >-
+      Conservative: a hybrid is treated as 100 % broad equity. A category equity-share table from the SEBI
+      categorisation circular would refine it; not cited yet.
+  - rule_id: STRESS-DEBT_MTM
+    risk_class: DEBT_MTM
+    description: Debt mutual funds and bonds with duration (mark-to-market)
+    value_source: FORMULA
+    formula:
+      formula_id: risk.debt_mtm_stress@1
+      expression: D_mod * dy + D_spread * ds
+      dy: "0.02"
+      ds_aaa: "0.01"
+      ds_below_aaa: "0.03"
+    effective_from: 2026-10-15
+    source_url: doc:docs/finance/risk-methodology.md#75-scenario-loss
+    verification_status: PARAMETER
+    notes: >-
+      Formula and shock sizes from the repo scenario table (rates +200 bp; spread +100 bp AAA / +300 bp AA and
+      below). Formula VERIFIED (repo); shock sizes are PARAMETERs. Missing duration -> ABSTAIN(duration_missing).
+  - rule_id: STRESS-CASH_LIKE
+    risk_class: CASH_LIKE
+    description: Savings, overnight funds; FDs and T-bills held to maturity
+    value_source: TABLE
+    stress: "0"
+    effective_from: 2026-10-15
+    source_url: doc:docs/finance/risk-methodology.md#74-rate-sensitivity-portfolio
+    verification_status: PARAMETER
+    notes: 'No mark-to-market (risk-methodology §7.4). Default risk is handled by the L4 limits, not here.'
+  - rule_id: STRESS-STOCK
+    risk_class: STOCK
+    description: Single company shares (only if U4 is ever enabled; U-10 says stocks ABSTAIN)
+    value_source: TABLE
+    stress: "1"
+    effective_from: 2026-10-15
+    source_url: doc:docs/research/wave1/design-risk-first.md#52-l3-stress-table--rulesriskstress_drawdownsyaml
+    verification_status: PARAMETER
+    notes: 'Deliberately maximal; total loss is possible for a single company.'

@@ -2,19 +2,16 @@ import { useState, type FormEvent, type ReactNode } from "react";
 import { FdCardRates } from "../components/FdCardRates";
 import { PageHeader } from "../components/PageHeader";
 import { Link } from "react-router-dom";
-import { FreshnessBadge } from "../components/FreshnessBadge";
 import { Empty, ErrorState, Loading } from "../components/States";
-import { api, ApiError } from "../lib/api";
-import { dateLabel, groupIndian, inr, percentToFraction, roundHalfUp, shiftPoint } from "../lib/format";
+import { api } from "../lib/api";
+import { dateLabel, inr, percentToFraction } from "../lib/format";
 import type {
-  CitationIn,
+  DepositTerms,
   FDIn,
   InstitutionType,
   InstrumentDetailResponse,
-  InstrumentList,
   InstrumentListItem,
   TBillIn,
-  ValidationErrorBody,
 } from "../lib/types";
 import {
   CORPORATE_RATINGS,
@@ -30,200 +27,58 @@ import {
   type YieldCompounding,
 } from "../lib/types-bonds";
 import { useApi } from "../lib/useApi";
+import {
+  BOND_QUOTE_STALE_DAYS,
+  citationBody,
+  CitationFields,
+  citationProblems,
+  CiteLink,
+  daysBetween,
+  EMPTY_CITATION,
+  errorText,
+  FD_RATE_STALE_DAYS,
+  FieldError,
+  ManualAge,
+  OriginBadge,
+  QuoteAge,
+  QuoteCell,
+  ratePct,
+  RATING_STALE_DAYS,
+  RatingCell,
+  TBILL_FRESH_DAYS,
+  todayIst,
+  validationErrors,
+  type CitationState,
+} from "../components/fiCommon";
 import "../styles/bonds.css";
 
-// ------------------------------------------------------------------ shared helpers (also used by MfExplorer / InstrumentDetail)
-
-/** Today's calendar date in India (IST), as YYYY-MM-DD. */
-export function todayIst(now: Date = new Date()): string {
-  return now.toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
-}
-
-/** Whole calendar days from `fromIso` to `toIso` (both YYYY-MM-DD). Integer arithmetic only. */
-export function daysBetween(fromIso: string, toIso: string): number {
-  const d = (iso: string) => {
-    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso);
-    if (!m) throw new Error(`not an ISO date: ${iso}`);
-    return Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
-  };
-  return Math.round((d(toIso) - d(fromIso)) / 86_400_000);
-}
-
-/** Fraction string → percent with the precision entered (2–4 dp): "0.0650" → "6.50 %", "0.065432" → "6.5432 %". */
-export function ratePct(fraction: string): string {
-  const exact = shiftPoint(fraction, 2);
-  const [, frac = ""] = exact.split(".");
-  const dp = Math.min(Math.max(frac.length, 2), 4);
-  return `${roundHalfUp(exact, dp)} %`;
-}
-
-/** NAV per unit as AMFI publishes it: up to 4 decimals, Indian grouping. "1234.56789" → "₹1,234.5679". */
-export function navLabel(value: string): string {
-  const r = roundHalfUp(value, 4);
-  const [int = "0", frac = ""] = r.replace("-", "").split(".");
-  return `${r.startsWith("-") ? "−" : ""}₹${groupIndian(int)}.${frac}`;
-}
-
-/** A short human message for a failed request; backend `detail` strings are shown verbatim. */
-export function errorText(e: unknown): string {
-  if (e instanceof ApiError) {
-    const wait = (e.detail as { retry_after_s?: unknown } | undefined)?.retry_after_s;
-    const minutes = typeof wait === "number" ? Math.max(1, Math.ceil(wait / 60)) : null;
-    const later = minutes === null ? "later" : `in about ${minutes} minute${minutes === 1 ? "" : "s"}`;
-    if (e.code === "BACKFILL_IN_PROGRESS") return `Another history backfill is still running. Try this one ${later}.`;
-    if (e.code === "NAVALL_IN_PROGRESS") return `The AMFI latest-NAV fetch is already running. Try again ${later}.`;
-    if (e.code === "RATE_LIMITED") return `This was fetched recently; to be polite to the source, try again ${later}.`;
-    const d = (e.detail as { detail?: unknown } | undefined)?.detail;
-    if (typeof d === "string") return `${d} (HTTP ${e.status})`;
-    // Structured refusals, e.g. the batch backfill's {code: "UNKNOWN_SCHEMES", unknown: [...], message}.
-    const o = d as { message?: unknown; unknown?: unknown } | undefined;
-    if (o && typeof o.message === "string") {
-      const list = Array.isArray(o.unknown) && o.unknown.length ? ` (${o.unknown.join(", ")})` : "";
-      return `${o.message}${list} (HTTP ${e.status})`;
-    }
-    return `The request failed (HTTP ${e.status}, ${e.code}).`;
-  }
-  return "The request failed (network error).";
-}
-
-/** FastAPI 422 → { "citation.url": "…", "rate": "…" } keyed by the body path. */
-export function validationErrors(e: unknown): Record<string, string> | null {
-  if (!(e instanceof ApiError) || e.status !== 422) return null;
-  const body = e.detail as Partial<ValidationErrorBody> | undefined;
-  const out: Record<string, string> = {};
-  for (const item of Array.isArray(body?.detail) ? body.detail : []) {
-    const key = item.loc.filter((p) => p !== "body").join(".") || "_";
-    out[key] = item.msg;
-  }
-  return out;
-}
-
-export interface CitationState {
-  url: string;
-  asOf: string;
-  note: string;
-}
-export const EMPTY_CITATION: CitationState = { url: "", asOf: "", note: "" };
-
-export function citationProblems(c: CitationState): Record<string, string> {
-  const out: Record<string, string> = {};
-  if (!/^https:\/\/\S+$/.test(c.url.trim())) out["citation.url"] = "Enter the https:// address of the official page.";
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(c.asOf)) out["citation.as_of"] = "Enter the date the page says the value applies from.";
-  return out;
-}
-
-export function citationBody(c: CitationState): CitationIn {
-  const body: CitationIn = { url: c.url.trim(), as_of: c.asOf };
-  if (c.note.trim()) body.note = c.note.trim();
-  return body;
-}
-
-export function FieldError({ id, msg }: { id: string; msg: string | undefined }) {
-  return msg ? (
-    <div id={id} className="field-error" role="alert">
-      {msg}
-    </div>
-  ) : null;
-}
-
-export function CitationFields({
-  prefix,
-  value,
-  onChange,
-  errors,
-}: {
-  prefix: string;
-  value: CitationState;
-  onChange: (c: CitationState) => void;
-  errors: Record<string, string>;
-}) {
-  return (
-    <fieldset className="field">
-      <legend>Citation (required)</legend>
-      <div className="field">
-        <label htmlFor={`${prefix}-url`}>Official page URL</label>
-        <input
-          id={`${prefix}-url`}
-          type="url"
-          className="input-wide"
-          placeholder="https://"
-          value={value.url}
-          onChange={(e) => onChange({ ...value, url: e.target.value })}
-          aria-invalid={Boolean(errors["citation.url"])}
-          aria-describedby={`${prefix}-url-err`}
-          required
-        />
-        <FieldError id={`${prefix}-url-err`} msg={errors["citation.url"]} />
-      </div>
-      <div className="field">
-        <label htmlFor={`${prefix}-asof`}>Value applies as of</label>
-        <input
-          id={`${prefix}-asof`}
-          type="date"
-          value={value.asOf}
-          onChange={(e) => onChange({ ...value, asOf: e.target.value })}
-          aria-invalid={Boolean(errors["citation.as_of"])}
-          aria-describedby={`${prefix}-asof-err`}
-          required
-        />
-        <FieldError id={`${prefix}-asof-err`} msg={errors["citation.as_of"]} />
-      </div>
-      <div className="field">
-        <label htmlFor={`${prefix}-note`}>Note (optional)</label>
-        <input
-          id={`${prefix}-note`}
-          className="input-wide"
-          maxLength={300}
-          value={value.note}
-          onChange={(e) => onChange({ ...value, note: e.target.value })}
-        />
-        <FieldError id={`${prefix}-note-err`} msg={errors["citation.note"]} />
-      </div>
-    </fieldset>
-  );
-}
-
-/** Origin badge: FIXTURE is loud, MANUAL is marked, source data carries no extra badge here. */
-export function OriginBadge({ origin }: { origin: string }) {
-  if (origin === "fixture") return <FreshnessBadge freshness="FIXTURE" />;
-  if (origin === "manual") return <FreshnessBadge freshness="MANUAL" />;
-  return <span className="badge badge--neutral">Official source feed</span>;
-}
-
-// Staleness thresholds for manual entries (backend services/instruments.py: TBILL_FRESH_DAYS, FD_RATE_STALE_DAYS;
-// ux-design §4.4). Shown as calendar-day age; the engine enforces the same limits when it evaluates.
-export const TBILL_FRESH_DAYS = 7;
-export const FD_RATE_STALE_DAYS = 30;
-
-export function ManualAge({ asOf, staleAfter, fixture }: { asOf: string; staleAfter: number; fixture: boolean }) {
-  if (fixture) return <FreshnessBadge freshness="FIXTURE" date={asOf} />;
-  const age = daysBetween(asOf, todayIst());
-  return (
-    <span className="row-tight">
-      {age > staleAfter ? <FreshnessBadge freshness="STALE" date={asOf} /> : <FreshnessBadge freshness="MANUAL" date={asOf} />}
-      <span className="small subtle">
-        {age < 0 ? "dated in the future — check the as-of date" : `${age} day${age === 1 ? "" : "s"} old`}
-        {age > staleAfter ? ` (older than ${staleAfter} days)` : ""}
-      </span>
-    </span>
-  );
-}
-
-export function CiteLink({ url }: { url: string | null | undefined }) {
-  if (!url) return <span className="subtle">none stored</span>;
-  if (!url.startsWith("https://")) return <span className="mono small">{url}</span>;
-  let host = url;
-  try {
-    host = new URL(url).hostname;
-  } catch {
-    /* keep the raw text */
-  }
-  return (
-    <a href={url} target="_blank" rel="noreferrer noopener">
-      {host}
-    </a>
-  );
-}
+// ------------------------------------------------------------------ shared helpers
+// Moved to components/fiCommon.tsx (A06: pages must not import each other). Re-exported here so existing importers keep
+// working until they switch to the shared module.
+export {
+  BOND_QUOTE_STALE_DAYS,
+  citationBody,
+  CitationFields,
+  citationProblems,
+  CiteLink,
+  daysBetween,
+  EMPTY_CITATION,
+  errorText,
+  FD_RATE_STALE_DAYS,
+  FieldError,
+  ManualAge,
+  navLabel,
+  OriginBadge,
+  QuoteAge,
+  QuoteCell,
+  ratePct,
+  RATING_STALE_DAYS,
+  RatingCell,
+  TBILL_FRESH_DAYS,
+  todayIst,
+  validationErrors,
+  type CitationState,
+} from "../components/fiCommon";
 
 // ------------------------------------------------------------------ list rows
 
@@ -270,49 +125,131 @@ function DeleteButton({ item, onDeleted }: { item: Deletable; onDeleted: (msg: s
   );
 }
 
-function TBillRow({ item, onDeleted }: { item: InstrumentListItem; onDeleted: (m: string) => void }) {
-  const d = useApi<InstrumentDetailResponse>(`/api/instruments/${encodeURIComponent(item.instrument_id)}`);
-  const pts = d.data?.series.points ?? [];
+/** Row facts the list endpoint carries for T-bills and FDs, so a whole table is one request (audit-perf-frontend F2).
+ * A field that is absent (undefined) means the backend predates that contract: the row then falls back to fetching its
+ * own detail. `null` means the backend looked and nothing is stored. */
+export interface FiListFacts {
+  maturity_date?: string | null;
+  latest?: { observation_date: string; value: string; source_url: string | null } | null;
+  deposit_terms?: DepositTerms | null;
+}
+export type FiListItem = InstrumentListItem & FiListFacts;
+
+/** Whether the list response already carries this row's facts (no per-row request needed). */
+export function hasListFacts(item: FiListItem): boolean {
+  return item.kind === "fd" ? item.deposit_terms !== undefined : item.latest !== undefined;
+}
+
+/** Legacy per-row detail fetch, reduced to the same facts. Used only against a backend without the list fields. */
+function factsFromDetail(d: InstrumentDetailResponse): FiListFacts {
+  const pts = d.series.points;
   const last = pts.length ? pts[pts.length - 1] : undefined;
-  const maturity = d.data?.bond_terms?.maturity_date;
+  return {
+    maturity_date: d.bond_terms?.maturity_date ?? null,
+    latest: last ? { observation_date: last.observation_date, value: last.value, source_url: last.source_url } : null,
+    deposit_terms: d.deposit_terms ?? null,
+  };
+}
+
+type RowProps = { item: FiListItem; onDeleted: (m: string) => void };
+
+function NameCell({ item }: { item: FiListItem }) {
+  return (
+    <td>
+      <Link to={`/i/${encodeURIComponent(item.instrument_id)}`}>{item.name}</Link>
+      <div className="row-tight small">
+        <OriginBadge origin={item.origin} />
+      </div>
+    </td>
+  );
+}
+
+function TBillCells({ item, facts }: { item: FiListItem; facts: FiListFacts }) {
+  const last = facts.latest ?? undefined;
+  const maturity = facts.maturity_date;
   const today = todayIst();
   return (
-    <tr className={item.fixture ? "fixture-zone" : undefined}>
-      <td>
-        <Link to={`/i/${encodeURIComponent(item.instrument_id)}`}>{item.name}</Link>
-        <div className="row-tight small">
-          <OriginBadge origin={item.origin} />
-        </div>
+    <>
+      <td className="num">
+        {last ? ratePct(last.value) : <span className="subtle">no yield stored</span>}
+        <div className="small subtle">money-market yield, ACT/365 (RBI)</div>
       </td>
-      {d.loading ? (
-        <td colSpan={4} aria-busy="true">
-          <span className="subtle">—</span>
-        </td>
-      ) : d.error ? (
-        <td colSpan={4} className="small">
-          Details could not be loaded: {errorText(d.error)}
-        </td>
+      <td>
+        {maturity ? (
+          <>
+            {dateLabel(maturity)}
+            {daysBetween(today, maturity) < 0 ? <div className="small field-error">matured</div> : null}
+          </>
+        ) : (
+          "—"
+        )}
+      </td>
+      <td>{last ? <ManualAge asOf={last.observation_date} staleAfter={TBILL_FRESH_DAYS} fixture={item.fixture} /> : "—"}</td>
+      <td>
+        <CiteLink url={last?.source_url} />
+      </td>
+    </>
+  );
+}
+
+function FdCells({ item, facts }: { item: FiListItem; facts: FiListFacts }) {
+  const t = facts.deposit_terms;
+  if (!t)
+    return (
+      <td colSpan={5} className="small">
+        No deposit terms stored.
+      </td>
+    );
+  return (
+    <>
+      <td className="num">
+        {ratePct(t.rate)}
+        <div className="small subtle">a year, {t.compounding} compounding</div>
+      </td>
+      <td className="num">{t.tenure_days} days</td>
+      <td className="small">
+        Early-exit penalty: {t.premature_penalty === null ? "not entered" : ratePct(t.premature_penalty)}
+        <br />
+        DICGC-eligible institution type: {t.dicgc_eligible ? "yes" : "no"}
+      </td>
+      <td>
+        <ManualAge asOf={t.rate_as_of} staleAfter={FD_RATE_STALE_DAYS} fixture={item.fixture} />
+      </td>
+      <td>
+        <CiteLink url={t.citation_url} />
+      </td>
+    </>
+  );
+}
+
+function FetchedCells({ item, span }: { item: FiListItem; span: number }) {
+  const d = useApi<InstrumentDetailResponse>(`/api/instruments/${encodeURIComponent(item.instrument_id)}`);
+  if (d.loading)
+    return (
+      <td colSpan={span} aria-busy="true">
+        <span className="subtle">—</span>
+      </td>
+    );
+  if (d.error || !d.data)
+    return (
+      <td colSpan={span} className="small">
+        Details could not be loaded: {errorText(d.error)}
+      </td>
+    );
+  const facts = factsFromDetail(d.data);
+  return item.kind === "fd" ? <FdCells item={item} facts={facts} /> : <TBillCells item={item} facts={facts} />;
+}
+
+function FiRow({ item, onDeleted, span }: RowProps & { span: number }) {
+  return (
+    <tr className={item.fixture ? "fixture-zone" : undefined}>
+      <NameCell item={item} />
+      {!hasListFacts(item) ? (
+        <FetchedCells item={item} span={span} />
+      ) : item.kind === "fd" ? (
+        <FdCells item={item} facts={item} />
       ) : (
-        <>
-          <td className="num">
-            {last ? ratePct(last.value) : <span className="subtle">no yield stored</span>}
-            <div className="small subtle">money-market yield, ACT/365 (RBI)</div>
-          </td>
-          <td>
-            {maturity ? (
-              <>
-                {dateLabel(maturity)}
-                {daysBetween(today, maturity) < 0 ? <div className="small field-error">matured</div> : null}
-              </>
-            ) : (
-              "—"
-            )}
-          </td>
-          <td>{last ? <ManualAge asOf={last.observation_date} staleAfter={TBILL_FRESH_DAYS} fixture={item.fixture} /> : "—"}</td>
-          <td>
-            <CiteLink url={last?.source_url} />
-          </td>
-        </>
+        <TBillCells item={item} facts={item} />
       )}
       <td>
         <DeleteButton item={item} onDeleted={onDeleted} />
@@ -321,51 +258,8 @@ function TBillRow({ item, onDeleted }: { item: InstrumentListItem; onDeleted: (m
   );
 }
 
-function FdRow({ item, onDeleted }: { item: InstrumentListItem; onDeleted: (m: string) => void }) {
-  const d = useApi<InstrumentDetailResponse>(`/api/instruments/${encodeURIComponent(item.instrument_id)}`);
-  const t = d.data?.deposit_terms;
-  return (
-    <tr className={item.fixture ? "fixture-zone" : undefined}>
-      <td>
-        <Link to={`/i/${encodeURIComponent(item.instrument_id)}`}>{item.name}</Link>
-        <div className="row-tight small">
-          <OriginBadge origin={item.origin} />
-        </div>
-      </td>
-      {d.loading ? (
-        <td colSpan={5} aria-busy="true">
-          <span className="subtle">—</span>
-        </td>
-      ) : d.error || !t ? (
-        <td colSpan={5} className="small">
-          {d.error ? `Details could not be loaded: ${errorText(d.error)}` : "No deposit terms stored."}
-        </td>
-      ) : (
-        <>
-          <td className="num">
-            {ratePct(t.rate)}
-            <div className="small subtle">a year, {t.compounding} compounding</div>
-          </td>
-          <td className="num">{t.tenure_days} days</td>
-          <td className="small">
-            Early-exit penalty: {t.premature_penalty === null ? "not entered" : ratePct(t.premature_penalty)}
-            <br />
-            DICGC-eligible institution type: {t.dicgc_eligible ? "yes" : "no"}
-          </td>
-          <td>
-            <ManualAge asOf={t.rate_as_of} staleAfter={FD_RATE_STALE_DAYS} fixture={item.fixture} />
-          </td>
-          <td>
-            <CiteLink url={t.citation_url} />
-          </td>
-        </>
-      )}
-      <td>
-        <DeleteButton item={item} onDeleted={onDeleted} />
-      </td>
-    </tr>
-  );
-}
+const TBillRow = (p: RowProps) => <FiRow {...p} span={4} />;
+const FdRow = (p: RowProps) => <FiRow {...p} span={5} />;
 
 function ListTable({ kind, caption, head, rows }: { kind: string; caption: string; head: string[]; rows: ReactNode }) {
   return (
@@ -668,60 +562,7 @@ export function isinProblem(raw: string): string | null {
 
 const DECIMAL = /^\d+(\.\d+)?$/;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
-export const BOND_QUOTE_STALE_DAYS = 7; // backend services/instruments.py BOND_QUOTE_STALE_DAYS
-export const RATING_STALE_DAYS = 365; // backend services/instruments.py RATING_STALE_DAYS
-
 const BOND_KIND_LABEL: Record<BondKind, string> = { gsec: "G-sec", sdl: "SDL", corp_bond: "Corporate bond" };
-
-export function QuoteCell({ item }: { item: BondListItem }) {
-  const q = item.quote;
-  if (!q) return <span className="subtle">{item.quote_problem ?? "no quote stored"}</span>;
-  const comp = q.convention?.match(/compounding=(\w+)/)?.[1];
-  return (
-    <>
-      {q.kind === "clean_price" ? `${roundHalfUp(q.value, 4)} per ₹100` : `${ratePct(q.value)} YTM`}
-      <div className="small subtle">{q.kind === "clean_price" ? "clean price" : `yield, ${comp ?? "compounding not recorded"}`}</div>
-    </>
-  );
-}
-
-export function QuoteAge({ item }: { item: BondListItem }) {
-  const q = item.quote;
-  if (!q) return <>—</>;
-  if (item.fixture) return <FreshnessBadge freshness="FIXTURE" date={q.quote_date} />;
-  const stale = q.freshness === "STALE" || q.age_days > BOND_QUOTE_STALE_DAYS || q.age_days < 0;
-  return (
-    <span className="row-tight">
-      <FreshnessBadge freshness={stale ? "STALE" : "MANUAL"} date={q.quote_date} />
-      <span className="small subtle">
-        {q.age_days < 0 ? "dated in the future — check the quote date" : `${q.age_days} day${q.age_days === 1 ? "" : "s"} old`}
-        {stale && q.age_days >= 0 ? ` (older than ${BOND_QUOTE_STALE_DAYS} days: excluded)` : ""}
-      </span>
-      {item.quote_problem ? <span className="field-error">{item.quote_problem}</span> : null}
-    </span>
-  );
-}
-
-export function RatingCell({ item }: { item: BondListItem }) {
-  if (item.kind === "gsec") return <span className="small">Sovereign (Government of India)</span>;
-  if (item.kind === "sdl") return <span className="small">State government (not sovereign; tier T2)</span>;
-  const r = item.rating;
-  if (!r) return <span className="field-error">No rating stored: excluded (MISSING_RATING)</span>;
-  return (
-    <span className="bond-rating">
-      <strong>{r.rating}</strong> <span className="small">{r.agency ?? "agency not stored"}</span>
-      <span className="row-tight small">
-        {r.stale ? <FreshnessBadge freshness="STALE" date={r.rating_date} /> : <span>rated {dateLabel(r.rating_date)}</span>}
-        <span className="subtle">
-          {r.age_days} days old{r.stale ? ` (older than ${RATING_STALE_DAYS} days: excluded)` : ""}
-        </span>
-      </span>
-      <span className="small">
-        Rationale: <CiteLink url={r.citation_url} />
-      </span>
-    </span>
-  );
-}
 
 function BondRow({ item, onDeleted }: { item: BondListItem; onDeleted: (m: string) => void }) {
   const t = item.terms;
@@ -1260,7 +1101,8 @@ const TABS: [Tab, string][] = [
 ];
 
 function KindList({ kind }: { kind: "tbill" | "fd" }) {
-  const list = useApi<InstrumentList>(`/api/instruments?kind=${kind}`);
+  // One request per table: the list carries each row's facts (see FiListFacts). Same path as Start here, so it is shared.
+  const list = useApi<{ items: FiListItem[]; truncated: boolean }>(`/api/instruments?kind=${kind}`);
   const [notice, setNotice] = useState<string | null>(null);
   const label = kind === "tbill" ? "T-bills" : "fixed deposits";
   const onDeleted = (m: string) => {

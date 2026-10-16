@@ -17,12 +17,24 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from itertools import pairwise
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
-from scipy import stats
 
 from iip.engine.errors import InsufficientHistory, InvalidInput, NumericalError
+
+
+class _LazyScipyStats:
+    """``scipy.stats`` imported on first attribute access (A05 / RC-5): keeps scipy off the app's cold-start path."""
+
+    def __getattr__(self, name: str) -> Any:
+        from scipy import stats as scipy_stats  # noqa: PLC0415
+
+        return getattr(scipy_stats, name)
+
+
+stats: Any = _LazyScipyStats()
 
 FloatArray = npt.NDArray[np.float64]
 IntArray = npt.NDArray[np.int64]

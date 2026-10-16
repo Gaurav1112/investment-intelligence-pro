@@ -1,10 +1,16 @@
-"""Compliance Guard (regulatory-readiness.md §5 G1–G8, §7) and numeric-provenance validator (ADR-0003 §6)."""
+"""Compliance Guard (regulatory-readiness.md §5 G1–G8, §7) and numeric-provenance validator (ADR-0003 §6).
+
+Surface-aware (B04; design-risk-first.md §7.3, §9.4; PLAN.md §8 U-11): the ``block`` list applies everywhere; each
+``surface_block`` category applies only on the surfaces it names. The owner's vocabulary opt-in can lift a category on
+the PRIVATE surface only — export, share, public and ping surfaces keep the BLOCK. Neutral wording is the default.
+"""
 
 from __future__ import annotations
 
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import StrEnum
 from functools import lru_cache
 from importlib import resources
 from typing import Any
@@ -48,6 +54,53 @@ def normalise(text: str) -> str:
     return re.sub(r"\s+", " ", t)
 
 
+class Surface(StrEnum):
+    """Where a text is shown. PRIVATE is the owner's logged-in view; every other surface can leave the owner's hands."""
+
+    PRIVATE = "private"
+    EXPORT = "export"
+    SHARE = "share"
+    PUBLIC = "public"  # any unauthenticated page
+    PING = "ping"  # a push-notification body
+
+
+class Vocabulary(StrEnum):
+    """The owner's wording choice (U-11). NEUTRAL ("entry/exit condition met") is the default; BADGES is the opt-in
+    for BUY/SELL badges, honoured on the PRIVATE surface only."""
+
+    NEUTRAL = "neutral"
+    BADGES = "badges"
+
+
+def parse_surface(value: object) -> Surface:
+    """Unknown or missing → PUBLIC (fail closed: the strictest surface a human reads)."""
+    try:
+        return Surface(str(value).strip().lower())
+    except ValueError:
+        return Surface.PUBLIC
+
+
+def parse_vocabulary(value: object) -> Vocabulary:
+    """Unknown or missing → NEUTRAL (the U-11 default)."""
+    try:
+        return Vocabulary(str(value).strip().lower())
+    except ValueError:
+        return Vocabulary.NEUTRAL
+
+
+@dataclass(frozen=True)
+class SurfaceRule:
+    category: str
+    surfaces: frozenset[Surface]
+    opt_in: Vocabulary | None  # lifts this category on PRIVATE only
+    patterns: tuple[re.Pattern[str], ...]
+
+    def applies(self, surface: Surface, vocabulary: Vocabulary) -> bool:
+        if surface not in self.surfaces:
+            return False
+        return not (surface is Surface.PRIVATE and self.opt_in is not None and vocabulary is self.opt_in)
+
+
 @dataclass(frozen=True)
 class PhraseHit:
     tier: str  # "block" | "warn"
@@ -62,6 +115,19 @@ class ComplianceRules:
     block: tuple[tuple[str, re.Pattern[str]], ...]
     warn: tuple[re.Pattern[str], ...]
     required: dict[str, str]
+    surface_block: tuple[SurfaceRule, ...] = field(default=())
+
+
+def _surface_rules(raw: dict[str, Any]) -> tuple[SurfaceRule, ...]:
+    out: list[SurfaceRule] = []
+    for category, spec in (raw.get("surface_block") or {}).items():
+        surfaces = frozenset(Surface(s) for s in spec["surfaces"])  # an unknown surface name is a broken rule file
+        opt_in = Vocabulary(spec["opt_in"]) if spec.get("opt_in") else None
+        patterns = tuple(re.compile(p, re.IGNORECASE) for p in spec["patterns"])
+        if not surfaces or not patterns:
+            raise ValueError(f"compliance surface rule {category!r} needs surfaces and patterns")
+        out.append(SurfaceRule(category, surfaces, opt_in, patterns))
+    return tuple(out)
 
 
 @lru_cache(maxsize=1)
@@ -75,7 +141,13 @@ def load_rules() -> ComplianceRules:
         for pattern in patterns
     )
     warn = tuple(re.compile(p, re.IGNORECASE) for p in raw["warn"])
-    return ComplianceRules(version=raw["version"], block=block, warn=warn, required=dict(raw["required"]))
+    return ComplianceRules(
+        version=raw["version"],
+        block=block,
+        warn=warn,
+        required=dict(raw["required"]),
+        surface_block=_surface_rules(raw),
+    )
 
 
 def _strip_required(text: str, rules: ComplianceRules) -> str:
@@ -85,21 +157,36 @@ def _strip_required(text: str, rules: ComplianceRules) -> str:
     return text
 
 
-def scan(text: str, rules: ComplianceRules | None = None) -> list[PhraseHit]:
+def scan(
+    text: str,
+    rules: ComplianceRules | None = None,
+    *,
+    surface: Surface = Surface.PRIVATE,
+    vocabulary: Vocabulary = Vocabulary.NEUTRAL,
+) -> list[PhraseHit]:
     rules = rules or load_rules()
-    body = _strip_required(normalise(text), rules)
+    # A ping carries no disclosure, so nothing is exempt there: a disclosure smuggled into a ping is scanned in full.
+    body = normalise(text) if surface is Surface.PING else _strip_required(normalise(text), rules)
     hits: list[PhraseHit] = []
     for category, pattern in rules.block:
         for m in pattern.finditer(body):
             hits.append(PhraseHit("block", category, pattern.pattern, m.group(0)))
+    for rule in rules.surface_block:
+        if not rule.applies(surface, vocabulary):
+            continue
+        for pattern in rule.patterns:
+            for m in pattern.finditer(body):
+                hits.append(PhraseHit("block", rule.category, pattern.pattern, m.group(0)))
     for pattern in rules.warn:
         for m in pattern.finditer(body):
             hits.append(PhraseHit("warn", "context_required", pattern.pattern, m.group(0)))
     return hits
 
 
-def blocked(text: str) -> list[PhraseHit]:
-    return [h for h in scan(text) if h.tier == "block"]
+def blocked(
+    text: str, *, surface: Surface = Surface.PRIVATE, vocabulary: Vocabulary = Vocabulary.NEUTRAL
+) -> list[PhraseHit]:
+    return [h for h in scan(text, surface=surface, vocabulary=vocabulary) if h.tier == "block"]
 
 
 def _norm(token: str) -> str:

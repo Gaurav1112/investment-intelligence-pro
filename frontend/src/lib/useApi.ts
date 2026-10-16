@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api } from "./api";
+import { acquireGet, api, peekCached, prefetch, subscribeGet } from "./api";
 
 export interface ApiState<T> {
   data: T | null;
@@ -8,34 +8,61 @@ export interface ApiState<T> {
   reload: () => void;
 }
 
-/** GET a resource; aborts on unmount; never shows stale data from a previous request as current. */
+/** GET a resource through the shared cache (one in-flight request per path, fresh responses reused for
+ * CACHE_TTL_MS). Never shows data from a previous path as current; `reload()` always goes to the network. */
 export function useApi<T>(path: string | null): ApiState<T> {
-  const [data, setData] = useState<T | null>(null);
+  const [data, setData] = useState<T | null>(() => (path === null ? null : (peekCached<T>(path) ?? null)));
   const [error, setError] = useState<unknown>(null);
-  const [loading, setLoading] = useState<boolean>(path !== null);
+  const [loading, setLoading] = useState<boolean>(() => path !== null && peekCached<T>(path) === undefined);
   const [tick, setTick] = useState(0);
-  const reload = useCallback(() => setTick((t) => t + 1), []);
+  const force = useRef(false);
+  const reload = useCallback(() => {
+    force.current = true;
+    setTick((t) => t + 1);
+  }, []);
   useEffect(() => {
     if (path === null) return;
-    const ctl = new AbortController();
+    const forced = force.current;
+    force.current = false;
+    const hit = forced ? undefined : peekCached<T>(path);
+    if (hit !== undefined) {
+      setData(hit);
+      setError(null);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
     setData(null);
-    // Only the CURRENT request may touch state: an aborted one settles after the next request has started, and its
-    // finally used to flip loading=false while data was still null (a false "nothing here" empty state).
-    api<T>(path, { signal: ctl.signal })
+    const entry = acquireGet(path, forced);
+    const release = subscribeGet(entry);
+    // Only the CURRENT subscription may touch state: a superseded one settles after the next request has started, and
+    // its finally used to flip loading=false while data was still null (a false "nothing here" empty state).
+    let live = true;
+    (entry.promise as Promise<T>)
       .then((d) => {
-        if (!ctl.signal.aborted) setData(d);
+        if (live) setData(d);
       })
       .catch((e: unknown) => {
-        if (!ctl.signal.aborted && !(e instanceof DOMException && e.name === "AbortError")) setError(e);
+        if (live && !(e instanceof DOMException && e.name === "AbortError")) setError(e);
       })
       .finally(() => {
-        if (!ctl.signal.aborted) setLoading(false);
+        if (live) setLoading(false);
       });
-    return () => ctl.abort();
+    return () => {
+      live = false;
+      release();
+    };
   }, [path, tick]);
   return { data, error, loading, reload };
+}
+
+/** Start GETs before the component that needs them mounts (parallel landing requests); safe to call every render. */
+export function usePrefetch(paths: readonly string[]): void {
+  const key = paths.join("\n");
+  useEffect(() => {
+    for (const p of key ? key.split("\n") : []) prefetch(p);
+  }, [key]);
 }
 
 /** Run a mutation (POST/PUT/DELETE) with pending/error state. */

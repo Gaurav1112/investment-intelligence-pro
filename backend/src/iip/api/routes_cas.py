@@ -13,7 +13,7 @@ from fastapi.concurrency import run_in_threadpool
 from python_multipart.multipart import MultipartParser, parse_options_header
 
 from iip.api.routes_portfolio import _error, _guard, _state, pre_import_safeguard
-from iip.services import cas, ingestion
+from iip.services import cas, ingestion, risk_snapshot
 
 MAX_PARTS = 8
 MAX_FIELD_BYTES = 1024
@@ -129,6 +129,9 @@ def router() -> APIRouter:
     def import_cas_apply(batch_id: str, body: cas.CasApplyIn, request: Request) -> Any:
         st = _state(request)
         pre_change = pre_import_safeguard(st)  # reliability-design §7.1 (file backup locally, snapshot hosted)
-        return _guard(lambda: cas.apply_cas_import(st.conn, batch_id, body, st.clock(), pre_change=pre_change))
+        # "I did this" entries are confirmed or contradicted by this statement in the same transaction (B06/B02).
+        decisions = risk_snapshot.cas_decision_checks(st.conn)
+        return _guard(lambda: cas.apply_cas_import(st.conn, batch_id, body, st.clock(), pre_change=pre_change,
+                                                   decisions=decisions))  # fmt: skip
 
     return r

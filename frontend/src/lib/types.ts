@@ -315,6 +315,10 @@ export interface SourceHealth {
   licence_note: string;
   terms_url: string | null;
   freshness: string;
+  /** registry.py SourceStatus of the automated retrieval path, with the evidence reference. Kept a plain string: the
+   * Data rights panel validates it and treats anything unrecognised as NOT VERIFIED. */
+  status?: string;
+  status_ref?: string;
   requires_configuration: boolean;
   last_run: Pick<IngestionRun, "status" | "finished_at" | "rows_ok" | "rows_rejected" | "error"> | null;
 }
@@ -325,6 +329,22 @@ export interface DataHealthResponse {
   observation_counts: Record<string, number>;
   tax_rules_loaded: boolean;
   tax_rules_coverage_to: string | null;
+}
+
+/** GET /api/data-health/jobs: hosted scheduled-job problems (failed runs, watchdog findings); codes only. */
+export interface ScheduledJobProblem {
+  job: "navall" | "navall-continue" | "history" | "snapshot" | "watchdog";
+  run_key: string;
+  state: "running" | "done" | "noop" | "failed";
+  attempts: number;
+  started_at: string;
+  finished_at: string | null;
+  detail_code: string | null;
+}
+
+export interface ScheduledJobsResponse {
+  lookback_days: number;
+  problems: ScheduledJobProblem[];
 }
 
 export interface TaxRuleRow {

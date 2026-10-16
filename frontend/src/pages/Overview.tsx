@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode, type RefObject } from "react";
+import { lazy, Suspense, useEffect, useRef, useState, type FormEvent, type ReactNode, type RefObject } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { ExplainDrawer, ExplainedNumber } from "../components/ExplainDrawer";
 import { FreshnessBadge } from "../components/FreshnessBadge";
@@ -25,11 +25,17 @@ import type {
   TransactionList,
   TransactionRow,
 } from "../lib/types";
-import { useApi } from "../lib/useApi";
-import { CasImport } from "./CasImport";
-import { FieldError, navLabel, todayIst, validationErrors } from "./FixedIncome";
-import { apiCode, apiMessage, InstrumentSearch, safeFreshness } from "./Watchlist";
+import { usePrefetch, useApi } from "../lib/useApi";
+import { FieldError, navLabel, todayIst, validationErrors } from "../components/fiCommon";
+import { apiCode, apiMessage, InstrumentSearch, safeFreshness } from "../components/watchCommon";
 import { kindLabel } from "../lib/kinds";
+
+// The CAS import panel sits below the fold; load its code on demand instead of linking it into the landing chunk.
+const CasImport = lazy(() => import("./CasImport").then((m) => ({ default: m.CasImport })));
+
+/** GETs the Start-here panel makes. It renders only after the portfolio list arrives (its open/closed state depends on
+ * it), so they are started together with that list instead of one round trip later (audit-perf-frontend F6). */
+export const START_HERE_PATHS = ["/api/data-health", "/api/instruments?kind=tbill", "/api/instruments?kind=fd"] as const;
 
 // ------------------------------------------------------------------ helpers
 
@@ -1059,7 +1065,9 @@ function PortfolioView({ p, tick, onChanged }: { p: PortfolioListItem; tick: num
       <div className="grid grid--2">
         <AddTransactionForm portfolioId={p.portfolio_id} onSaved={onChanged} />
         <ImportFlow portfolioId={p.portfolio_id} nature={p.nature} onApplied={onChanged} />
-        <CasImport portfolioId={p.portfolio_id} natureTag={<NatureTag nature={p.nature} />} onApplied={onChanged} />
+        <Suspense fallback={<Loading label="Loading CAS import" />}>
+          <CasImport portfolioId={p.portfolio_id} natureTag={<NatureTag nature={p.nature} />} onApplied={onChanged} />
+        </Suspense>
       </div>
     </>
   );
@@ -1067,6 +1075,7 @@ function PortfolioView({ p, tick, onChanged }: { p: PortfolioListItem; tick: num
 
 export default function Overview() {
   const list = useApi<{ items: PortfolioListItem[] }>("/api/portfolios");
+  usePrefetch(START_HERE_PATHS);
   const [params, setParams] = useSearchParams();
   const [tick, setTick] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);

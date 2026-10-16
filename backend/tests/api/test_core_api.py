@@ -93,3 +93,28 @@ def test_data_health_and_methodology(dev: tuple[TestClient, dict[str, str]]) -> 
     meth = c.get("/api/methodology").json()
     assert meth["versions"]["ranking_policy"] == "ranking_policy@1.2.0"
     assert any(r["verification"] == "NV" for r in meth["tax"]["rules"])
+
+
+def test_data_health_jobs_lists_scheduled_job_problems(tmp_path: Path) -> None:
+    """silent-failure-hunter-02 (d): cron failures and watchdog findings reach the API (codes only)."""
+    from iip.store.db import connect
+
+    c, _ = make(tmp_path, "dev")
+    try:
+        assert c.get("/api/data-health/jobs").json() == {"lookback_days": 14, "problems": []}
+        raw = connect(Settings(env="dev", data_dir=tmp_path / "dev").db_path)
+        raw.execute(
+            "INSERT INTO cron_runs(job, run_key, state, started_at, finished_at, detail_code) VALUES"
+            " ('snapshot', 'attempt:2026-10-15', 'failed', ?, ?, 'INTERNAL_ERROR'),"
+            " ('watchdog', '2026-10-14', 'done', ?, ?, 'ATTENTION;SNAPSHOT_MISSING'),"
+            " ('navall', '2026-10-14', 'done', ?, ?, 'STORED')",
+            (NOW.isoformat(),) * 6,
+        )
+        raw.close()
+        body = c.get("/api/data-health/jobs").json()
+        assert [(p["job"], p["detail_code"]) for p in body["problems"]] == [
+            ("snapshot", "INTERNAL_ERROR"),
+            ("watchdog", "ATTENTION;SNAPSHOT_MISSING"),
+        ]
+    finally:
+        c.__exit__(None, None, None)

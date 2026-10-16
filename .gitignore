@@ -21,3 +21,4 @@ htmlcov/
 .claude/settings.local.json
 .vercel
 .env*
+/public/

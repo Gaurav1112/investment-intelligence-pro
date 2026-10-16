@@ -18,3 +18,5 @@ backend/tests
 *.db-*
 *.sqlite3
 *.enc
+# Generated on Vercel by scripts/vercel-build.sh (the CDN copy of frontend/dist); never upload a local one.
+/public

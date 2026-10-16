@@ -53,6 +53,7 @@ class Layer(IntEnum):
 class CardKind(StrEnum):
     EMERGENCY_SHORTFALL = "EMERGENCY_SHORTFALL"
     GOAL_DATE_BREACH = "GOAL_DATE_BREACH"
+    GOAL_DATE_DURATION = "GOAL_DATE_DURATION"  # L2 ACTION: debt duration longer than the time left to the goal
     LOSS_BUDGET_BREACH = "LOSS_BUDGET_BREACH"
     LIMIT_BREACH = "LIMIT_BREACH"
     REBALANCE_DUE = "REBALANCE_DUE"
@@ -83,6 +84,7 @@ KIND_LAYER: dict[CardKind, Layer] = {
     CardKind.DATA_ATTENTION: Layer.L0,
     CardKind.EMERGENCY_SHORTFALL: Layer.L1,
     CardKind.GOAL_DATE_BREACH: Layer.L2,
+    CardKind.GOAL_DATE_DURATION: Layer.L2,
     CardKind.LOSS_BUDGET_BREACH: Layer.L3,
     CardKind.LIMIT_BREACH: Layer.L4,
     CardKind.REBALANCE_DUE: Layer.L5,
@@ -99,6 +101,7 @@ KIND_LAYER: dict[CardKind, Layer] = {
 KIND_CLASS: dict[CardKind, CardClass] = {
     CardKind.EMERGENCY_SHORTFALL: CardClass.POLICY,
     CardKind.GOAL_DATE_BREACH: CardClass.POLICY,
+    CardKind.GOAL_DATE_DURATION: CardClass.POLICY,
     CardKind.LOSS_BUDGET_BREACH: CardClass.POLICY,
     CardKind.LIMIT_BREACH: CardClass.POLICY,
     CardKind.REBALANCE_DUE: CardClass.POLICY,

@@ -25,6 +25,7 @@ import { ExplainedNumber } from "./ExplainDrawer";
 export const KIND_TITLE: Record<CardKind, string> = {
   EMERGENCY_SHORTFALL: "Emergency reserve short",
   GOAL_DATE_BREACH: "Goal date closer than your mix allows",
+  GOAL_DATE_DURATION: "Debt holding longer than the time to your goal",
   LOSS_BUDGET_BREACH: "Over your loss limit in the worst historical fall",
   LIMIT_BREACH: "A limit you set is exceeded",
   REBALANCE_DUE: "Rebalance due",

@@ -617,14 +617,12 @@ def _risk_abstention(a: RiskAbstention) -> Abstention:
     return Abstention(code=a.code, missing_input=a.missing_input, how_to_fix=a.how_to_fix)
 
 
-def _abstain_card(
-    b: _Builder, layer: RiskLayer, scope_id: str | None, abstentions: Sequence[Abstention], phrase: str | None = None
-) -> None:
+def _abstain_card(b: _Builder, layer: RiskLayer, scope_id: str | None, abstentions: Sequence[Abstention]) -> None:
     uniq = {(a.code, a.missing_input): a for a in abstentions}
     b.card(
         CardKind.ABSTAIN, _LAYER_OF[layer], _RULE_OF[layer], goal_id=scope_id, template_id="abstain_missing_input",
         status=CardStatus.REQUIRES_CONFIGURATION, abstentions=[uniq[k] for k in sorted(uniq)],
-        text_slots={"missing_input": phrase or _PHRASE[layer]},
+        text_slots={"missing_input": _PHRASE[layer]},
     )  # fmt: skip
 
 
@@ -774,25 +772,32 @@ def _l2(b: _Builder, goal: Goal, items: Sequence[ScopeHolding], values: dict[str
             impact=Impact(at_risk, ImpactBasis.AMOUNT_AT_RISK, "at_risk"),
             text_slots={"goal_name": goal.name, "safe_sleeve": "your debt or liquid sleeve"},
         )  # fmt: skip
-    # One L2 abstain card per goal carries both the engine's abstentions and every ACTION finding: an ACTION
-    # (debt duration longer than the time left to the goal) has no neutral action template yet, so it is shown as
-    # a review the user must make, never dropped and never read as "nothing needed" (python-reviewer-2).
-    pending = [_risk_abstention(a) for a in res.abstentions] if res.outcome is Outcome.ABSTAIN else []
-    names = {s.fact.instrument_id: s.fact.name for s in items}
-    durations = {s.fact.instrument_id: s.fact.macaulay_duration for s in items}
-    actions = [f for f in res.findings if f.outcome is Outcome.ACTION]
-    for f in actions:
-        pending.append(Abstention(
-            code=f.code,
-            missing_input=(f'a review of {names.get(f.holding_id, f.holding_id)} ({f.holding_id}) for {label}: its'
-                           f" Macaulay duration of {durations.get(f.holding_id)} years is longer than the"
-                           f" {res.years_to_goal:.2f} years left to the goal date"),
-            how_to_fix=("review whether this debt fund suits a goal this close (its value moves with interest rates"
-                        " until the goal date); Today has no action card for this finding yet"),
-        ))  # fmt: skip
-    if pending:
-        _abstain_card(b, RiskLayer.L2, goal.goal_id, pending,
-                      phrase="a review of a long-duration debt holding" if actions else None)  # fmt: skip
+    # Each ACTION (debt duration longer than the time left to the goal) is its own neutral GOAL_DATE_DURATION card
+    # (TPL-1): redirect new money and review the holding at the next rebalance. Never a sale, and not a BREACH, so it
+    # suppresses nothing below it. The engine's abstentions still go to one L2 abstain card.
+    by_id = {s.fact.instrument_id: s for s in items}
+    for f in res.findings:
+        if f.outcome is not Outcome.ACTION:
+            continue
+        held = by_id[f.holding_id].fact
+        assert held.macaulay_duration is not None  # the engine abstains on a debt holding with no duration
+        b.card(
+            CardKind.GOAL_DATE_DURATION, Layer.L2, RULE_GOAL_DATE, goal_id=goal.goal_id,
+            template_id="goal_date_duration", status=CardStatus.VERIFIED,
+            numbers=[
+                _num("duration", held.macaulay_duration, NumberUnit.YEARS, as_of,
+                     facts=[x for x in held.fact_ids if x.startswith("fund_fact:")]),
+                _num("years_to_goal", res.years_to_goal, NumberUnit.YEARS, as_of,
+                     facts=[f"user:goal:{goal.goal_id}.target_date"], formula="risk.goal_date@1"),
+                _num("goal_date", goal_date, NumberUnit.DATE, as_of, facts=[f"user:goal:{goal.goal_id}.target_date"]),
+            ],
+            steps=[Step(Verb.REDIRECT_SIP, None, "risk.goal_date@1"),
+                   Step(Verb.REVIEW, f.holding_id, "risk.goal_date@1")],
+            text_slots={"holding_name": held.name, "goal_name": goal.name,
+                        "safe_sleeve": "your debt or liquid sleeve"},
+        )  # fmt: skip
+    if res.outcome is Outcome.ABSTAIN:
+        _abstain_card(b, RiskLayer.L2, goal.goal_id, [_risk_abstention(a) for a in res.abstentions])
     return summary
 
 

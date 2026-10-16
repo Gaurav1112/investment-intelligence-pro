@@ -13,7 +13,7 @@
 # Slot types: inr | pct | pp | units | months | years | days | count | date (numbers), name (an entity name from the
 # user's data), text (free text, no digits), rule_ref (filled from the card's rule id and version, never by callers).
 # The page footer is the compliance guard's required footer (compliance_phrases.yaml → required.footer).
-version: "action_templates@1.0.0"
+version: "action_templates@1.1.0"
 source: docs/research/wave1/design-risk-first.md#72-templates-rulesaction_templatesyaml-no-llm-in-the-numeric-path
 footer_ref: footer
 
@@ -83,6 +83,12 @@ templates:
     card_class: POLICY
     text: "{goal_name} is due on {goal_date}, inside your safety horizon of {h_safe}, and {at_risk} of it sits in instruments that can fall in value. Your rule {rule_ref} says: send new contributions for this goal to {safe_sleeve} and review those holdings."
     slots: {goal_name: name, goal_date: date, h_safe: years, at_risk: inr, rule_ref: rule_ref, safe_sleeve: name}
+
+  goal_date_duration:
+    kind: GOAL_DATE_DURATION
+    card_class: POLICY
+    text: "{holding_name} has a Macaulay duration of {duration}, and {goal_name} is {years_to_goal} away (due {goal_date}). A holding whose duration is longer than the time left to the goal can fall in value when interest rates rise. Your rule {rule_ref} says: send new contributions for this goal to {safe_sleeve} and review this holding at your next rebalance. No redemption is needed."
+    slots: {holding_name: name, duration: years, goal_name: name, years_to_goal: years, goal_date: date, rule_ref: rule_ref, safe_sleeve: name}
 
   loss_budget_breach:
     kind: LOSS_BUDGET_BREACH

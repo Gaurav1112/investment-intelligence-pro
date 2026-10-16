@@ -3,7 +3,8 @@
 * Runs **only in local mode**: it refuses to start when ``IIP_DEPLOY=vercel`` or a ``VERCEL`` environment is detected
   (backtests need the full NAV history and must never be bounded by a serverless step; design-evidence-first.md §6.3).
 * Reads NAVs for the roles the user has bound in ``rule_role_bindings`` (user config; role → scheme never lives in the
-  repo) from the local database, aligned on common dates.
+  repo) from the local database, aligned on common dates by the TA-2 helper ``align_panel``: undated rows are
+  excluded and counted, two different NAVs on one date abstain with ``duplicate_nav_date`` (never last-wins).
 * Writes an evidence bundle (statistics, gates, hashes; **no raw NAVs**) to a path that must be outside any git
   working tree, so results never land in the repository. The trial log and run rows go to the local database.
 
@@ -29,8 +30,11 @@ from iip.data.registry import REGISTRY
 from iip.engine.backtest.gates import SeriesProvenance
 from iip.engine.backtest.ledger import CostBasisPolicy
 from iip.engine.backtest.tax_lots import TaxRateTable
-from iip.engine.backtest.walkforward import CostRateRow, MfCostSchedule, NavPanel
+from iip.engine.backtest.walkforward import CostRateRow, MfCostSchedule, NavPanel, align_panel
 from iip.engine.determinism import content_hash
+from iip.engine.errors import EngineError, InsufficientHistory
+from iip.engine.money import D
+from iip.engine.stats.series_grid import to_ist_date
 from iip.engine.tax import Verification
 from iip.rules.loader import load_tax_rules
 from iip.services.backtest_runner import RunContext, load_registered_specs, run_backtest, verify_bundle
@@ -39,7 +43,16 @@ from iip.store.db import connect, ensure_schema
 from iip.store.ledger import role_bindings
 from iip.store.observations import current_series
 
-__all__ = ["code_version", "inside_git_worktree", "load_panel", "main", "mf_cost_schedule", "refuse_hosted"]
+__all__ = [
+    "Abstained",
+    "Refused",
+    "code_version",
+    "inside_git_worktree",
+    "load_panel",
+    "main",
+    "mf_cost_schedule",
+    "refuse_hosted",
+]
 
 EXIT_REFUSED = 2
 _STATUS = {Verification.P: "VERIFIED-PRIMARY", Verification.S: "VERIFIED-SECONDARY", Verification.NV: "NOT VERIFIED"}
@@ -64,6 +77,14 @@ class Refused(SystemExit):
 
     def __str__(self) -> str:
         return self.message
+
+
+class Abstained(Refused):
+    """The data cannot support a run: the CLI abstains with a reason code instead of guessing."""
+
+    def __init__(self, code: str, detail: str) -> None:
+        super().__init__(f"ABSTAIN({code}): {detail}")
+        self.code = code
 
 
 def refuse_hosted(environ: Mapping[str, str]) -> None:
@@ -106,14 +127,39 @@ def mf_cost_schedule() -> MfCostSchedule:
     return MfCostSchedule(rows=tuple(rows), slippage_rate=Decimal(0))
 
 
-def load_panel(conn: sqlite3.Connection, roles: Sequence[str]) -> tuple[NavPanel, tuple[SeriesProvenance, ...]]:
-    """NAVs for each bound role, aligned on dates present for every role. Raises Refused on a missing binding."""
+def _conflicting_dates(rows: Sequence[tuple[object, str]]) -> list[date]:
+    """IST dates that carry two different NAVs (identical repeats are not a conflict; the TA-2 helper collapses
+    them). Undated or unparseable dates are left to ``align_panel``, which excludes or refuses them."""
+    seen: dict[date, Decimal] = {}
+    bad: set[date] = set()
+    for raw_d, raw_v in rows:
+        if raw_d is None or (isinstance(raw_d, str) and not raw_d.strip()):
+            continue
+        try:
+            d, v = to_ist_date(raw_d), D(raw_v)
+        except EngineError:
+            continue
+        if d in seen and seen[d] != v:
+            bad.add(d)
+        seen.setdefault(d, v)
+    return sorted(bad)
+
+
+def load_panel(
+    conn: sqlite3.Connection, roles: Sequence[str]
+) -> tuple[NavPanel, tuple[SeriesProvenance, ...], Mapping[str, int]]:
+    """NAVs for each bound role, aligned on dates present for every role, built by the TA-2 helper
+    (:func:`iip.engine.backtest.walkforward.align_panel`). Returns (panel, provenance, undated rows excluded per role).
+
+    Raises Refused on a missing binding or history; :class:`Abstained` (a code, never a guess) when a role has two
+    different NAVs on one date (``duplicate_nav_date``), when a row is malformed (``invalid_nav_row``) or when too
+    little aligned history remains (``insufficient_history``)."""
 
     bindings = role_bindings(conn)
     missing = [r for r in roles if r not in bindings]
     if missing:
         raise Refused(f"REQUIRES CONFIGURATION: bind these roles to schemes first: {missing}")
-    by_role: dict[str, dict[date, Decimal]] = {}
+    series: dict[str, list[tuple[object, str]]] = {}
     prov: list[SeriesProvenance] = []
     for role in roles:
         row = conn.execute("SELECT amfi_code FROM instruments WHERE instrument_id=?", (bindings[role],)).fetchone()
@@ -122,7 +168,13 @@ def load_panel(conn: sqlite3.Connection, roles: Sequence[str]) -> tuple[NavPanel
         obs = current_series(conn, f"nav:{row['amfi_code']}")
         if not obs:
             raise Refused(f"role {role}: no NAV history stored locally")
-        by_role[role] = {date.fromisoformat(o["observation_date"]): Decimal(o["value"]) for o in obs}
+        series[role] = [(o["observation_date"], o["value"]) for o in obs]
+        clash = _conflicting_dates(series[role])
+        if clash:
+            shown = ", ".join(d.isoformat() for d in clash[:5]) + (" …" if len(clash) > 5 else "")
+            raise Abstained(
+                "duplicate_nav_date", f"role {role}: {len(clash)} date(s) carry two different NAVs ({shown})"
+            )
         sources = sorted({o["source_id"] for o in obs})
         spec = REGISTRY.get(sources[0]) if len(sources) == 1 else None
         prov.append(
@@ -134,9 +186,16 @@ def load_panel(conn: sqlite3.Connection, roles: Sequence[str]) -> tuple[NavPanel
                 snapshot_hash=content_hash([[o["observation_date"], o["value"], o["raw_sha256"]] for o in obs]),
             )
         )
-    common = sorted(set.intersection(*(set(v) for v in by_role.values())))
-    panel = NavPanel(tuple(common), {r: tuple(by_role[r][d] for d in common) for r in roles})
-    return panel, tuple(prov)
+    try:
+        aligned = align_panel(series)
+    except InsufficientHistory as exc:
+        raise Abstained("insufficient_history", str(exc)) from exc
+    except EngineError as exc:
+        raise Abstained("invalid_nav_row", str(exc)) from exc
+    panel = aligned.panel
+    # align_panel keys the panel in sorted role order; keep the caller's role order.
+    panel = NavPanel(panel.dates, {r: panel.navs[r] for r in roles})
+    return panel, tuple(prov), {r: int(aligned.undated_excluded[r]) for r in roles}
 
 
 def _cmd_list() -> int:
@@ -167,7 +226,9 @@ def _cmd_run(args: argparse.Namespace, environ: Mapping[str, str]) -> int:
         # Every committed spec is registered (idempotent, append-only), so the registry is complete even when this
         # run is refused below for missing configuration (SIG-2).
         register_committed_specs(conn, now=created_at)
-        panel, prov = load_panel(conn, spec.role_keys())
+        panel, prov, undated = load_panel(conn, spec.role_keys())
+        if any(undated.values()):
+            print(f"excluded undated NAV rows per role: {dict(sorted(undated.items()))}", file=sys.stderr)
         ctx = RunContext(
             panel=panel,
             provenance=prov,

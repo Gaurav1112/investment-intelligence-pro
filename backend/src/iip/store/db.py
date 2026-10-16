@@ -12,6 +12,7 @@ Two drivers share one SQL dialect (SQLite):
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import time
 from collections.abc import Callable, Iterable, Iterator, Sequence
@@ -339,9 +340,29 @@ def migrate(conn: sqlite3.Connection, applied_at: str) -> list[str]:
     return applied
 
 
+_TRIGGER_START = re.compile(r"CREATE\s+(?:TEMP\s+|TEMPORARY\s+)?TRIGGER\b", re.IGNORECASE)
+_TRIGGER_END = re.compile(r"\bEND$", re.IGNORECASE)
+
+
 def _split_sql(sql: str) -> list[str]:
+    """Split a migration on ``;``. A ``CREATE TRIGGER … BEGIN …; END`` is kept whole: its pieces are joined until one
+    ends in ``END`` (so a trigger body must not contain a CASE … END expression; migration 0004 documents this)."""
     lines = [ln for ln in sql.splitlines() if not ln.strip().startswith("--")]
-    return [s.strip() for s in "\n".join(lines).split(";") if s.strip()]
+    out: list[str] = []
+    pending: list[str] = []
+    for piece in "\n".join(lines).split(";"):
+        pending.append(piece)
+        statement = ";".join(pending).strip()
+        if not statement:
+            pending = []
+            continue
+        if _TRIGGER_START.match(statement) and not _TRIGGER_END.search(statement):
+            continue
+        out.append(statement)
+        pending = []
+    if pending and ";".join(pending).strip():
+        out.append(";".join(pending).strip())  # an unterminated trigger: let SQLite report it
+    return out
 
 
 def integrity_ok(conn: sqlite3.Connection) -> bool:

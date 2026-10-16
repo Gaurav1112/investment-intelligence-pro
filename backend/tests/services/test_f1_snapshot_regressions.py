@@ -25,6 +25,7 @@ import pytest
 from iip.services import outcomes as oc
 from iip.services import risk_snapshot as rs
 from iip.services import shadow
+from iip.services.backtest_runner import SIGNALS_DIR
 from iip.services.today_view import today_response
 from iip.store import goals_repo, ledger
 from tests.services import _snapshot_fixtures as fx
@@ -249,20 +250,22 @@ def test_not_yet_due_rows_are_counted_but_not_read(conn: Any) -> None:
 
 # ------------------------------------------------------------------------------------------ database-reviewer-08
 
-TREND = """id: S-X
-version: 1
-family: trend_timing
-roles: {in: index_fund.fictional.direct, out: liquid_fund.fictional.direct}
-params: {lookback_months: 3}
-horizon_months: 1
-"""
+# The committed S-E spec (the one schema the shadow evaluator reads), re-keyed to a fictional role and id.
+TREND = (
+    (SIGNALS_DIR / "S-E@1.yaml")
+    .read_text(encoding="utf-8")
+    .replace("id: S-E", "id: S-X", 1)
+    .replace("index_fund.nifty50.direct", "index_fund.fictional.direct")
+    .replace("liquid_fund.direct", "liquid_fund.fictional.direct")
+    .replace("params: {lookback_months: 10}", "params: {lookback_months: 3}", 1)
+)
 
 
 def test_run_shadow_reads_the_existing_keys_once(conn: Any) -> None:
     fx.register_s_rule(conn, "S-X", TREND)
     seen: list[str] = []
     conn.set_trace_callback(seen.append)
-    first = shadow.run_shadow(conn, as_of=fx.AS_OF, snapshot_id="a" * 64, now=fx.NOW)
+    first = shadow.run_shadow(conn, specs_dir=None, as_of=fx.AS_OF, snapshot_id="a" * 64, now=fx.NOW)
     conn.set_trace_callback(None)
     reads = [s for s in seen if s.lstrip().upper().startswith("SELECT") and "FROM rule_evaluations" in s]
     assert len(reads) == 1, reads
@@ -271,11 +274,13 @@ def test_run_shadow_reads_the_existing_keys_once(conn: Any) -> None:
 
 def test_run_shadow_rerun_keeps_the_first_write_even_when_inputs_changed(conn: Any) -> None:
     fx.register_s_rule(conn, "S-X", TREND)
-    shadow.run_shadow(conn, as_of=fx.AS_OF, snapshot_id="a" * 64, now=fx.NOW)
+    shadow.run_shadow(conn, specs_dir=None, as_of=fx.AS_OF, snapshot_id="a" * 64, now=fx.NOW)
     before = conn.execute("SELECT input_hash FROM rule_evaluations").fetchone()[0]
     fx.add_scheme(conn, "mf:971001", "971001", "Fictional Index Fund", "Equity Scheme - Large Cap Fund")
     ledger.bind_roles(conn, [ledger.RoleBinding("index_fund.fictional.direct", "mf:971001", "fixture", fx.NOW)])
-    again = shadow.run_shadow(conn, as_of=fx.AS_OF, snapshot_id="b" * 64, now=fx.NOW)  # content differs now
+    again = shadow.run_shadow(
+        conn, specs_dir=None, as_of=fx.AS_OF, snapshot_id="b" * 64, now=fx.NOW
+    )  # content differs now
     assert again.written == 0 and again.already_recorded == 1
     assert conn.execute("SELECT input_hash FROM rule_evaluations").fetchone()[0] == before
 

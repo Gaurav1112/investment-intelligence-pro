@@ -7,7 +7,8 @@ import an evidence bundle, which holds statistics, gate results and hashes and *
 Flow of :func:`run_backtest`:
 
 1. the spec (``rules/signals/S-*@*.yaml``, role names only) is registered in ``signal_rules`` (idempotent; a changed
-   spec under the same version is refused by the store);
+   spec under the same version is refused by the store; a new row is ``ABSTAIN`` / "no backtest run yet" until the
+   run below records its verdict);
 2. every configuration about to be evaluated (the spec's parameters and each pre-registered neighbour) is appended to
    ``backtest_trials`` **before** it runs, so abandoned or crashed runs still count towards the family N (G8);
 3. the walk-forward runs on pre-vault data, plus a cost-stressed rerun (G7), the neighbours (G10) and the shuffle
@@ -49,6 +50,7 @@ from iip.store import ledger as lg
 __all__ = [
     "DECAY_HAIRCUT",
     "FORBIDDEN_BUNDLE_KEYS",
+    "NO_BACKTEST_RUN_YET",
     "SIGNALS_DIR",
     "BundleRejected",
     "EvidenceBundle",
@@ -60,8 +62,10 @@ __all__ = [
     "import_evidence_bundle",
     "load_registered_specs",
     "load_signal_spec",
+    "registry_row",
     "rerun_manifest",
     "run_backtest",
+    "spec_from_text",
     "verify_bundle",
 ]
 
@@ -265,7 +269,7 @@ class SignalSpec(_Strict):
         )
 
 
-def _spec_from_text(text: str, name: str) -> SignalSpec:
+def spec_from_text(text: str, name: str) -> SignalSpec:
     data = yaml.safe_load(text)
     if not isinstance(data, dict):
         raise SpecError(f"{name}: not a mapping")
@@ -279,10 +283,13 @@ def _spec_from_text(text: str, name: str) -> SignalSpec:
     return spec
 
 
+_spec_from_text = spec_from_text  # the earlier private name (kept for existing callers)
+
+
 def load_signal_spec(path: Path) -> tuple[SignalSpec, str]:
     """(spec, spec text). The text is what is hashed and registered."""
     text = path.read_text(encoding="utf-8")
-    return _spec_from_text(text, path.name), text
+    return spec_from_text(text, path.name), text
 
 
 def load_registered_specs(directory: Path = SIGNALS_DIR) -> dict[str, tuple[SignalSpec, str]]:
@@ -297,6 +304,26 @@ def load_registered_specs(directory: Path = SIGNALS_DIR) -> dict[str, tuple[Sign
 
 def spec_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+#: Registry state of a rule version with no completed backtest run: it abstains, nothing was evaluated.
+NO_BACKTEST_RUN_YET = "no backtest run yet"
+
+
+def registry_row(spec: SignalSpec, spec_text: str, registered_at: str) -> lg.SignalRule:
+    """The ``signal_rules`` row for a committed spec (content-hashed text). A run later sets its verdict state."""
+    return lg.SignalRule(
+        rule_id=spec.id,
+        version=spec.version,
+        class_="S",
+        family=spec.family,
+        spec_yaml=spec_text,
+        spec_hash=spec_hash(spec_text),
+        registered_at=registered_at,
+        state="ABSTAIN",
+        state_reason=NO_BACKTEST_RUN_YET,
+        state_changed_at=registered_at,
+    )
 
 
 # ================================================================================================ run context
@@ -789,23 +816,7 @@ def run_backtest(conn: sqlite3.Connection, spec: SignalSpec, spec_text: str, ctx
     sh = spec_hash(spec_text)
     snapshot = panel_snapshot_hash(ctx.panel)
     rules = _rules_version(ctx)
-    lg.register_rules(
-        conn,
-        [
-            lg.SignalRule(
-                rule_id=spec.id,
-                version=spec.version,
-                class_="S",
-                family=spec.family,
-                spec_yaml=spec_text,
-                spec_hash=sh,
-                registered_at=ctx.created_at,
-                state="PRE_REGISTERED",
-                state_reason=None,
-                state_changed_at=ctx.created_at,
-            )
-        ],
-    )
+    lg.register_rules(conn, [registry_row(spec, spec_text, ctx.created_at)])
     main_params = dict(spec.rule.params)
     trial_id = _trial_id(spec, sh, main_params, snapshot, ctx.code_version, rules)
     seed = _seed(spec, snapshot, trial_id)

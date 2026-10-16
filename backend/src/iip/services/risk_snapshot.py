@@ -1369,10 +1369,21 @@ def cron_snapshot_step(conn: sqlite3.Connection, now: datetime) -> cron_types.Sn
     daily = run_daily(conn, as_of=as_of, now=now.isoformat(), stress_table=load_stress_table(),
                       templates=load_action_templates())  # fmt: skip
     snap = daily.snapshot
+    reg = registry_problems(daily.shadow)
     return cron.SnapshotOutcome(
         snapshot_id=snap.snapshot_id, as_of_date=snap.as_of.isoformat(), verdict=snap.verdict,
         card_set_hash=snap.card_set_hash, written=snap.created,
+        registry_conflicts=tuple(reg["registry_conflicts"]), registry_rejected=tuple(reg["registry_rejected"]),
     )  # fmt: skip
+
+
+def registry_problems(sh: Any) -> dict[str, list[str]]:
+    """REG-1: the signal-registry conflicts and rejected spec files of one shadow run (a ShadowRun), as rule ids only
+    (``S-Q@1.yaml`` → ``S-Q@1``; never spec text). Empty lists when there were none."""
+    return {
+        "registry_conflicts": sorted(str(k) for k in getattr(sh, "registry_conflicts", ())),
+        "registry_rejected": sorted(str(n).removesuffix(".yaml") for n in getattr(sh, "registry_rejected", ())),
+    }
 
 
 @dataclass(frozen=True)

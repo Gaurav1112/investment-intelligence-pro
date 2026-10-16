@@ -20,6 +20,7 @@ from iip.api.routes import all_routers
 from iip.api.settings import Settings
 from iip.rules.loader import local_stress_values_path
 from iip.services import risk_snapshot as rs
+from iip.services import signal_registry
 from tests.services import _snapshot_fixtures as fx
 
 ORIGIN = "http://127.0.0.1:8741"
@@ -151,3 +152,19 @@ def test_snapshot_rejects_future_as_of(app: Any) -> None:
     c, h, _counter, _raw = app
     r = c.post("/api/today/snapshot", json={"as_of": "2027-01-01"}, headers=h)
     assert r.status_code == 422
+
+
+def test_snapshot_route_returns_signal_registry_problems(app: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """REG-1: the J4 compute route returns registry conflicts / rejections (rule ids only), empty when none."""
+    c, h, _counter, raw = app
+    _seed(raw)
+    first = c.post("/api/today/snapshot", json={"as_of": fx.AS_OF.isoformat()}, headers=h).json()
+    assert first["shadow"]["registry_conflicts"] == [] and first["shadow"]["registry_rejected"] == []
+
+    def problems(_c: Any, *, now: str, directory: Path) -> signal_registry.RegistryResult:
+        return signal_registry.RegistryResult(0, 0, ("S-E@1",), ("S-Q@1.yaml",))
+
+    monkeypatch.setattr(signal_registry, "register_committed_specs", problems)
+    body = c.post("/api/today/snapshot", json={"as_of": fx.AS_OF.isoformat()}, headers=h).json()
+    assert body["shadow"]["registry_conflicts"] == ["S-E@1"]
+    assert body["shadow"]["registry_rejected"] == ["S-Q@1"]

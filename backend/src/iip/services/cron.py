@@ -15,7 +15,8 @@ database, so a missed or skipped day is caught up by the next call:
   in bounded windows since the last success, then refreshes ``series_grid`` for the schemes that changed.
 * **J4 ``snapshot``** - a late-NAV re-run (FoF/overseas NAVs land by T+1 10:00 IST), then the risk snapshot step
   (WP B02), then a ping in the outbox only when the L1-L5 card set changed.
-* **J5 ``watchdog``** - one "pipeline needs attention" ping when the expected snapshot is missing or NAVs are stale.
+* **J5 ``watchdog``** - one "pipeline needs attention" ping when the expected snapshot is missing or NAVs are stale,
+  a job failed, or J4 recorded signal-registry conflicts / rejected specs (``SIGNAL_REGISTRY``; REG-1).
 
 Idempotency (design-risk-first.md §9.3): ``cron_runs`` holds one row per (job, run_key); the claim is ONE conditional
 statement that also takes over a ``failed`` row or a ``running`` row older than :data:`CLAIM_STALE_S` (a killed
@@ -100,6 +101,9 @@ class SnapshotOutcome:
     verdict: str
     card_set_hash: str
     written: bool
+    # REG-1: committed signal specs the registry refused during this run: id@version only, never spec text.
+    registry_conflicts: tuple[str, ...] = ()  # registered under the same id@version with a DIFFERENT text
+    registry_rejected: tuple[str, ...] = ()  # committed specs that fail the spec schema
 
 
 SnapshotStep = Callable[[sqlite3.Connection, datetime], SnapshotOutcome]
@@ -698,8 +702,28 @@ def _j4_snapshot(ctx: CronContext) -> CronResult:
     counts["pings_queued"] = queued
     counts["snapshot_written"] = int(outcome.written)
     code = "SNAPSHOT_STORED" if outcome.written else "SNAPSHOT_UNCHANGED"
-    _finish(ctx, "snapshot", run_key, "done", code)
+    detail = code
+    registry = _registry_detail(outcome)
+    if registry:
+        counts["registry_conflicts"] = len(outcome.registry_conflicts)
+        counts["registry_rejected"] = len(outcome.registry_rejected)
+        steps["registry"] = ";".join(registry)
+        detail = ";".join([code, *(f"{REGISTRY_DETAIL_PREFIX}{r}" for r in registry)])
+    _finish(ctx, "snapshot", run_key, "done", detail)
     return CronResult("snapshot", "done", code, run_key, counts, steps)
+
+
+REGISTRY_DETAIL_PREFIX = "REGISTRY_"
+
+
+def _registry_detail(outcome: SnapshotOutcome) -> list[str]:
+    """REG-1: the signal-registry problems of one J4 run as ``CONFLICTS=<id@v,...>`` / ``REJECTED=<id@v,...>``."""
+    parts = []
+    if outcome.registry_conflicts:
+        parts.append("CONFLICTS=" + ",".join(outcome.registry_conflicts))
+    if outcome.registry_rejected:
+        parts.append("REJECTED=" + ",".join(outcome.registry_rejected))
+    return parts
 
 
 # ----------------------------------------------------------------------------------------------------- J5
@@ -737,6 +761,11 @@ def _j5_watchdog(ctx: CronContext) -> CronResult:
         (f"{POLLS_NOT_IMPLEMENTED}%", since),
     ).fetchone():
         problems.append("STEP_NOT_IMPLEMENTED")
+    if ctx.conn.execute(
+        "SELECT 1 FROM cron_runs WHERE job='snapshot' AND detail_code LIKE ? AND started_at >= ? LIMIT 1",
+        (f"%;{REGISTRY_DETAIL_PREFIX}%", since),
+    ).fetchone():
+        problems.append("SIGNAL_REGISTRY")  # REG-1: a committed spec conflicts with, or failed, the registry
     queued = 0
     if problems:
         for channel in ctx.hooks.channels:

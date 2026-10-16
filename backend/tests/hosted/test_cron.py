@@ -457,6 +457,36 @@ def test_no_channel_means_no_outbox_row(conn: sqlite3.Connection) -> None:
     assert res.code == "SNAPSHOT_STORED" and outbox(conn) == []
 
 
+def test_j4_records_signal_registry_problems_and_the_watchdog_reports_them(conn: sqlite3.Connection) -> None:
+    """REG-1: registry conflicts / rejections seen during J4 land on the J4 cron_runs row (codes and rule ids only),
+    are returned in the result, and make J5 report SIGNAL_REGISTRY so Data health shows them."""
+    amfi = Amfi(last_modified=LAST_MODIFIED)
+    cron.run_job(ctx_for(conn, amfi), "navall")
+    base = fake_snapshot("A")
+
+    def step(c: sqlite3.Connection, now: datetime) -> cron.SnapshotOutcome:
+        o = base(c, now)
+        return cron.SnapshotOutcome(o.snapshot_id, o.as_of_date, o.verdict, o.card_set_hash, o.written,
+                                    registry_conflicts=("S-E@1",), registry_rejected=("S-Q@1",))  # fmt: skip
+
+    res = cron.run_job(ctx_for(conn, amfi, hooks(snapshot=step, channels=())), "snapshot")
+    assert (res.state, res.code) == ("done", "SNAPSHOT_STORED")
+    assert res.steps["registry"] == "CONFLICTS=S-E@1;REJECTED=S-Q@1"
+    assert res.counts["registry_conflicts"] == 1 and res.counts["registry_rejected"] == 1
+    detail = run_row(conn, "snapshot", NAV_DATE)["detail_code"]  # type: ignore[index]
+    assert detail == "SNAPSHOT_STORED;REGISTRY_CONFLICTS=S-E@1;REGISTRY_REJECTED=S-Q@1"
+    j5 = cron.run_job(ctx_for(conn, amfi, hooks(channels=()), clock=Clock(J5_TIME)), "watchdog")
+    assert j5.code == "ATTENTION" and j5.steps.get("SIGNAL_REGISTRY") == "FOUND"
+
+
+def test_j4_without_registry_problems_keeps_the_plain_detail(conn: sqlite3.Connection) -> None:
+    amfi = Amfi(last_modified=LAST_MODIFIED)
+    cron.run_job(ctx_for(conn, amfi), "navall")
+    res = cron.run_job(ctx_for(conn, amfi, hooks(snapshot=fake_snapshot("A"), channels=())), "snapshot")
+    assert "registry" not in res.steps and "registry_conflicts" not in res.counts
+    assert run_row(conn, "snapshot", NAV_DATE)["detail_code"] == "SNAPSHOT_STORED"  # type: ignore[index]
+
+
 # ----------------------------------------------------------------------------------------------------- outbox
 
 

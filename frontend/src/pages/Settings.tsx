@@ -3,12 +3,21 @@ import { PageHeader } from "../components/PageHeader";
 import { Link } from "react-router-dom";
 import { Loading } from "../components/States";
 import { LlmSettings } from "../components/LlmSettings";
+import { DataRightsPanel } from "../components/DataRightsPanel";
+import { apiMessage } from "../components/watchCommon";
 import { api } from "../lib/api";
 import { groupIndian } from "../lib/format";
 import { useProfile } from "../lib/profile";
 import type { BackupResult, EraseResult, PrivacyInventory } from "../lib/types";
+import type {
+  NotificationSettings,
+  NotificationSettingsIn,
+  NotifyChannel,
+  VocabularyMode,
+  VocabularySettings,
+  VocabularySettingsIn,
+} from "../lib/types-settings";
 import { useApi } from "../lib/useApi";
-import { apiMessage } from "./Watchlist";
 
 /** The exact phrase the backend requires (services/portfolio.py EraseIn.confirm, Literal["ERASE ALL MY DATA"]). */
 export const ERASE_PHRASE = "ERASE ALL MY DATA";
@@ -222,6 +231,219 @@ function Erase({ backups, onDone, hosted = false }: { backups: number | null; on
   );
 }
 
+/** The ping text when the server does not supply one (design-risk-first.md §9.4): no amounts, names, verbs or prices. */
+export const DEFAULT_PING = "IIP: daily report ready (data as of DD-Mon). Open the app.";
+
+const CHANNELS: { id: NotifyChannel; label: string; note: string }[] = [
+  { id: "off", label: "Off — no notifications (default)", note: "The Today page shows the latest report when you open the app." },
+  {
+    id: "webpush",
+    label: "Web Push",
+    note: "End-to-end encrypted to your browser. On iPhone it needs the app added to the Home Screen. Planned for v2.",
+  },
+  {
+    id: "telegram",
+    label: "Telegram bot to your own chat",
+    note: "Content-free ping only. Telegram stores the message on its servers.",
+  },
+];
+
+/** U-09 / design-risk-first.md §9.4. Off by default; a missing or failing endpoint means off, never "on". */
+function Notifications() {
+  const st = useApi<NotificationSettings>("/api/settings/notifications");
+  const [choice, setChoice] = useState<NotifyChannel>("off");
+  const [ack, setAck] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+  useEffect(() => {
+    if (st.data) setChoice(st.data.channel);
+  }, [st.data]);
+  const unavailable = !st.loading && !st.data;
+  const available = new Set<NotifyChannel>(st.data ? ["off", ...st.data.available] : ["off"]);
+  const current = st.data?.channel ?? "off";
+  const needsAck = choice === "telegram";
+  const canSave = !unavailable && !pending && choice !== current && (!needsAck || ack);
+
+  async function save(e: FormEvent) {
+    e.preventDefault();
+    if (!canSave) return;
+    setPending(true);
+    setMsg(null);
+    setErr(null);
+    try {
+      const body: NotificationSettingsIn = { channel: choice, acknowledge_third_party_storage: needsAck && ack };
+      await api<NotificationSettings>("/api/settings/notifications", { method: "PUT", body });
+      setMsg(
+        choice === "off"
+          ? "Saved. Notifications are off."
+          : `Saved. Pings go to ${choice === "telegram" ? "Telegram" : "Web Push"} only when your L1–L5 cards change.`,
+      );
+      st.reload();
+    } catch (ex) {
+      setErr(`Not saved; the previous setting stays. ${apiMessage(ex)}`);
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <form className="card" onSubmit={save} noValidate aria-labelledby="notify-title">
+      <h2 id="notify-title">Notifications</h2>
+      <p className="small">
+        A notification only says a new daily report is ready. It never carries amounts, fund names, prices or buy/sell words, and
+        it is sent only when the cards at layers L1–L5 change; a quiet day sends nothing.
+      </p>
+      <p className="small">
+        Exact text: <q data-testid="ping-preview">{st.data?.ping_template ?? DEFAULT_PING}</q>
+      </p>
+      {unavailable ? (
+        <p className="small subtle" role="status">
+          Notification settings are not available on this server yet, so notifications stay off.
+        </p>
+      ) : null}
+      <fieldset disabled={st.loading}>
+        <legend>Notification channel</legend>
+        {CHANNELS.map((c) => (
+          <div className="field" key={c.id}>
+            <label className="choice">
+              <input
+                type="radio"
+                name="notify-channel"
+                value={c.id}
+                checked={choice === c.id}
+                disabled={!available.has(c.id)}
+                onChange={() => {
+                  setChoice(c.id);
+                  setAck(false);
+                  setMsg(null);
+                }}
+              />{" "}
+              {c.label}
+              {!available.has(c.id) ? " (not available on this server)" : ""}
+            </label>
+            <div className="hint">{c.note}</div>
+          </div>
+        ))}
+      </fieldset>
+      {needsAck ? (
+        <div className="field">
+          <label className="choice">
+            <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} /> I understand Telegram stores each ping
+            on its servers
+          </label>
+        </div>
+      ) : null}
+      <p className="small subtle">
+        Not offered: ntfy.sh public topics (anyone who knows the topic can read it and send fake alerts) and email through a Gmail
+        app password (a long-lived credential).
+      </p>
+      <button type="submit" className="btn" disabled={!canSave}>
+        {pending ? "Saving…" : "Save notification setting"}
+      </button>
+      <div aria-live="polite">
+        {msg ? <p className="callout small">{msg}</p> : null}
+        {err ? (
+          <p className="callout callout--stale small" role="alert">
+            {err}
+          </p>
+        ) : null}
+      </div>
+    </form>
+  );
+}
+
+/** U-11 / design-risk-first.md §7.3: neutral wording by default; badges are a private-view opt-in only. */
+function Vocabulary() {
+  const st = useApi<VocabularySettings>("/api/settings/vocabulary");
+  const [choice, setChoice] = useState<VocabularyMode>("neutral");
+  const [ack, setAck] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+  useEffect(() => {
+    if (st.data) setChoice(st.data.mode === "badges" ? "badges" : "neutral");
+  }, [st.data]);
+  const unavailable = !st.loading && !st.data;
+  const current: VocabularyMode = st.data?.mode === "badges" ? "badges" : "neutral";
+  const needsAck = choice === "badges";
+  const canSave = !unavailable && !pending && choice !== current && (!needsAck || ack);
+
+  async function save(e: FormEvent) {
+    e.preventDefault();
+    if (!canSave) return;
+    setPending(true);
+    setMsg(null);
+    setErr(null);
+    try {
+      const body: VocabularySettingsIn = { mode: choice, acknowledge_private_only: needsAck && ack };
+      await api<VocabularySettings>("/api/settings/vocabulary", { method: "PUT", body });
+      setMsg(choice === "neutral" ? "Saved. Neutral wording everywhere." : "Saved. Badges appear only in your logged-in view.");
+      st.reload();
+    } catch (ex) {
+      setErr(`Not saved; the previous wording stays. ${apiMessage(ex)}`);
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <form className="card" onSubmit={save} noValidate aria-labelledby="vocab-title">
+      <h2 id="vocab-title">Wording of signals</h2>
+      <p className="small">
+        Policy cards always say “your rule says”. A rule that has passed its evidence gates is shown as “entry condition met” or
+        “exit condition met”, next to its rule id, version and as-of date. Exports, shares and any page without a login always keep
+        the neutral wording.
+      </p>
+      {unavailable ? (
+        <p className="small subtle" role="status">
+          The wording setting is not available on this server yet, so the neutral wording is used.
+        </p>
+      ) : null}
+      <fieldset disabled={st.loading}>
+        <legend>Wording in your private view</legend>
+        <div className="field">
+          <label className="choice">
+            <input type="radio" name="vocab" value="neutral" checked={choice === "neutral"}
+              onChange={() => { setChoice("neutral"); setAck(false); setMsg(null); }} />{" "}
+            Neutral wording — “entry/exit condition met” (default; your decision U-11)
+          </label>
+        </div>
+        <div className="field">
+          <label className="choice">
+            <input type="radio" name="vocab" value="badges" checked={choice === "badges"} disabled={unavailable}
+              onChange={() => { setChoice("badges"); setAck(false); setMsg(null); }} />{" "}
+            BUY/SELL badges in my logged-in view (opt-in)
+          </label>
+          <div className="hint">
+            Personal decision-support tool. Output of rules you configured. Not investment advice or research; not registered with
+            SEBI.
+          </div>
+        </div>
+      </fieldset>
+      {needsAck ? (
+        <div className="field">
+          <label className="choice">
+            <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} /> I want badges only inside my logged-in
+            view; they are never exported or shared
+          </label>
+        </div>
+      ) : null}
+      <button type="submit" className="btn" disabled={!canSave}>
+        {pending ? "Saving…" : "Save wording"}
+      </button>
+      <div aria-live="polite">
+        {msg ? <p className="callout small">{msg}</p> : null}
+        {err ? (
+          <p className="callout callout--stale small" role="alert">
+            {err}
+          </p>
+        ) : null}
+      </div>
+    </form>
+  );
+}
+
 export default function Settings() {
   const inv = useApi<PrivacyInventory>("/api/privacy/inventory");
   const me = useApi<{ deploy?: string }>("/api/me");
@@ -287,6 +509,10 @@ export default function Settings() {
           profile.reload();
         }}
       />
+
+      <Notifications />
+      <Vocabulary />
+      <DataRightsPanel />
 
       <LlmSettings />
     </section>

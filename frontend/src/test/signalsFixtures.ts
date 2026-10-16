@@ -28,7 +28,7 @@ export const RULE_SE: SignalRuleSummary = {
   failing_gate: gate("G5", "abstain", "insufficient_evidence", { value: "0", threshold: "30", detail: "has 0, needs 30" }),
   trial_count: 1,
   shadow: { evaluations: 12, first_as_of: "2026-10-02", last_as_of: "2026-10-15", condition_met: 7, outcomes_scored: 0, outcomes_unscorable: 0 },
-  earliest_review: "2037-04-01",
+  earliest_review: "2037-04",
 };
 
 export const RULE_SD: SignalRuleSummary = {
@@ -96,11 +96,11 @@ export const DETAIL_SE: RuleDetailResponse = {
     min_oos_periods: 30,
     min_trl_months: "126.4",
     power80_months: "287.9",
-    earliest_review: "2037-04-01",
+    earliest_review: "2037-04",
     formula_ids: ["stats.mintrl@1", "stats.power_length@1", "stats.earliest_review@1"],
   },
   publication: { tag: "POST_PUBLICATION", published_on: "2026-10-01", source: "Fixture citation, 2001" },
-  expected_excess: { raw: "0.0200", haircut_factor: "0.5", after_haircut: "0.0100", formula_id: "signals.decay_haircut@1" },
+  expected_excess: { raw: "0.0200", haircut_factor: "0.5", after_haircut: "0.0100", formula_id: "signals.decay_haircut@1", period_months: 1 },
   latest: { as_of_date: "2026-10-15", condition_met: true, direction: "entry" },
   shadow: [
     { as_of_date: "2026-10-15", scope_id: "role:index_fund.broad_large.direct", state: "PRE_REGISTERED", condition_met: true, direction: "entry", outcome_status: null, edge_after_cost_tax: null, unscorable_reason: null, snapshot_id: "snap-2" },

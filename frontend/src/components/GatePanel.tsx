@@ -92,7 +92,7 @@ export function isActionable(rule: Pick<SignalRuleSummary, "state" | "failing_ga
 
 /**
  * Neutral wording by default (U-11): "Entry condition met" / "Exit condition met". A BUY/SELL badge is returned only
- * when the owner opted in to the buy_sell vocabulary AND the rule is actionable. Never used for the shadow record.
+ * when the owner opted in to the "badges" vocabulary (the Settings wire value) AND the rule is actionable. Never used for the shadow record.
  */
 export function conditionWords(
   met: boolean | null,
@@ -101,7 +101,7 @@ export function conditionWords(
 ): { text: string; badge: "BUY" | "SELL" | null } {
   if (met !== true || direction === null) return { text: "No entry or exit condition met", badge: null };
   const text = direction === "entry" ? "Entry condition met" : "Exit condition met";
-  const badge = vocabulary === "buy_sell" ? (direction === "entry" ? "BUY" : "SELL") : null;
+  const badge = vocabulary === "badges" ? (direction === "entry" ? "BUY" : "SELL") : null;
   return { text, badge };
 }
 

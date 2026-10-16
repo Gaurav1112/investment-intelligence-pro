@@ -95,6 +95,13 @@ function PowerSection({ p }: { p: PowerInfo }) {
   );
 }
 
+/** The backend stores the mean edge per decision period; it is shown in that unit, never annualised here. */
+function perPeriod(e: ExpectedExcess): string {
+  if (e.period_months === 1) return "per month";
+  if (e.period_months !== null && e.period_months > 1) return `per ${e.period_months}-month period`;
+  return "per decision period";
+}
+
 function ExcessSection({ e }: { e: ExpectedExcess | null }) {
   return (
     <section aria-labelledby="excess-title" className="card">
@@ -106,10 +113,10 @@ function ExcessSection({ e }: { e: ExpectedExcess | null }) {
       ) : (
         <>
           <p>
-            After the ×{e.haircut_factor} decay haircut: <strong>{`${pct(e.after_haircut)}/yr`}</strong>
+            After the ×{e.haircut_factor} decay haircut: <strong>{`${pct(e.after_haircut)} ${perPeriod(e)}`}</strong>
           </p>
           <p className="small subtle">
-            Out-of-sample backtest median before the haircut: {`${pct(e.raw)}/yr`}. Published edges shrink once known, so
+            Out-of-sample backtest mean before the haircut: {`${pct(e.raw)} ${perPeriod(e)}`}. Published edges shrink once known, so
             any figure shown is halved. A backtest statistic, not a forecast. Formula: {e.formula_id}.
           </p>
         </>

@@ -86,7 +86,7 @@ describe("RuleDetail", () => {
     await screen.findByRole("heading", { level: 1, name: /S-E v1/ });
     const ev = section(/Expected excess/);
     expect(ev.getByText(/×0\.5 decay haircut/)).toBeInTheDocument();
-    expect(ev.getByText(/^\+1\.00\s%\/yr$/)).toBeInTheDocument(); // after haircut
+    expect(ev.getByText(/^\+1\.00\s% per month$/)).toBeInTheDocument(); // after haircut, in the stored per-period unit
     expect(ev.getByText(/before the haircut: \+2\.00/)).toBeInTheDocument();
   });
 
@@ -132,7 +132,7 @@ describe("RuleDetail", () => {
   });
 
   it("shows a BUY badge only for an accepted rule after the owner opted in, never in the shadow record", async () => {
-    const opted: RuleDetailResponse = { ...DETAIL_ACCEPTED, vocabulary: "buy_sell" };
+    const opted: RuleDetailResponse = { ...DETAIL_ACCEPTED, vocabulary: "badges" };
     stubFetch(opted);
     renderAt();
     await screen.findByRole("heading", { level: 1, name: /S-E v1/ });
@@ -141,7 +141,7 @@ describe("RuleDetail", () => {
   });
 
   it("keeps ABSTAIN for an opted-in rule that has not passed every gate", async () => {
-    stubFetch({ ...DETAIL_SE, vocabulary: "buy_sell" });
+    stubFetch({ ...DETAIL_SE, vocabulary: "badges" });
     const { container } = renderAt();
     await screen.findByRole("heading", { level: 1, name: /S-E v1/ });
     expect(section(/^Status$/).getByText("ABSTAIN")).toBeInTheDocument();

@@ -1,5 +1,7 @@
 import { render, screen, within } from "@testing-library/react";
 import { DETAIL_ACCEPTED, DETAIL_SE, gate, RULE_SE } from "../test/signalsFixtures";
+import type { VocabularyMode } from "../lib/types-settings";
+import type { Vocabulary } from "../lib/types-signals";
 import { conditionWords, earliestReviewText, GatePanel, isActionable, monthOf, reasonText } from "./GatePanel";
 
 describe("GatePanel", () => {
@@ -62,8 +64,17 @@ describe("signal display helpers", () => {
     expect(conditionWords(true, "entry", "neutral")).toEqual({ text: "Entry condition met", badge: null });
     expect(conditionWords(true, "exit", "neutral")).toEqual({ text: "Exit condition met", badge: null });
     expect(conditionWords(false, "exit", "neutral")).toEqual({ text: "No entry or exit condition met", badge: null });
-    expect(conditionWords(true, "entry", "buy_sell")).toEqual({ text: "Entry condition met", badge: "BUY" });
-    expect(conditionWords(true, "exit", "buy_sell")).toEqual({ text: "Exit condition met", badge: "SELL" });
-    expect(conditionWords(null, null, "buy_sell")).toEqual({ text: "No entry or exit condition met", badge: null });
+    expect(conditionWords(true, "entry", "badges")).toEqual({ text: "Entry condition met", badge: "BUY" });
+    expect(conditionWords(true, "exit", "badges")).toEqual({ text: "Exit condition met", badge: "SELL" });
+    expect(conditionWords(null, null, "badges")).toEqual({ text: "No entry or exit condition met", badge: null });
+  });
+
+  it("opts in with the Settings wire value 'badges' (react-reviewer-5, typescript-reviewer-4)", () => {
+    // One vocabulary: what Settings PUTs and the backend stores is exactly what the rule page compares against.
+    const fromSettings: VocabularyMode = "badges";
+    const onRulePage: Vocabulary = fromSettings;
+    expect(conditionWords(true, "entry", onRulePage)).toEqual({ text: "Entry condition met", badge: "BUY" });
+    // The retired wire value never shows a badge (fails toward neutral wording).
+    expect(conditionWords(true, "entry", "buy_sell" as unknown as Vocabulary).badge).toBeNull();
   });
 });

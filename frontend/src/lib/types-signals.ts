@@ -1,13 +1,16 @@
 // Signals registry and rule detail (PLAN.md wave 2, package C03).
 //
-// Typed stubs for the read API that wave B serves over the frozen tables of migration 0004 (`signal_rules`,
-// `backtest_trials`, `backtest_runs`, `rule_evaluations`, `outcomes`) and the gate results of
-// `engine/backtest/stats_gates.py` (GateResult). design-risk-first.md §6.1–6.4, grafted by design-judgement.md §2.1 #1
+// The wire contract of `backend/src/iip/api/routes_signals.py` (reshaped by `services/signals_view.py`) over the frozen
+// tables of migration 0004 (`signal_rules`, `backtest_trials`, `backtest_runs`, `rule_evaluations`, `outcomes`) and the
+// gate results of `engine/backtest/stats_gates.py` (GateResult). `backend/tests/api/test_signals_api.py` checks the
+// response keys against the interfaces below, so a field added on one side only fails a test. design-risk-first.md §6.1–6.4, grafted by design-judgement.md §2.1 #1
 // (shadow ledger) and §2.2 #12 (power and status display).
 //
 // Every number arrives as a decimal STRING computed by the backend (stats.mintrl@1, stats.power_length@1,
 // stats.earliest_review@1 …). The frontend never computes a statistic; it only formats and fails closed when a value
 // is missing.
+
+import type { VocabularyMode } from "./types-settings";
 
 /** `signal_rules.state` (migration 0004 CHECK constraint). */
 export type RuleState = "PRE_REGISTERED" | "ABSTAIN" | "NO_SIGNAL" | "ACCEPTED" | "SUSPENDED" | "RETIRED";
@@ -29,8 +32,11 @@ export interface GateResultJson {
   detail: string;
 }
 
-/** Private-view wording (U-11). "neutral" is the default and the only value until the owner opts in (C04 / B04). */
-export type Vocabulary = "neutral" | "buy_sell";
+/**
+ * Private-view wording (U-11). ONE wire vocabulary for Settings, Signals and the backend Compliance Guard
+ * (`compliance.Vocabulary`): "neutral" (the default) or "badges" (the opt-in). Never redeclare the literals here.
+ */
+export type Vocabulary = VocabularyMode;
 
 /** Direction of a rule's condition: S-E style rules switch between an entry (into the risky asset) and an exit. */
 export type ConditionDirection = "entry" | "exit";
@@ -60,16 +66,17 @@ export interface PowerInfo {
   min_oos_periods: number; // G5 floor (30)
   min_trl_months: string | null; // decimal string; null = not computed (no backtest run)
   power80_months: string | null; // decimal string; null = not computed
-  earliest_review: string | null; // ISO date = registration + max(30, ⌈MinTRL⌉) months; null = not computed
+  earliest_review: string | null; // "YYYY-MM" = registration + max(30, ⌈MinTRL⌉) months; null = not computed
   formula_ids: string[]; // e.g. ["stats.mintrl@1", "stats.power_length@1", "stats.earliest_review@1"]
 }
 
 /** Expected excess with the ×0.5 live-decay haircut. Shown only as the after-haircut figure. */
 export interface ExpectedExcess {
-  raw: string | null; // decimal fraction per year, OOS median
+  raw: string | null; // decimal fraction per decision period: the mean OOS edge (not annualised)
   haircut_factor: string; // "0.5"
   after_haircut: string | null; // raw × haircut_factor, computed by the backend
   formula_id: string;
+  period_months: number | null; // length of one decision period in months; null = not stated by the spec
 }
 
 /** One row of the registry list (GET /api/signals). */
@@ -87,7 +94,7 @@ export interface SignalRuleSummary {
   failing_gate: GateResultJson | null;
   trial_count: number; // backtest_trials rows in this family (gate G8)
   shadow: ShadowSummary;
-  earliest_review: string | null; // ISO date; null = not computed
+  earliest_review: string | null; // "YYYY-MM"; null = not computed
 }
 
 export interface SignalsResponse {

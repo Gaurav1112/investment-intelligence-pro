@@ -99,6 +99,19 @@ SNAPSHOT_BEFORE_A05: frozenset[tuple[str, str]] = frozenset(
 )
 SPA = "/{full_path:path}"
 
+# Added deliberately in the wave-2 fix round F4 (ECC typescript-reviewer-1, typescript-reviewer-3): the C03 Signals and
+# C04 Settings pages called these routes, and no router served them.
+ADDED_F4_SIGNALS_SETTINGS: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("GET", "/api/signals"),
+        ("GET", "/api/signals/{rule_id}/{version}"),
+        ("GET", "/api/settings/vocabulary"),
+        ("PUT", "/api/settings/vocabulary"),
+        ("GET", "/api/settings/notifications"),
+        ("PUT", "/api/settings/notifications"),
+    }
+)
+
 
 def _flatten(app_routes: list[Any]) -> list[Any]:
     """Route objects in matching order (FastAPI >= 0.140 wraps included routers in ``_IncludedRouter``)."""
@@ -126,6 +139,12 @@ def test_every_route_registered_before_autodiscovery_is_still_registered(registe
     table = _table(registered)
     assert len(SNAPSHOT_BEFORE_A05) == 70
     assert sorted(SNAPSHOT_BEFORE_A05 - set(table)) == []
+
+
+def test_signals_and_settings_routes_are_registered(registered: list[Any]) -> None:
+    table = set(_table(registered))
+    assert sorted(ADDED_F4_SIGNALS_SETTINGS - table) == []
+    assert {t for t in table if t[1].startswith(("/api/signals", "/api/settings"))} == ADDED_F4_SIGNALS_SETTINGS
 
 
 def test_no_route_is_registered_twice(registered: list[Any]) -> None:

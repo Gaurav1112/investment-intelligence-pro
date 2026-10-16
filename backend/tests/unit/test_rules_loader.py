@@ -305,3 +305,21 @@ def test_mf_legacy_names_unique() -> None:
     data["rename"]["mappings"].append(copy.deepcopy(data["rename"]["mappings"][0]))
     with pytest.raises(RuleTableError, match="duplicate"):
         parse_mf_categories(data)
+
+
+def test_load_action_templates_reads_the_shipped_table_and_rejects_a_bad_file(tmp_path: Path) -> None:
+    from iip.engine.errors import InvalidInput
+    from iip.rules.loader import ACTION_TEMPLATES_PATH, load_action_templates
+
+    shipped = load_action_templates()
+    assert shipped.templates and shipped.version
+    assert shipped == load_action_templates(ACTION_TEMPLATES_PATH)
+    bad = tmp_path / "action_templates.yaml"
+    raw = yaml.safe_load(ACTION_TEMPLATES_PATH.read_text(encoding="utf-8"))
+    raw["surprise"] = 1
+    bad.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    with pytest.raises(InvalidInput, match="surprise"):
+        load_action_templates(bad)
+    bad.write_text("- not a mapping\n", encoding="utf-8")
+    with pytest.raises(RuleTableError):
+        load_action_templates(bad)

@@ -26,6 +26,7 @@ from typing import Annotated, Any, Literal
 import yaml
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError, field_validator, model_validator
 
+from iip.engine.actions.cards import TemplateSet, parse_templates
 from iip.engine.errors import InvalidInput
 from iip.engine.money import D
 from iip.engine.ranking import Objective
@@ -56,6 +57,7 @@ MF_CATEGORIES_PATH = RULES_DIR / "mf_categories.yaml"
 STRESS_TABLE_PATH = RULES_DIR / "risk" / "stress_drawdowns.yaml"
 ALLOCATION_POLICY_PATH = RULES_DIR / "risk" / "allocation_policy.yaml"
 EQUITY_COSTS_PATH = RULES_DIR / "costs" / "india_equity.yaml"
+ACTION_TEMPLATES_PATH = RULES_DIR / "action_templates.yaml"
 LOCAL_STRESS_FILENAME = "stress_drawdowns.local.yaml"
 SUPPORTED_SCHEMA = 1
 # Historical tax rows must close before the main table starts (FY2024-25); see india.yaml "HISTORICAL ROWS".
@@ -1177,3 +1179,9 @@ def parse_equity_costs(data: Mapping[str, Any]) -> EquityCostTable:
 
 def load_equity_costs(path: Path | None = None) -> EquityCostTable:
     return parse_equity_costs(_read_yaml(path or EQUITY_COSTS_PATH))
+
+
+def load_action_templates(path: Path | None = None) -> TemplateSet:
+    """Read ``action_templates.yaml`` (A16). The engine does no IO, so the file is read here and validated (every
+    template linted; one failure rejects the set) by :func:`iip.engine.actions.cards.parse_templates`."""
+    return parse_templates(_read_yaml(path or ACTION_TEMPLATES_PATH))

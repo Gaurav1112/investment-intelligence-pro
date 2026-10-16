@@ -59,7 +59,7 @@ export default function Today() {
       </button>
       {/* aria-live rather than role=status: the page's first status is the result heading below. */}
       <div className="small subtle" aria-live="polite">
-        {compute.pending ? "Computing from your current data…" : computed ? `Computed from data as of ${dateLabel(computed.as_of)}.` : null}
+        {compute.pending ? "Computing from your current data…" : computed ? `Computed from data as of ${computed.as_of ? dateLabel(computed.as_of) : "—"}.` : null}
       </div>
       {compute.error ? (
         <p className="field-error" role="alert">

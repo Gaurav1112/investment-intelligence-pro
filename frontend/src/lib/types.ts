@@ -331,6 +331,22 @@ export interface DataHealthResponse {
   tax_rules_coverage_to: string | null;
 }
 
+/** GET /api/data-health/jobs: hosted scheduled-job problems (failed runs, watchdog findings); codes only. */
+export interface ScheduledJobProblem {
+  job: "navall" | "navall-continue" | "history" | "snapshot" | "watchdog";
+  run_key: string;
+  state: "running" | "done" | "noop" | "failed";
+  attempts: number;
+  started_at: string;
+  finished_at: string | null;
+  detail_code: string | null;
+}
+
+export interface ScheduledJobsResponse {
+  lookback_days: number;
+  problems: ScheduledJobProblem[];
+}
+
 export interface TaxRuleRow {
   rule_id: string;
   instrument_class: string;

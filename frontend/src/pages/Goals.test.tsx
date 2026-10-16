@@ -29,12 +29,12 @@ const GOALS = {
   goals: [
     {
       goal_id: "g1", name: "Long-term growth", priority: 1, target_amount: "1000000", target_date: "2036-03-31",
-      loss_budget_inr: "250000", recovery_months: 60, outcome: "PASS", abstentions: [],
+      loss_budget_inr: "250000", recovery_months: 60, objective: null, h_safe_years: null, outcome: "PASS", abstentions: [],
       holdings: [{ instrument_id: "mf:990001", folio: "", name: "TEST Index Fund A", fraction: "1" }],
     },
     {
       goal_id: "g2", name: "Home deposit", priority: 2, target_amount: "500000", target_date: "2029-06-30",
-      loss_budget_inr: null, recovery_months: null, outcome: "ABSTAIN", abstentions: ["loss limit not set: no equity recommendation"],
+      loss_budget_inr: null, recovery_months: null, objective: null, h_safe_years: null, outcome: "ABSTAIN", abstentions: ["loss limit not set: no equity recommendation"],
       holdings: [],
     },
   ],
@@ -128,7 +128,7 @@ describe("Goals page (C02)", () => {
     // The id travels in the path only: B01's GoalIn rejects unknown fields (extra="forbid").
     expect(put.body).toEqual({
       name: "Long-term growth", priority: 1, target_amount: "1000000", target_date: "2036-03-31",
-      loss_budget_inr: "300000", recovery_months: 60,
+      loss_budget_inr: "300000", recovery_months: 60, objective: null, h_safe_years: null,
     });
   });
 
@@ -199,6 +199,19 @@ describe("Goals page (C02)", () => {
       name: "Retirement", priority: 1, target_amount: "1000000", target_date: "2036-03-31", objective: "D_growth",
       loss_budget_inr: "250000", recovery_months: 60, h_safe_years: "3",
     });
+  });
+});
+
+describe("Goals editor never erases fields it was not given (verifier round close)", () => {
+  it("a goal view missing objective or h_safe_years is not saved: nothing is sent and the page says why", async () => {
+    const { objective: _o, h_safe_years: _h, ...partial } = GOALS.goals[0]!;
+    const calls = stub({ ...GOALS, goals: [partial, GOALS.goals[1]!] });
+    renderAt();
+    const card = await screen.findByRole("region", { name: "Long-term growth" });
+    await userEvent.click(within(card).getByRole("button", { name: "Edit" }));
+    await userEvent.click(within(card).getByRole("button", { name: "Save goal" }));
+    expect(await within(card).findByText(/Not saved: this goal was loaded without/)).toBeInTheDocument();
+    expect(calls.some((c) => c.method === "PUT")).toBe(false);
   });
 });
 

@@ -388,6 +388,47 @@ def prune_untracked_history(conn: sqlite3.Connection, tracked: set[int]) -> int:
     return int(removed)
 
 
+# Tables that refer to instruments, split for the hosted purge (U-01). A scheme's instrument row is KEPT while any
+# user-entered row refers to it (deleting it would cascade away the user's own data); derived market data goes with
+# it. tests/hosted/test_u01_hosted_scope.py fails if a new table refers to instruments without being listed here.
+HOSTED_PURGE_KEEPS_IF_REFERENCED = ("transactions", "watchlist", "fund_facts", "holding_goal_map", "rule_role_bindings")
+HOSTED_PURGE_DERIVED = ("mf_schemes", "series_grid", "bond_terms", "deposit_terms")
+
+
+# The purge statements, built once from the module constants above (no input in the text; the scheme codes are a
+# bound JSON parameter).
+_UNTRACKED_SCHEMES = (
+    "SELECT instrument_id FROM instruments WHERE kind='mf_scheme' AND amfi_code IS NOT NULL"
+    " AND amfi_code NOT IN (SELECT value FROM json_each(?))"
+)
+_PURGE_NAVS = (
+    "DELETE FROM observations WHERE kind='nav' AND series_id LIKE 'nav:%'"
+    " AND substr(series_id, 5) NOT IN (SELECT value FROM json_each(?))"
+)
+_PURGE_SERIES_GRID = "DELETE FROM series_grid WHERE instrument_id IN (" + _UNTRACKED_SCHEMES + ")"  # noqa: S608
+_KEEP_REFERENCED = "".join(
+    " AND instrument_id NOT IN (SELECT instrument_id FROM " + t + ")"  # noqa: S608
+    for t in HOSTED_PURGE_KEEPS_IF_REFERENCED
+)
+_PURGE_INSTRUMENTS = "DELETE FROM instruments WHERE instrument_id IN (" + _UNTRACKED_SCHEMES + ")" + _KEEP_REFERENCED  # noqa: S608
+
+
+def purge_untracked_hosted(conn: sqlite3.Connection, tracked: set[int]) -> int:
+    """Hosted data minimisation (U-01, ADR-0017: the hosted store keeps held and watched schemes ONLY). Removes, for
+    every AMFI scheme that is neither held nor watched: ALL its NAV observations (NAVAll and NAV history, latest
+    included), its month-end series and — unless user-entered data refers to it — its instrument and mf_schemes rows.
+    This also clears rows a pre-fix hosted refresh stored for the whole Direct-Growth set. Returns the NAVs removed.
+
+    Local keeps :func:`prune_untracked_history` (latest NAV kept for browsing; backfills and the core universe kept).
+    One transaction; every series is deleted whole, so a correction pair goes together (self-referencing FK holds)."""
+    codes = json.dumps(sorted(str(c) for c in tracked))
+    with write_tx(conn):
+        removed = conn.execute(_PURGE_NAVS, (codes,)).rowcount
+        conn.execute(_PURGE_SERIES_GRID, (codes,))
+        conn.execute(_PURGE_INSTRUMENTS, (codes,))
+    return int(removed)
+
+
 # AMFI fund-house ids are unpublished. A full probe on 2026-10-15 found 54 fund houses with ids up to 89 (PPFAS = 64);
 # unused ids answer with AMFI's HTML form page, which the fetcher reports as NoData (no breaker failure).
 MAX_FUND_HOUSE_ID = 120
@@ -882,7 +923,7 @@ def ingest_navall_resumable(
             if int(str(state["next_block"])) < blocks:
                 return {"done": False, "phase": "storing", "schemes_done": _done(state), "schemes_total": total,
                         "seconds_per_scheme": state["seconds_per_scheme"]}  # fmt: skip
-            pruned = prune_untracked_history(conn, tracked_scheme_codes(conn))
+            pruned = purge_untracked_hosted(conn, tracked_scheme_codes(conn))
     except BaseException:
         _clear_navall(conn)
         raise
@@ -890,7 +931,7 @@ def ingest_navall_resumable(
     rows_ok, rows_rejected = int(str(state["rows_ok"])), int(str(state["rows_rejected"]))
     status = "ok" if rows_rejected == 0 else "partial"
     _finish_run(conn, run_id, now(), status, rows_ok, rows_rejected, str(state["sha256"]), "")
-    detail = f"{total} held or watched schemes stored; {pruned} older NAVs of untracked schemes pruned"
+    detail = f"{total} held or watched schemes stored; {pruned} NAVs of schemes no longer held or watched removed"
     summary = RunSummary(run_id, "amfi.navall", status, rows_ok, rows_rejected, int(str(state["stored"])), detail)
     return {"done": True, "phase": "complete", "schemes_done": total, "schemes_total": total,
             "seconds_per_scheme": state["seconds_per_scheme"], **summary.__dict__}  # fmt: skip

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date
+from datetime import date, timedelta
 from functools import lru_cache
 from typing import Any, Literal
 
@@ -20,10 +20,11 @@ from iip.engine.ranking import POLICY_VERSION
 from iip.rules.loader import load_tax_rules
 from iip.services import discovery, fixtures, ingestion, instruments
 from iip.services import profile as profile_svc
-from iip.store import coordination
+from iip.store import coordination, ledger
 from iip.supervisor import compliance
 
 _log = logging.getLogger("iip.api")
+SCHEDULED_JOB_LOOKBACK_DAYS = 14  # Data health lists scheduled-job problems of this many days (alerts use their rule)
 
 
 @lru_cache(maxsize=1)
@@ -382,6 +383,14 @@ def router() -> APIRouter:  # noqa: PLR0915 - route table
             "tax_rules_loaded": rules is not None,
             "tax_rules_coverage_to": rules.coverage_to.isoformat() if rules is not None else None,
         }
+
+    @r.get("/data-health/jobs")
+    def data_health_jobs(request: Request) -> dict[str, Any]:
+        """Scheduled-job problems of the last 14 days (hosted J1-J5; empty locally, where nothing is scheduled).
+        Kept out of /data-health so that endpoint stays within its statement budget (A02)."""
+        st = _state(request)
+        since = (st.clock() - timedelta(days=SCHEDULED_JOB_LOOKBACK_DAYS)).isoformat()
+        return {"lookback_days": SCHEDULED_JOB_LOOKBACK_DAYS, "problems": ledger.recent_cron_problems(st.conn, since)}
 
     @r.post("/dev/seed-fixtures")
     def seed_fixtures(request: Request) -> dict[str, Any]:

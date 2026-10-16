@@ -85,6 +85,38 @@ describe("DataHealth", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("tax rule file failed to load");
   });
 
+  it("lists hosted scheduled-job failures and daily-check findings (silent-failure-hunter-02 d)", async () => {
+    const jobs = {
+      lookback_days: 14,
+      problems: [
+        { job: "snapshot", run_key: "attempt:2026-10-15", state: "failed", attempts: 2, started_at: "2026-10-15T05:10:00+00:00", finished_at: "2026-10-15T05:10:02+00:00", detail_code: "SNAPSHOT_FAILED" },
+        { job: "watchdog", run_key: "2026-10-14", state: "done", attempts: 1, started_at: "2026-10-14T16:00:00+00:00", finished_at: "2026-10-14T16:00:01+00:00", detail_code: "ATTENTION;SNAPSHOT_MISSING;NAV_STALE" },
+      ],
+    };
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => json(String(url).includes("/api/data-health/jobs") ? jobs : HEALTH)));
+    renderPage();
+    const table = await screen.findByRole("table", { name: /Scheduled-job problems/ });
+    const snap = within(table).getByText("J4 · today's cards").closest("tr")!;
+    expect(within(snap).getByText("failed: SNAPSHOT_FAILED")).toBeInTheDocument();
+    expect(within(snap).getByText("2")).toBeInTheDocument();
+    const dog = within(table).getByText("J5 · daily check").closest("tr")!;
+    expect(within(dog).getByText("found SNAPSHOT_MISSING, NAV_STALE")).toBeInTheDocument();
+  });
+
+  it("says plainly when there are no scheduled-job problems, and when their status cannot be read", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) =>
+      json(String(url).includes("/api/data-health/jobs") ? { lookback_days: 14, problems: [] } : HEALTH)));
+    renderPage();
+    expect(await screen.findByText(/No scheduled-job failures or daily-check findings in the last 14 days/)).toBeInTheDocument();
+  });
+
+  it("does not hide scheduled-job status behind a silent blank when its endpoint fails", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) =>
+      String(url).includes("/api/data-health/jobs") ? json({ code: "INTERNAL_ERROR" }, 500) : json(HEALTH)));
+    renderPage();
+    expect(await screen.findByText(/Scheduled-job status could not be read/)).toBeInTheDocument();
+  });
+
   it("shows an error state", async () => {
     stub({ code: "INTERNAL_ERROR" }, 500);
     renderPage();

@@ -565,6 +565,19 @@ def finish_cron_run(
     return int(cur.rowcount) == 1
 
 
+def recent_cron_problems(conn: sqlite3.Connection, since: str) -> list[dict[str, object]]:
+    """Scheduled-job problems started at or after ``since``, newest first (silent-failure-hunter-02 d): every
+    ``failed`` run (J1-J4 failures, attempt rows from :func:`iip.services.cron.record_failure`) and every watchdog run
+    that found something (detail ``ATTENTION;…``). Codes and counts only — never values. One statement."""
+    rows = conn.execute(
+        "SELECT job, run_key, state, attempts, started_at, finished_at, detail_code FROM cron_runs"
+        " WHERE started_at >= ? AND (state = 'failed' OR (job = 'watchdog' AND detail_code LIKE 'ATTENTION%'))"
+        " ORDER BY started_at DESC, job, run_key",
+        (since,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def enqueue_ping(
     conn: sqlite3.Connection, outbox_key: str, channel: str, kind: str, snapshot_id: str | None, now: str
 ) -> bool:

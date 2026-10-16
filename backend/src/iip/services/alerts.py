@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from iip.engine.money import pct
 from iip.services import portfolio as pf
 from iip.services.instruments import FD_RATE_STALE_DAYS, TBILL_STALE_DAYS
+from iip.store import ledger
 from iip.store.db import write_tx
 from iip.supervisor import compliance
 
@@ -251,6 +252,25 @@ def _ingestion(conn: sqlite3.Connection, now: datetime, lookback: int) -> list[C
     return out
 
 
+def _scheduled_jobs(conn: sqlite3.Connection, now: datetime, lookback: int) -> list[Candidate]:
+    """Hosted scheduled-job problems (silent-failure-hunter-02 d) under the same look-back as failed ingestion runs:
+    with no notification channel configured these reach the user only here and on Data health. Each failed attempt
+    and each watchdog finding is one alert (the attempt count is part of the dedupe key)."""
+    rule = "ingestion run failed"
+    cutoff = (now - timedelta(days=lookback)).isoformat()
+    out: list[Candidate] = []
+    for r in reversed(ledger.recent_cron_problems(conn, cutoff)):
+        job, key, code = str(r["job"]), str(r["run_key"]), str(r["detail_code"] or "NO_CODE")
+        if job == "watchdog":
+            found = ", ".join(code.split(";")[1:]) or "a problem"
+            body = f"the daily check for {key} found: {found}."
+        else:
+            body = f"the scheduled job {job} (run {key}) started {r['started_at']} failed with code {code}."
+        out.append(Candidate("scheduled_job_failed", "warning", None, _rule_text(rule, body), f"cron.{job}",
+                             f"{job}:{key}", f"cron-problem:{job}:{key}:{r['attempts']}"))  # fmt: skip
+    return out
+
+
 def _alert_id(dedupe_key: str) -> str:
     return "al_" + hashlib.sha256(dedupe_key.encode()).hexdigest()[:20]
 
@@ -273,6 +293,7 @@ def evaluate(
         candidates += _tax(now.date(), tax_coverage_to, tax_rules_loaded, rules.tax_coverage_within_days)
     if rules.ingestion_failed_lookback_days is not None:
         candidates += _ingestion(conn, now, rules.ingestion_failed_lookback_days)
+        candidates += _scheduled_jobs(conn, now, rules.ingestion_failed_lookback_days)
     created: list[str] = []
     with write_tx(conn):
         for c in candidates:

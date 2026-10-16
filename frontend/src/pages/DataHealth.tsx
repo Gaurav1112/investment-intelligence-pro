@@ -3,7 +3,7 @@ import { MacroInputs } from "../components/MacroInputs";
 import { PageHeader } from "../components/PageHeader";
 import { Empty, ErrorState, Loading } from "../components/States";
 import { dateLabel, utcStamp } from "../lib/format";
-import type { DataHealthResponse, IngestionRun, SourceHealth } from "../lib/types";
+import type { DataHealthResponse, IngestionRun, ScheduledJobProblem, ScheduledJobsResponse, SourceHealth } from "../lib/types";
 import { useApi } from "../lib/useApi";
 
 const MODE_TEXT: Record<SourceHealth["mode"], { word: string; glyph: string; explain: string; cls: string }> = {
@@ -122,6 +122,65 @@ function RunsTable({ runs }: { runs: IngestionRun[] }) {
   );
 }
 
+const JOB_TEXT: Record<ScheduledJobProblem["job"], string> = {
+  navall: "J1 · latest NAVs",
+  "navall-continue": "J2 · latest NAVs (continued)",
+  history: "J3 · NAV history",
+  snapshot: "J4 · today's cards",
+  watchdog: "J5 · daily check",
+};
+
+function problemText(p: ScheduledJobProblem): string {
+  const code = p.detail_code ?? "no code recorded";
+  if (p.job === "watchdog") {
+    const found = code.split(";").slice(1);
+    return `found ${found.length ? found.join(", ") : "a problem"}`;
+  }
+  return `failed: ${code}`;
+}
+
+/** silent-failure-hunter-02 (d): hosted scheduled-job failures and watchdog findings, shown even with no ping channel. */
+function ScheduledJobs() {
+  const j = useApi<ScheduledJobsResponse>("/api/data-health/jobs");
+  if (j.loading) return <p className="small subtle">Loading scheduled-job status…</p>;
+  if (j.error || !j.data || !Array.isArray(j.data.problems))
+    return <p className="small field-error">Scheduled-job status could not be read, so failures may be hidden. Reload the page to try again.</p>;
+  const { problems, lookback_days } = j.data;
+  if (problems.length === 0)
+    return (
+      <p className="small">
+        No scheduled-job failures or daily-check findings in the last {lookback_days} days. Scheduled jobs run only in the hosted app.
+      </p>
+    );
+  return (
+    <div className="table-wrap">
+      <table className="table table--compact">
+        <caption className="sr-only">Scheduled-job problems, newest first</caption>
+        <thead>
+          <tr>
+            <th scope="col">Started</th>
+            <th scope="col">Job</th>
+            <th scope="col">Run</th>
+            <th scope="col">Result</th>
+            <th scope="col" className="num">Attempts</th>
+          </tr>
+        </thead>
+        <tbody>
+          {problems.map((p) => (
+            <tr key={`${p.job}:${p.run_key}`}>
+              <td className="small">{stamp(p.started_at)}</td>
+              <td className="small">{JOB_TEXT[p.job] ?? p.job}</td>
+              <td className="small mono">{p.run_key}</td>
+              <td className="small mono field-error">{problemText(p)}</td>
+              <td className="num">{p.attempts}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 const QUALITY_TEXT: Record<string, string> = {
   ok: "passed validation",
   stale: "stale",
@@ -222,6 +281,9 @@ export default function DataHealth() {
           <RunsTable runs={d.runs} />
         </>
       )}
+
+      <h2>Scheduled jobs</h2>
+      <ScheduledJobs />
     </section>
   );
 }

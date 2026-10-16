@@ -236,6 +236,14 @@ describe("Today: getting a report in local mode, and stale data (silent-failure-
     expect(screen.getByText(/Computed from data as of 14-Oct-2026/)).toBeInTheDocument();
   });
 
+  it("a compute response without as_of keeps the page mounted and shows a dash, not a crash (verifier round close)", async () => {
+    server({ first: todayNoSnapshot, after: todayActions, post: { status: 200, body: { snapshot_id: "x" } } });
+    await screen.findByRole("heading", { level: 2, name: "No snapshot yet" });
+    await userEvent.click(screen.getByRole("button", { name: "Compute today's cards" }));
+    expect(await screen.findByText("Computed from data as of —.")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 1, name: "Today" })).toBeInTheDocument();
+  });
+
   it("a failed compute is reported with its code and no cards are invented", async () => {
     server({ first: todayNoSnapshot, post: { status: 422, body: { detail: { code: "AS_OF_IN_FUTURE", message: "x" } } } });
     await screen.findByRole("heading", { level: 2, name: "No snapshot yet" });

@@ -61,6 +61,10 @@ research was done for this ADR.
 
 - The phone (hosted) view shows full data only for held and watched schemes; discovery and core-universe tracking are
   richer on the local machine.
+- Each hosted NAVAll run ends with `purge_untracked_hosted`: every NAV (latest included) and month-end series of a
+  scheme that is no longer held or watched is removed, with its instrument row unless user-entered data (factsheet
+  facts, goal mapping, role binding) refers to it. This also clears rows a pre-fix hosted refresh stored. A scheme
+  with any recorded transaction counts as held (its history values the ledger), even after it is fully sold.
 - The engine keeps working without the niftyindices constants, using AMFI-recomputed drawdowns that may start after
   2008 for some roles (A09 measures the start dates).
 - Stock pages show holdings, sizes against limits and tax dates only, never buy/sell output.

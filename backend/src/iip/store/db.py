@@ -11,12 +11,14 @@ Two drivers share one SQL dialect (SQLite):
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sqlite3
 import time
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
+from functools import lru_cache
 from importlib import resources
 from pathlib import Path
 from typing import Any, cast
@@ -322,6 +324,113 @@ def latest_version() -> int:
     return len(_migration_files())
 
 
+# One read-only statement: the applied version AND every schema object with its CREATE text (A05/RC-5: the startup
+# budget is this read plus the interrupted-run probe; pragma table functions would add statements to the trace).
+_SCHEMA_STATE = (
+    "SELECT (SELECT MAX(version) FROM schema_version) AS v, (SELECT json_group_array(json_array(type, name, sql))"
+    " FROM sqlite_master WHERE name NOT LIKE 'sqlite_%') AS s"
+)
+_CONSTRAINT_HEADS = frozenset({"CONSTRAINT", "PRIMARY", "UNIQUE", "CHECK", "FOREIGN"})
+
+
+def _table_columns(create_sql: str) -> list[str]:
+    """Column names of a stored ``CREATE TABLE`` text: the first word of each top-level item of the column list
+    (comments, quoted text and nested parentheses skipped; table constraints are not columns). Applied the same way
+    to the database's text and to the shipped migrations' text."""
+    body = create_sql[create_sql.index("(") + 1 :]
+    items: list[str] = []
+    cur: list[str] = []
+    depth, i = 0, 0
+    while i < len(body):
+        ch = body[i]
+        if body.startswith("--", i):
+            i = body.find("\n", i)
+            i = len(body) if i < 0 else i
+            continue
+        if body.startswith("/*", i):
+            i = body.find("*/", i)
+            i = len(body) if i < 0 else i + 2
+            continue
+        if ch in "'\"`[":
+            close = "]" if ch == "[" else ch
+            j = body.find(close, i + 1)
+            j = len(body) - 1 if j < 0 else j
+            cur.append(body[i : j + 1])
+            i = j + 1
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            if depth == 0:
+                break
+            depth -= 1
+        elif ch == "," and depth == 0:
+            items.append("".join(cur))
+            cur = []
+            i += 1
+            continue
+        cur.append(ch)
+        i += 1
+    items.append("".join(cur))
+    names: list[str] = []
+    for item in items:
+        words = item.split()
+        if words and words[0].upper() not in _CONSTRAINT_HEADS:
+            names.append(words[0].strip("\"`[]'"))
+    return names
+
+
+def _schema_entries(rows: list[list[str | None]]) -> frozenset[str]:
+    out: set[str] = set()
+    for kind, name, sql in rows:
+        out.add(f"{kind}:{name}")
+        if kind == "table" and sql:
+            out.update(f"column:{name}.{col}" for col in _table_columns(sql))
+    return frozenset(out)
+
+
+@lru_cache(maxsize=1)
+def expected_schema() -> frozenset[str]:
+    """The tables, indexes, triggers, views and columns the shipped migrations create, from applying them to an
+    in-memory database (the package files are fixed for the life of the process, so this runs once)."""
+    mem = sqlite3.connect(":memory:")
+    try:
+        mem.execute(_SCHEMA_VERSION_DDL)
+        for _, _, sql in _migration_files():
+            for statement in _split_sql(sql):
+                mem.execute(statement)
+        row = mem.execute(_SCHEMA_STATE).fetchone()
+        return _schema_entries(json.loads(row[1]))
+    finally:
+        mem.close()
+
+
+def _read_schema_state(conn: sqlite3.Connection) -> tuple[int, frozenset[str]]:
+    """(applied version, schema entries) in ONE read-only statement; (0, empty) before the first migration."""
+    try:
+        row = conn.execute(_SCHEMA_STATE).fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return 0, frozenset()
+        raise
+    if row is None:
+        return 0, frozenset()
+    return int(row[0] or 0), _schema_entries(json.loads(row[1] or "[]"))
+
+
+def verify_schema(actual: frozenset[str]) -> None:
+    """Refuse a database whose schema lacks anything the shipped migrations create. ``migrate`` skips a version
+    already recorded, so a migration edited after a database applied it (0004 during wave 2) left that database
+    without the new tables/columns/indexes until a later runtime failure. Extra objects are allowed."""
+    missing = sorted(expected_schema() - actual)
+    if missing:
+        shown = ", ".join(missing[:8]) + (f" and {len(missing) - 8} more" if len(missing) > 8 else "")
+        raise MigrationError(
+            f"the database schema does not match the shipped migrations; missing {shown}. It was migrated with "
+            "different migration files: recreate it (or restore a backup made by this version)."
+        )
+
+
 def read_schema_version(conn: sqlite3.Connection) -> int:
     """The applied schema version in ONE read-only statement (RC-5: every hosted statement is a round trip).
 
@@ -350,10 +459,14 @@ def ensure_schema(conn: sqlite3.Connection, applied_at: str, *, wait_s: float = 
     lock, so nothing is applied twice) for up to ``wait_s`` seconds. A lock that never frees is still raised."""
     deadline = time.monotonic() + wait_s
     while True:
-        if read_schema_version(conn) >= latest_version():
+        version, actual = _read_schema_state(conn)
+        if version >= latest_version():
+            verify_schema(actual)
             return []
         try:
-            return migrate(conn, applied_at)
+            applied = migrate(conn, applied_at)
+            verify_schema(_read_schema_state(conn)[1])
+            return applied
         except sqlite3.OperationalError as exc:
             if not _busy(exc) or time.monotonic() >= deadline:
                 raise

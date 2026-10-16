@@ -18,10 +18,9 @@ from dataclasses import dataclass, field
 from datetime import date
 from decimal import ROUND_CEILING, Decimal
 from enum import StrEnum
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
-from scipy import stats as sps
 
 from iip.engine.errors import InsufficientHistory, InvalidInput, NumericalError
 from iip.engine.money import ONE, ZERO, engine_context, from_float
@@ -33,6 +32,18 @@ from iip.engine.stats.series import (
     ReturnSeries,
     align,
 )
+
+
+class _LazyScipyStats:
+    """``scipy.stats`` imported on first attribute access (A05 / RC-5): keeps scipy off the app's cold-start path."""
+
+    def __getattr__(self, name: str) -> Any:
+        from scipy import stats as scipy_stats  # noqa: PLC0415
+
+        return getattr(scipy_stats, name)
+
+
+sps: Any = _LazyScipyStats()
 
 # ---------------------------------------------------------------------------------------------- enums
 

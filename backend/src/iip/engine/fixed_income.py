@@ -24,12 +24,18 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
-
-from scipy.optimize import brentq
+from typing import Any
 
 from iip.engine.dates import DayCount, add_months, contains_feb29, days_30e_360, days_between, is_month_end
 from iip.engine.errors import InvalidInput, NumericalError
 from iip.engine.money import ONE, ZERO, engine_context, from_float, money, quantize
+
+
+def brentq(*args: Any, **kwargs: Any) -> Any:  # lazy scipy (A05 / RC-5): loaded on first use, not at app start
+    from scipy.optimize import brentq as solver  # noqa: PLC0415
+
+    return solver(*args, **kwargs)
+
 
 HUNDRED = Decimal(100)
 BASIS_POINT = Decimal("0.0001")

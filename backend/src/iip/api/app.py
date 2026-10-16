@@ -34,7 +34,7 @@ from iip.data.fetch import CircuitBreaker, Fetcher
 from iip.services import ingestion
 from iip.store import coordination
 from iip.store.coordination import DbLease
-from iip.store.db import connect, connect_libsql, current_version, migrate
+from iip.store.db import connect, connect_libsql, current_version, ensure_schema
 
 log = logging.getLogger("iip.api")
 APP_VERSION = "0.1.0"
@@ -102,13 +102,19 @@ class AppState:
             self.token = ensure_access_token(settings) if settings.auth else ""
             self.backfill_lock = threading.Lock()
             self.navall_lock = threading.Lock()
-        migrate(self.conn, clock().isoformat())
+        # A05 / RC-5: a cold start on a current database issues read-only statements only (schema version, then the
+        # interrupted-run probe). It writes only when there is something to write: a pending migration, or a run
+        # that really was cut off.
+        ensure_schema(self.conn, clock().isoformat())
         if not self.hosted:
             _restrict_db_files(self.settings.db_path)
         # Hosted: another instance may be running a job right now, so only runs older than any function could live
         # are "interrupted"; locally one process means every 'running' row was cut off.
-        started_before = clock() - timedelta(seconds=LEASE_TTL_S) if self.hosted else None
-        if ingestion.mark_interrupted_runs(self.conn, clock(), started_before=started_before):
+        now = clock()
+        started_before = now - timedelta(seconds=LEASE_TTL_S) if self.hosted else None
+        if _has_interrupted_runs(self.conn, now, started_before) and ingestion.mark_interrupted_runs(
+            self.conn, now, started_before=started_before
+        ):
             log.warning("ingestion runs left 'running' by a previous process were marked failed (interrupted)")
 
     def epoch(self) -> float:
@@ -150,6 +156,22 @@ class AppState:
             for c in self._all:
                 c.close()
             self._all.clear()
+
+
+def _has_interrupted_runs(conn: sqlite3.Connection, now: datetime, started_before: datetime | None) -> bool:
+    """Read-only twin of the ``WHERE`` clause in :func:`ingestion.mark_interrupted_runs`, so startup issues its
+    ``UPDATE`` (a write, and a hosted round trip) only when at least one row would change. Keep the two in step:
+    ``tests/api/test_startup_readonly.py`` checks that a live resumable job's run causes no write."""
+    if started_before is None:
+        row = conn.execute("SELECT 1 FROM ingestion_runs WHERE status='running' LIMIT 1").fetchone()
+    else:
+        row = conn.execute(
+            "SELECT 1 FROM ingestion_runs WHERE status='running'"
+            " AND started_at < ? AND run_id NOT IN (SELECT json_extract(state_json, '$.run_id') FROM job_progress"
+            " WHERE updated_at >= ? AND json_extract(state_json, '$.run_id') IS NOT NULL) LIMIT 1",
+            (started_before.isoformat(), (now - timedelta(hours=1)).isoformat()),
+        ).fetchone()
+    return row is not None
 
 
 def _restrict_db_files(db: Path) -> None:

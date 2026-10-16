@@ -369,7 +369,10 @@ def _store_navall(
         if run_key is not None:
             _finish(ctx, "navall", run_key, "failed", "INGEST_FAILED")
         return CronResult(owner, "failed", "INGEST_FAILED", run_key, counts)
-    code = "STORED" if status == "ok" else "STORED_WITH_REJECTS"
+    if counts["schemes_total"] == 0:
+        code = "NOTHING_IN_SCOPE"  # nothing held or watched (U-01, SOLD-1): say so rather than claim a store
+    else:
+        code = "STORED" if status == "ok" else "STORED_WITH_REJECTS"
     if opened is not None and run_key is not None:
         coordination.save_job(ctx.conn, NAVALL_LAST, {
             "run_key": run_key, "sha256": opened.get("sha256"), "last_modified": opened.get("last_modified"),

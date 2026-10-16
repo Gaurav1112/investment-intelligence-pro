@@ -189,6 +189,14 @@ def test_j1_duplicate_delivery_without_validators_is_still_a_noop(conn: sqlite3.
     assert conn.execute("SELECT COUNT(*) FROM ingestion_runs").fetchone()[0] == 1
 
 
+def test_j1_with_nothing_held_or_watched_says_so_instead_of_stored(conn: sqlite3.Connection) -> None:
+    conn.execute("DELETE FROM watchlist")  # SOLD-1 / U-01: an empty refresh scope is a normal state, not a store
+    res = cron.run_job(ctx_for(conn, Amfi()), "navall")
+    assert (res.state, res.code) == ("done", "NOTHING_IN_SCOPE")
+    assert res.counts["schemes_total"] == 0 and obs_count(conn) == 0
+    assert run_row(conn, "navall", NAV_DATE)["detail_code"] == "NOTHING_IN_SCOPE"  # type: ignore[index]
+
+
 def _seed_run(conn: sqlite3.Connection, job: str, key: str, state_: str, started: datetime) -> None:
     conn.execute(
         "INSERT INTO cron_runs(job, run_key, state, attempts, started_at) VALUES (?, ?, ?, 1, ?)",

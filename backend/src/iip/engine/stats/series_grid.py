@@ -18,6 +18,10 @@ Rules
   understate the daily MDD; every result carries that caveat.
 * **Blended path.** Fixed weights over the components' common window, either rebalanced monthly or held from the start
   (no rebalancing).  Any component gap inside the window fails closed (``MissingData``).
+* **Dates are IST calendar dates** (TA-2).  AMFI publishes NAVs for Indian calendar days, so an offset-aware timestamp
+  is *converted* to IST (UTC+05:30, no DST) before its date is taken — never truncated in its own zone, which would
+  put a ``2024-01-31T20:00Z`` (= 1 Feb IST) observation in January.  A naive timestamp has no zone and is refused
+  (abstain rather than guess); see :func:`to_ist_date`.
 
 Pure: no clock, IO or randomness (test_engine_purity.py).
 """
@@ -28,7 +32,7 @@ import calendar
 import itertools
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from enum import StrEnum
 
@@ -37,6 +41,9 @@ from iip.engine.money import ONE, ZERO, D, engine_context
 
 METHOD_ID = "MDD-GRID@1"
 DEFAULT_MAX_STALENESS_DAYS = 7
+
+#: India Standard Time: a fixed offset (no DST), so no tz database is read.
+IST = timezone(timedelta(hours=5, minutes=30), "IST")
 
 # Caveat codes
 MONTH_END_SAMPLING = "MONTH_END_SAMPLING_MAY_UNDERSTATE_INTRAMONTH_DRAWDOWN"
@@ -77,17 +84,33 @@ def _is_month_end(d: date) -> bool:
     return d == month_end_of(d)
 
 
-def _as_date(value: date | str, what: str) -> date:
+def to_ist_date(value: object, what: str = "date") -> date:
+    """The IST calendar date of ``value`` (TA-2).
+
+    * ``date`` → itself.
+    * offset-aware ``datetime`` → converted to IST, then its date (never the date in the timestamp's own zone).
+    * naive ``datetime`` → ``InvalidInput``: its zone is unknown, so the day cannot be known.
+    * ``str`` → an ISO date (``YYYY-MM-DD``) as is; an ISO timestamp with an offset (or ``Z``) converted as above; a
+      timestamp without an offset is refused like a naive ``datetime``.
+    * anything else (including ``None`` — an undated row) → ``InvalidInput``.
+    """
     if isinstance(value, datetime):
-        raise InvalidInput(f"{what} must be a date, not a datetime")
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise InvalidInput(f"{what} is a naive timestamp {value.isoformat()!r}; its IST date is unknown")
+        return value.astimezone(IST).date()
     if isinstance(value, date):
         return value
     if isinstance(value, str):
         try:
             return date.fromisoformat(value)
+        except ValueError:
+            pass
+        try:
+            parsed = datetime.fromisoformat(value)
         except ValueError as exc:
-            raise InvalidInput(f"{what} is not an ISO date: {value!r}") from exc
-    raise InvalidInput(f"{what} must be a date or ISO string, got {type(value).__name__}")
+            raise InvalidInput(f"{what} is not an ISO date or timestamp: {value!r}") from exc
+        return to_ist_date(parsed, what)
+    raise InvalidInput(f"{what} must be a date, an offset-aware timestamp or an ISO string, got {type(value).__name__}")
 
 
 def _positive(value: Decimal | str | int, what: str) -> Decimal:
@@ -165,8 +188,8 @@ class SeriesGrid:
         _check_staleness(max_staleness_days)
         cells: list[MonthCell] = []
         for month_end_raw, obs_raw, nav_raw in rows:
-            m = _as_date(month_end_raw, "month_end")
-            o = _as_date(obs_raw, "obs_date")
+            m = to_ist_date(month_end_raw, "month_end")
+            o = to_ist_date(obs_raw, "obs_date")
             if not _is_month_end(m):
                 raise InvalidInput(f"grid key {m} is not a calendar month-end")
             if (o.year, o.month) != (m.year, m.month):
@@ -188,11 +211,14 @@ class SeriesGrid:
 
 
 def month_end_grid(
-    observations: Iterable[tuple[date, Decimal | str | int]],
+    observations: Iterable[tuple[date | datetime, Decimal | str | int]],
     *,
     max_staleness_days: int = DEFAULT_MAX_STALENESS_DAYS,
 ) -> SeriesGrid:
-    """Reduce dated NAV observations (strictly increasing dates, positive Decimal values) to a month-end grid.
+    """Reduce dated NAV observations (strictly increasing IST dates, positive Decimal values) to a month-end grid.
+
+    Offset-aware timestamps are converted to their IST date first (two on the same IST day are a duplicate); naive
+    timestamps and undated rows raise ``InvalidInput``.
 
     The input is never sorted or deduplicated: disorder or duplicates raise ``InvalidInput``.  Raises
     ``InsufficientHistory`` when no month has a valid month-end value.
@@ -201,9 +227,9 @@ def month_end_grid(
     last_in_month: dict[date, tuple[date, Decimal]] = {}
     prev: date | None = None
     for raw_d, raw_v in observations:
-        if isinstance(raw_d, datetime) or not isinstance(raw_d, date):
-            raise InvalidInput(f"observation dates must be datetime.date, got {type(raw_d).__name__}")
-        d = raw_d
+        if not isinstance(raw_d, date):  # undated rows (None) and strings are refused here: fail closed
+            raise InvalidInput(f"observation dates must be dates or offset-aware datetimes, got {type(raw_d).__name__}")
+        d = to_ist_date(raw_d, "observation date")
         v = _positive(raw_v, f"nav at {d}")
         if prev is not None and d <= prev:
             raise InvalidInput(f"observation dates must be strictly increasing: {prev} then {d}")

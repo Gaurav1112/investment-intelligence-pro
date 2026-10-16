@@ -27,6 +27,17 @@ comparison through ``terminal_valuation`` (liquidated, exemption already used: t
 
 The **vault** (the last max(fraction × periods, min_months) of the history) is cut off *before* the walk-forward runs,
 so no vault NAV can reach a rule unless ``run_vault`` is called explicitly (G11, once).
+
+Date windows (TA-2):
+
+* Every window is evaluated half-open, ``start ≤ d < end_exclusive``. Spec files declare windows by their *last day*
+  (``end: 2013-03-31`` then ``start: 2013-04-01``, the rules-file convention), so ``end_exclusive = end + 1 day``;
+  windows of one kind may not overlap (regimes; cost rows of one component, side and tax class), else one date
+  would be attributed twice or priced ambiguously.
+* Panel dates are IST calendar dates. ``align_panel`` converts offset-aware timestamps to IST (never truncating them)
+  and refuses naive ones; ``NavPanel`` refuses any ``datetime`` outright.
+* Undated rows are excluded from a backtest and counted; a role, window or alignment left empty after filtering
+  raises ``InsufficientHistory`` naming what removed the rows, never an empty panel.
 """
 
 from __future__ import annotations
@@ -34,9 +45,9 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import date
+from datetime import date, datetime, timedelta
 from decimal import ROUND_DOWN, Decimal
-from itertools import pairwise
+from itertools import combinations, pairwise
 from types import MappingProxyType
 
 import numpy as np
@@ -55,6 +66,7 @@ from iip.engine.backtest.tax_lots import TaxRateTable
 from iip.engine.errors import InsufficientHistory, InvalidInput, NumericalError
 from iip.engine.forecasting.validation import LeakageError, assert_no_leakage
 from iip.engine.money import ONE, UNITS_QUANTUM, ZERO, D, engine_context, from_float
+from iip.engine.stats.series_grid import to_ist_date
 
 __all__ = [
     "CANARY_MAX_MEAN_SCORE",
@@ -62,6 +74,7 @@ __all__ = [
     "NO_STRESS",
     "R_COST_RULES_MISSING",
     "W_EXIT_LOAD_NOT_MODELLED",
+    "AlignedPanel",
     "BacktestSetup",
     "CanaryResult",
     "CostRateRow",
@@ -80,6 +93,7 @@ __all__ = [
     "VaultSpec",
     "WalkForwardConfig",
     "WalkForwardResult",
+    "align_panel",
     "build_rule",
     "decision_indices",
     "max_drawdown",
@@ -101,6 +115,28 @@ W_EXIT_LOAD_NOT_MODELLED = "exit_load_not_modelled"
 CANARY_MAX_MEAN_SCORE = 0.75
 _WEIGHT_TOLERANCE = Decimal("1e-20")
 _N = NormalDist()
+_DAY = timedelta(days=1)
+
+
+def _end_exclusive(last_day: date | None) -> date | None:
+    """Half-open bound for a window declared by its last day (``None`` = open-ended)."""
+    return None if last_day is None else last_day + _DAY
+
+
+def _in_window(d: date, start: date | None, end_exclusive: date | None) -> bool:
+    """``start ≤ d < end_exclusive`` (either bound may be open)."""
+    return (start is None or d >= start) and (end_exclusive is None or d < end_exclusive)
+
+
+def _overlap(a: tuple[date | None, date | None], b: tuple[date | None, date | None]) -> bool:
+    """Do two half-open windows ``[start, end_exclusive)`` share a date?"""
+    (a0, a1), (b0, b1) = a, b
+    return (a1 is None or b0 is None or b0 < a1) and (b1 is None or a0 is None or a0 < b1)
+
+
+def _check_bound(name: str, d: object) -> None:
+    if d is not None and (isinstance(d, datetime) or not isinstance(d, date)):
+        raise InvalidInput(f"{name} must be a calendar date, got {type(d).__name__}")
 
 
 # ================================================================================================ configuration
@@ -159,14 +195,28 @@ class VaultSpec:
 
 @dataclass(frozen=True, kw_only=True)
 class RegimeSpec:
-    """A pre-declared sub-period. Edges are attributed by the period's start date; only pre-vault periods count."""
+    """A pre-declared sub-period. Edges are attributed by the period's start date; only pre-vault periods count.
+
+    ``end`` is the regime's last day as declared in the spec; membership is the half-open ``[start, end + 1 day)``.
+    """
 
     regime_id: str
     start: date | None
     end: date | None
 
+    def __post_init__(self) -> None:
+        _check_bound(f"regime {self.regime_id}: start", self.start)
+        _check_bound(f"regime {self.regime_id}: end", self.end)
+        if self.start is not None and self.end is not None and self.end < self.start:
+            raise InvalidInput(f"regime {self.regime_id}: end {self.end} is before start {self.start}")
+
+    @property
+    def window(self) -> tuple[date | None, date | None]:
+        """Half-open ``(start, end_exclusive)``."""
+        return self.start, _end_exclusive(self.end)
+
     def contains(self, d: date) -> bool:
-        return (self.start is None or d >= self.start) and (self.end is None or d <= self.end)
+        return _in_window(d, *self.window)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -203,11 +253,20 @@ class CostRateRow:
             raise InvalidInput(f"{self.rule_id}: side must be buy or sell")
         if not (ZERO <= D(self.rate) < ONE):
             raise InvalidInput(f"{self.rule_id}: rate must be in [0, 1)")
+        _check_bound(f"{self.rule_id}: effective_from", self.effective_from)
+        _check_bound(f"{self.rule_id}: effective_to", self.effective_to)
+        if self.effective_from is None:
+            raise InvalidInput(f"{self.rule_id}: effective_from is required")
         if self.effective_to is not None and self.effective_to < self.effective_from:
             raise InvalidInput(f"{self.rule_id}: effective_to before effective_from")
 
+    @property
+    def window(self) -> tuple[date | None, date | None]:
+        """Half-open ``[effective_from, effective_to + 1 day)``; ``effective_to`` is the last day the rate applies."""
+        return self.effective_from, _end_exclusive(self.effective_to)
+
     def covers(self, on: date) -> bool:
-        return self.effective_from <= on and (self.effective_to is None or on <= self.effective_to)
+        return _in_window(on, *self.window)
 
 
 _VERIFIED = frozenset({"VERIFIED-PRIMARY", "VERIFIED-SECONDARY"})
@@ -224,6 +283,21 @@ class MfCostSchedule:
 
     rows: tuple[CostRateRow, ...]
     slippage_rate: Decimal
+
+    def __post_init__(self) -> None:
+        # Two rows of one component that can price the same trade (same side, a shared tax class) on the same day
+        # would make the rate depend on row order: refuse them instead of silently taking the first.
+        for a, b in combinations(self.rows, 2):
+            if (
+                a.component == b.component
+                and a.side == b.side
+                and a.tax_classes & b.tax_classes
+                and _overlap(a.window, b.window)
+            ):
+                raise InvalidInput(
+                    f"cost rows {a.rule_id} and {b.rule_id} both price {a.side} {a.component} for "
+                    f"{sorted(a.tax_classes & b.tax_classes)} on overlapping dates"
+                )
 
     def _components(self, side: str, tax_class: str) -> dict[str, list[CostRateRow]]:
         out: dict[str, list[CostRateRow]] = {}
@@ -286,6 +360,11 @@ class NavPanel:
     navs: Mapping[str, tuple[Decimal, ...]]
 
     def __post_init__(self) -> None:
+        for d in self.dates:
+            if isinstance(d, datetime) or not isinstance(d, date):
+                raise InvalidInput(
+                    f"panel dates must be IST calendar dates, got {type(d).__name__} {d!r} (use align_panel to convert)"
+                )
         if len(self.dates) < 2:
             raise InsufficientHistory("a NAV panel needs at least 2 observations")
         for a, b in zip(self.dates, self.dates[1:], strict=False):
@@ -305,6 +384,81 @@ class NavPanel:
 
     def truncate(self, n_obs: int) -> NavPanel:
         return NavPanel(self.dates[:n_obs], {r: v[:n_obs] for r, v in self.navs.items()})
+
+
+@dataclass(frozen=True)
+class AlignedPanel:
+    """A backtest panel plus what was removed to build it (every exclusion is counted, never silent)."""
+
+    panel: NavPanel
+    undated_excluded: Mapping[str, int]  # role → rows with no date
+    outside_window: Mapping[str, int]  # role → dated rows outside ``[start, end)``
+    unaligned_dropped: int  # in-window dates missing for at least one role
+    start: date | None
+    end: date | None  # exclusive
+
+
+def align_panel(
+    series: Mapping[str, Sequence[tuple[object, Decimal | str | int]]],
+    *,
+    start: date | None = None,
+    end: date | None = None,
+) -> AlignedPanel:
+    """Build a backtest panel from per-role ``(date, nav)`` rows, on the dates every role has, inside ``[start, end)``.
+
+    * Undated rows (``None`` or empty date) are excluded and counted: a backtest never guesses when a NAV applied.
+    * Dates are IST calendar dates (``to_ist_date``): offset-aware timestamps are converted, naive ones refused.
+    * Two rows of one role on one IST date must agree, else ``InvalidInput``; identical repeats collapse.
+    * ``end`` is exclusive. A role left with no rows, or fewer than 2 common dates, raises ``InsufficientHistory``
+      saying which filter emptied it.
+    """
+    _check_bound("start", start)
+    _check_bound("end", end)
+    if start is not None and end is not None and not start < end:
+        raise InvalidInput(f"empty window [{start}, {end})")
+    if not series:
+        raise InvalidInput("no roles supplied")
+    by_role: dict[str, dict[date, Decimal]] = {}
+    undated: dict[str, int] = {}
+    outside: dict[str, int] = {}
+    for role in sorted(series):
+        kept: dict[date, Decimal] = {}
+        n_undated = n_outside = 0
+        for raw_d, raw_v in series[role]:
+            if raw_d is None or (isinstance(raw_d, str) and not raw_d.strip()):
+                n_undated += 1
+                continue
+            d = to_ist_date(raw_d, f"role {role}: observation date")
+            if not _in_window(d, start, end):
+                n_outside += 1
+                continue
+            v = D(raw_v)
+            if d in kept and kept[d] != v:
+                raise InvalidInput(f"role {role}: conflicting NAVs {kept[d]} and {v} on {d}")
+            kept[d] = v
+        undated[role], outside[role] = n_undated, n_outside
+        if not kept:
+            raise InsufficientHistory(
+                f"role {role}: no observations left after excluding {n_undated} undated and {n_outside} "
+                f"outside [{start or '-inf'}, {end or '+inf'})"
+            )
+        by_role[role] = kept
+    all_dates = set().union(*(set(v) for v in by_role.values()))
+    common = sorted(set.intersection(*(set(v) for v in by_role.values())))
+    if len(common) < 2:
+        raise InsufficientHistory(
+            f"only {len(common)} date(s) common to all roles in [{start or '-inf'}, {end or '+inf'}) "
+            f"(undated excluded: {undated})"
+        )
+    panel = NavPanel(tuple(common), {r: tuple(by_role[r][d] for d in common) for r in by_role})
+    return AlignedPanel(
+        panel=panel,
+        undated_excluded=MappingProxyType(undated),
+        outside_window=MappingProxyType(outside),
+        unaligned_dropped=len(all_dates) - len(common),
+        start=start,
+        end=end,
+    )
 
 
 def month_end_indices(dates: Sequence[date]) -> tuple[int, ...]:
@@ -539,6 +693,12 @@ class BacktestSetup:
         _strict_int("decision_every_months", self.decision_every_months, 1)
         if D(self.initial_capital) <= ZERO or D(self.contribution) < ZERO:
             raise InvalidInput("initial capital must be > 0 and contribution ≥ 0")
+        ids = [rg.regime_id for rg in self.regimes]
+        if len(set(ids)) != len(ids):
+            raise InvalidInput(f"regime ids must be unique: {ids}")
+        for a, b in combinations(self.regimes, 2):
+            if _overlap(a.window, b.window):
+                raise InvalidInput(f"regimes {a.regime_id} and {b.regime_id} overlap: a period would count in both")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -554,7 +714,7 @@ class PeriodRecord:
 class RegimeEdge:
     regime_id: str
     n_periods: int
-    mean_edge: Decimal | None  # None when the regime has no pre-vault period
+    mean_edge: Decimal | None  # None (never 0) when the regime has no pre-vault period: reported, not blank
 
 
 @dataclass(frozen=True, kw_only=True)

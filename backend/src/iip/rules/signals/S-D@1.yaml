@@ -1,0 +1,53 @@
+# Pre-registered 2026-10-16 (PLAN.md WP B05). Rules only: role names, no scheme, no results.
+# Hurdle is the liquid-fund NAV, frozen before any run (design-judgement.md §2.1 item 2): a historical T-bill series
+# is NOT VERIFIED (the RBI RSS keeps about 10 items).
+id: S-D
+version: 1
+class: S
+family: absolute_momentum
+status: PRE_REGISTERED
+title: 12-1 absolute momentum vs a liquid-fund NAV hurdle
+universe_kind: fixed_roles
+roles:
+  risk: {role: index_fund.nifty50.direct, tax_class: EQUITY}
+  hurdle: {role: liquid_fund.direct, tax_class: DEBT}
+  out: {role: liquid_fund.direct, tax_class: DEBT}
+rule:
+  kind: abs_momentum
+  params: {lookback_months: 12, skip_months: 1}
+  slots: [risk, hurdle, out]
+  formula: "S_m = 1 if NAV_{m−1}/NAV_{m−12} − 1 > L_{m−1}/L_{m−12} − 1 else 0 (L = liquid-fund NAV)"
+benchmark:
+  kind: buy_and_hold
+  params: {}
+  slots: [risk]
+  description: buy-and-hold of the same role, liquidated at the end, taxed identically
+observation: month_end_nav
+decision_every_months: 1
+horizon_months: 1
+capital: {initial_inr: "100000", contribution_inr: "0"}
+walk_forward:
+  lag: 1
+  purge: 1
+  embargo: 1
+  fill_rule: {name: next_day_nav_t3_switch, nav_offset: 1, switch_cash_gap: 3}
+  hac_lag: 0
+vault: {fraction: "0.20", min_months: 36}
+regimes:
+  - {id: a_regular_plan_era, start: null, end: 2013-03-31}
+  - {id: b_direct_pre_2020, start: 2013-04-01, end: 2019-12-31}
+  - {id: c_2020_to_vault, start: 2020-01-01, end: null}
+neighbours:
+  - {lookback_months: 11, skip_months: 1}
+  - {lookback_months: 13, skip_months: 1}
+cost_stress: {cost_multiplier: "1.5", slippage_multiplier: "2"}
+tilt_bounds: {min: "-0.20", max: "0.0"}
+variants_counted: 1
+post_publication_from: 2012-01-01
+expected_outcome: >-
+  NO_SIGNAL (fail G9): expected to match a sample-mean strategy (Huang et al. 2020, via
+  research-evidence-momentum.md §6).
+evidence:
+  - {doc: docs/research/wave1/research-evidence-momentum.md, section: "§6"}
+  - {doc: docs/research/wave1/design-judgement.md, section: "§2.1 item 2"}
+gates: [G1, G2, G3, G4, G5, G6, G7, G8, G9, G10, G11, G12, G13, G14]

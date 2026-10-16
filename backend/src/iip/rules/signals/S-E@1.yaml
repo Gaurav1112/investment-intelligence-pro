@@ -1,0 +1,50 @@
+# Pre-registered 2026-10-16 (PLAN.md WP B05). Rules only: role names, no scheme, no results.
+id: S-E
+version: 1
+class: S
+family: trend_timing
+status: PRE_REGISTERED
+title: 10-month trend filter, index fund vs liquid fund
+universe_kind: fixed_roles
+roles:
+  risk: {role: index_fund.nifty50.direct, tax_class: EQUITY}
+  out: {role: liquid_fund.direct, tax_class: DEBT}
+rule:
+  kind: trend_sma
+  params: {lookback_months: 10}
+  slots: [risk, out]
+  formula: "S_m = 1 if C_m > (1/10)·Σ_{k=0..9} C_{m−k} else 0; hold risk when S_m = 1, else out"
+benchmark:
+  kind: buy_and_hold
+  params: {}
+  slots: [risk]
+  description: buy-and-hold of the same role, liquidated at the end, taxed identically
+observation: month_end_nav
+decision_every_months: 1
+horizon_months: 1
+capital: {initial_inr: "100000", contribution_inr: "0"}
+walk_forward:
+  lag: 1
+  purge: 1
+  embargo: 1
+  fill_rule: {name: next_day_nav_t3_switch, nav_offset: 1, switch_cash_gap: 3}
+  hac_lag: 0
+vault: {fraction: "0.20", min_months: 36}
+regimes:
+  - {id: a_regular_plan_era, start: null, end: 2013-03-31}
+  - {id: b_direct_pre_2020, start: 2013-04-01, end: 2019-12-31}
+  - {id: c_2020_to_vault, start: 2020-01-01, end: null}
+neighbours:
+  - {lookback_months: 9}
+  - {lookback_months: 11}
+cost_stress: {cost_multiplier: "1.5", slippage_multiplier: "2"}
+tilt_bounds: {min: "-0.20", max: "0.0"}
+variants_counted: 1
+post_publication_from: 2007-01-01
+expected_outcome: >-
+  ABSTAIN or NO_SIGNAL (fail G5/G9): Zakamulin, Huang et al. 2020 and Mitra 2011 predict no edge after costs; about
+  0.87 annualised Sharpe would be needed for HAC t ≥ 3 on about 12 years of history.
+evidence:
+  - {doc: docs/research/wave1/research-evidence-momentum.md, section: "§6"}
+  - {doc: docs/research/wave1/design-risk-first.md, section: "§6.1"}
+gates: [G1, G2, G3, G4, G5, G6, G7, G8, G9, G10, G11, G12, G13, G14]

@@ -1,0 +1,52 @@
+# Pre-registered 2026-10-16 (PLAN.md WP B05). Rules only: role names, no scheme, no results.
+id: S-F
+version: 1
+class: S
+family: dual_momentum
+status: PRE_REGISTERED
+title: Dual momentum across a broad index fund, a gold fund and a gilt fund
+universe_kind: fixed_roles
+roles:
+  candidate_equity: {role: index_fund.nifty500.direct, tax_class: EQUITY}
+  candidate_gold: {role: gold_fund.direct, tax_class: OTHER}
+  candidate_gilt: {role: gilt_fund.direct, tax_class: DEBT}
+  hurdle: {role: liquid_fund.direct, tax_class: DEBT}
+  out: {role: liquid_fund.direct, tax_class: DEBT}
+rule:
+  kind: dual_momentum
+  params: {lookback_months: 12}
+  slots: [candidate_equity, candidate_gold, candidate_gilt, hurdle, out]
+  formula: "Pick the highest 12-month NAV return among the candidates; hold it only if it beats the liquid fund's, else hold liquid"
+benchmark:
+  kind: equal_weight
+  params: {}
+  slots: [candidate_equity, candidate_gold, candidate_gilt]
+  description: static equal-weight mix of the three candidates, rebalanced at each annual decision
+observation: month_end_nav
+decision_every_months: 12
+horizon_months: 12
+capital: {initial_inr: "100000", contribution_inr: "0"}
+walk_forward:
+  lag: 1
+  purge: 1
+  embargo: 1
+  fill_rule: {name: next_day_nav_t3_switch, nav_offset: 1, switch_cash_gap: 3}
+  hac_lag: 0
+vault: {fraction: "0.20", min_months: 36}
+regimes:
+  - {id: a_regular_plan_era, start: null, end: 2013-03-31}
+  - {id: b_direct_pre_2020, start: 2013-04-01, end: 2019-12-31}
+  - {id: c_2020_to_vault, start: 2020-01-01, end: null}
+neighbours:
+  - {lookback_months: 11}
+  - {lookback_months: 13}
+cost_stress: {cost_multiplier: "1.5", slippage_multiplier: "2"}
+tilt_bounds: {min: "-0.20", max: "0.0"}
+variants_counted: 1
+post_publication_from: 2012-01-01
+expected_outcome: >-
+  ABSTAIN (fail G5): about 19 annual decisions since gold ETF inception in 2007, far below 30 OOS periods.
+evidence:
+  - {doc: docs/research/wave1/research-evidence-momentum.md, section: "S-F"}
+  - {doc: docs/research/wave1/design-risk-first.md, section: "§6.1"}
+gates: [G1, G2, G3, G4, G5, G6, G7, G8, G9, G10, G11, G12, G13, G14]

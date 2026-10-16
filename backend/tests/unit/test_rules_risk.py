@@ -24,7 +24,9 @@ from iip.rules.loader import (
     ValueSource,
     load_allocation_policy,
     load_equity_costs,
+    LOCAL_STRESS_ENV,
     load_stress_table,
+    load_user_stress_table,
     local_stress_values_path,
     parse_allocation_policy,
     parse_equity_costs,
@@ -190,6 +192,53 @@ def test_malformed_local_file_is_an_error(tmp_path: Path) -> None:
     path.write_text("values: [unclosed", encoding="utf-8")
     with pytest.raises(RuleTableError, match="invalid YAML"):
         load_stress_table(local_values_path=path)
+
+
+def _local_text(values: list[dict[str, Any]]) -> str:
+    return yaml.safe_dump({"schema_version": 1, "values": values})
+
+
+def test_user_stress_table_reads_the_hosted_env_value(tmp_path: Path) -> None:
+    """U-08 on hosted: no local file exists, so the private values come from a secret env var (same schema)."""
+    env = {LOCAL_STRESS_ENV: _local_text([{"risk_class": "EQ_BROAD", "stress": "0.500", "recovery_years": "4.0"}])}
+    table = load_user_stress_table(tmp_path, env)
+    assert table.local_values_loaded is True
+    assert table.cited_stress("EQ_BROAD") == D("0.500")
+    assert "EQ_MID" in table.requires_configuration()
+
+
+def test_user_stress_table_env_wins_over_the_local_file(tmp_path: Path) -> None:
+    _synthetic_local(tmp_path)  # EQ_BROAD 0.500 in the file
+    env = {LOCAL_STRESS_ENV: _local_text([{"risk_class": "EQ_BROAD", "stress": "0.600"}])}
+    assert load_user_stress_table(tmp_path, env).cited_stress("EQ_BROAD") == D("0.600")
+
+
+@pytest.mark.parametrize("blank", ["", "   \n"])
+def test_user_stress_table_blank_env_falls_back_to_the_file(tmp_path: Path, blank: str) -> None:
+    _synthetic_local(tmp_path)
+    assert load_user_stress_table(tmp_path, {LOCAL_STRESS_ENV: blank}).cited_stress("EQ_BROAD") == D("0.500")
+
+
+def test_user_stress_table_without_env_or_file_requires_configuration(tmp_path: Path) -> None:
+    table = load_user_stress_table(tmp_path, {})
+    assert table.local_values_loaded is False and table.cited_stress("EQ_BROAD") is None
+    assert load_user_stress_table(None, {}).local_values_loaded is False
+
+
+@pytest.mark.parametrize(
+    ("text", "match"),
+    [("values: [unclosed", "invalid YAML"), ("- just a list", "mapping"),
+     (_local_text([{"risk_class": "EQ_BROAD", "stress": "1.5"}]), r"\(0, 1\]")],
+)  # fmt: skip
+def test_malformed_env_value_is_an_error_never_ignored(tmp_path: Path, text: str, match: str) -> None:
+    with pytest.raises(RuleTableError, match=match):
+        load_user_stress_table(tmp_path, {LOCAL_STRESS_ENV: text})
+
+
+def test_env_error_never_echoes_the_private_values(tmp_path: Path) -> None:
+    with pytest.raises(RuleTableError) as exc:
+        load_user_stress_table(tmp_path, {LOCAL_STRESS_ENV: "values: [0.6123, unclosed"})
+    assert "0.6123" not in str(exc.value)
 
 
 def test_hybrid_aliases_broad_equity_and_follows_its_configuration(tmp_path: Path) -> None:

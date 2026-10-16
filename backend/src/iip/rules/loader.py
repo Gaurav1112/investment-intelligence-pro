@@ -59,6 +59,7 @@ ALLOCATION_POLICY_PATH = RULES_DIR / "risk" / "allocation_policy.yaml"
 EQUITY_COSTS_PATH = RULES_DIR / "costs" / "india_equity.yaml"
 ACTION_TEMPLATES_PATH = RULES_DIR / "action_templates.yaml"
 LOCAL_STRESS_FILENAME = "stress_drawdowns.local.yaml"
+LOCAL_STRESS_ENV = "IIP_STRESS_DRAWDOWNS_LOCAL"  # hosted twin of the local file (U-08): YAML text, same schema
 SUPPORTED_SCHEMA = 1
 # Historical tax rows must close before the main table starts (FY2024-25); see india.yaml "HISTORICAL ROWS".
 HISTORICAL_TAX_END = date(2024, 3, 31)
@@ -867,6 +868,29 @@ def load_stress_table(path: Path | None = None, *, local_values_path: Path | Non
     the LOCAL_CONFIG classes are then REQUIRES CONFIGURATION."""
     local = _read_yaml(local_values_path) if local_values_path is not None and local_values_path.exists() else None
     return parse_stress_table(_read_yaml(path or STRESS_TABLE_PATH), local)
+
+
+def _parse_local_stress_env(text: str) -> Mapping[str, Any]:
+    # Error messages name the variable only: the value is private (U-08) and must never reach a log or a response.
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        raise RuleTableError(f"invalid YAML in {LOCAL_STRESS_ENV}") from None
+    if not isinstance(data, dict):
+        raise RuleTableError(f"{LOCAL_STRESS_ENV}: top level must be a mapping")
+    return data
+
+
+def load_user_stress_table(data_dir: Path | None, environ: Mapping[str, str]) -> StressTable:
+    """The stress table every caller should use: public rows plus the user's private values (U-08).
+
+    The values come from the secret env var :data:`LOCAL_STRESS_ENV` when it is set and non-blank (the hosted case:
+    a serverless deployment has no data dir to hold the local file), else from the local file under ``data_dir``.
+    Both use the same schema; a malformed env value is an error, never silently ignored."""
+    text = environ.get(LOCAL_STRESS_ENV, "")
+    if text.strip():
+        return parse_stress_table(_read_yaml(STRESS_TABLE_PATH), _parse_local_stress_env(text))
+    return load_stress_table(local_values_path=None if data_dir is None else local_stress_values_path(data_dir))
 
 
 # ---- L5 allocation policy (structure only; targets are dated user decisions) ----

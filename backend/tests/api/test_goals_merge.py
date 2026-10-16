@@ -200,3 +200,51 @@ def test_put_setup_clear_needs_csrf(api: Client) -> None:
     r = c.put("/api/goals/setup", json={"clear": ["emergency.months"]}, headers={"Origin": h["Origin"]})
     assert r.status_code == 403
     assert c.get("/api/goals/setup").json()["answers"]["emergency"]["months"] == 6
+
+
+# ---------------------------------------------------------------------------------------------- GOAL-3
+
+
+def _set_residency(api: Client) -> None:
+    c, h, _ = api
+    r = c.put("/api/goals/tax-context", json={"residency": "non_resident", "ltcg_used_inr": "12345"}, headers=h)
+    assert r.status_code == 200, r.text
+    assert r.json()["residency"] == "non_resident"
+
+
+def test_setup_wire_tax_answer_keeps_residency_set_earlier(api: Client) -> None:
+    """GOAL-3: a setup save carrying a tax answer merges only the tax fields it provides."""
+    c, h, _ = api
+    _set_residency(api)
+    r = c.put("/api/goals/setup", json={"tax": {"regime": "new", "slab_rate": "0.2"}}, headers=h)
+    assert r.status_code == 200, r.text
+    t = c.get("/api/goals/tax-context").json()
+    assert t["residency"] == "non_resident"  # was erased to null
+    assert (t["regime"], t["slab_rate"]) == ("new", "0.2")
+
+
+def test_setup_post_tax_answer_merges_only_provided_fields(api: Client) -> None:
+    c, h, _ = api
+    _set_residency(api)
+    r = c.post("/api/goals/setup", json={"tax": {"regime": "old", "slab_rate": "0.3"}}, headers=h)
+    assert r.status_code == 200, r.text
+    t = c.get("/api/goals/tax-context").json()
+    assert t["residency"] == "non_resident" and t["ltcg_used_inr"] == "12345" and t["ltcg_used_assumed"] is False
+    assert (t["regime"], t["slab_rate"]) == ("old", "0.3")
+    # A provided field is applied, an explicit null included.
+    r = c.post("/api/goals/setup", json={"tax": {"residency": "resident", "ltcg_used_inr": None}}, headers=h)
+    assert r.status_code == 200, r.text
+    t = c.get("/api/goals/tax-context").json()
+    assert t["residency"] == "resident" and t["ltcg_used_inr"] is None and t["ltcg_used_assumed"] is True
+    assert (t["regime"], t["slab_rate"]) == ("old", "0.3")
+
+
+def test_setup_conservative_tax_answer_keeps_residency(api: Client) -> None:
+    c, h, _ = api
+    _set_residency(api)
+    c.put("/api/goals/setup", json={"tax": {"regime": "new", "slab_rate": "0.2"}}, headers=h)
+    r = c.put("/api/goals/setup", json={"tax": {"use_conservative": True}}, headers=h)
+    assert r.status_code == 200, r.text
+    t = c.get("/api/goals/tax-context").json()
+    assert t["residency"] == "non_resident"
+    assert t["regime"] is None and t["slab_rate"] is None and t["ltcg_used_inr"] is None  # the conservative answer

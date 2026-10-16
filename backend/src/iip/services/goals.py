@@ -924,7 +924,24 @@ def setup(conn: sqlite3.Connection, body: SetupIn, fy: str, now: str) -> None:
         for g in body.goals:
             _write_goal(conn, g.goal_id, g.given(), now)
         if body.tax is not None:
-            _write_tax(conn, fy, body.tax, now)
+            _merge_tax(conn, fy, body.tax, now)
+
+
+_TAX_FIELDS = ("regime", "slab_rate", "residency", "ltcg_used_inr")
+
+
+def _merge_tax(conn: sqlite3.Connection, fy: str, body: TaxIn, now: str) -> None:
+    """GOAL-3: a setup save changes only the tax fields its answer provides (an explicit ``null`` included); a field
+    it does not carry, such as residency set through ``PUT /api/goals/tax-context``, keeps its stored value. Choosing
+    the conservative assumption is an answer about regime, slab and LTCG used: it clears those three."""
+    current = repo.get_tax_context(conn, fy) or repo.TaxContext(fy=fy)
+    merged = {k: getattr(current, k) for k in _TAX_FIELDS}
+    merged.update({k: getattr(body, k) for k in _TAX_FIELDS if k in body.model_fields_set})
+    if body.use_conservative_assumption:
+        merged.update(regime=None, slab_rate=None, ltcg_used_inr=None)
+    ctx = repo.TaxContext(fy=fy, **merged, ltcg_used_assumed=merged["ltcg_used_inr"] is None)
+    repo.set_tax_context(conn, ctx, now)
+    _audit(conn, now, "tax_context.update", fy, _given(body))
 
 
 # ================================================================================================ setup wire (C02)

@@ -16,13 +16,14 @@ State-changing routes go through the same session and CSRF middleware as every o
 
 from __future__ import annotations
 
+import os
 from datetime import date
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from iip.rules.loader import load_action_templates, load_stress_table, local_stress_values_path
+from iip.rules.loader import load_action_templates, load_user_stress_table
 from iip.services import risk_snapshot as svc
 from iip.services.today_view import today_response
 from iip.store.db import write_tx
@@ -73,7 +74,7 @@ def router() -> APIRouter:
         as_of = body.as_of or svc.latest_data_date(conn) or now.date()
         if as_of > now.date():
             raise HTTPException(422, {"code": "AS_OF_IN_FUTURE", "message": "as_of cannot be after today"})
-        stress = load_stress_table(local_values_path=local_stress_values_path(st.settings.data_dir))
+        stress = load_user_stress_table(st.settings.data_dir, os.environ)
         templates = load_action_templates()
         daily = svc.run_daily(conn, as_of=as_of, now=now.isoformat(), stress_table=stress, templates=templates)
         return {

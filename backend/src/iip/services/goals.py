@@ -22,6 +22,7 @@ The clock is the caller's: every function that needs "today" or "now" takes it a
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import sqlite3
 from collections.abc import Mapping, Sequence
@@ -146,8 +147,9 @@ class StressHistory(BaseModel):
 
 
 def load_stress_rules(data_dir: Path) -> loader.StressTable:
-    """Public stress table plus the user's local values (U-08), read on every call so an edited file applies."""
-    return loader.load_stress_table(local_values_path=loader.local_stress_values_path(data_dir))
+    """Public stress table plus the user's private values (U-08: hosted env var, else the local file), read on
+    every call so an edited file applies."""
+    return loader.load_user_stress_table(data_dir, os.environ)
 
 
 def _cited(table: loader.StressTable) -> dict[RiskClass, CitedStress]:

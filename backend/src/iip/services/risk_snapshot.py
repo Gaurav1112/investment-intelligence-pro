@@ -26,6 +26,7 @@ packages A14/A15) need user targets and contribution plans that are not collecte
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
@@ -1351,12 +1352,13 @@ def cron_snapshot_step(conn: sqlite3.Connection, now: datetime) -> cron_types.Sn
 
     * ``as_of`` is the DATA date: the newest NAV among the user's holdings, else the newest stored NAV date; never
       the wall clock. With no NAV at all the step refuses (cron reports the failure; nothing is invented).
-    * The stress table is the public rule table only. The user's cited stress values live in LOCAL config (U-08),
-      which a hosted deployment does not have, so those classes stay REQUIRES CONFIGURATION and their layers abstain.
+    * The stress table is the public rule table plus the user's private values from the hosted secret env var
+      ``IIP_STRESS_DRAWDOWNS_LOCAL`` (U-08). Without it those classes stay REQUIRES CONFIGURATION and their layers
+      abstain.
     * No cost/tax basis is loaded yet (no verified MF-redemption STT row), so shadow outcomes wait for one.
 
     Returns an :class:`iip.services.cron.SnapshotOutcome` (identifiers and codes only)."""
-    from iip.rules.loader import load_action_templates, load_stress_table  # noqa: PLC0415 - keep import cost off J1-J3
+    from iip.rules.loader import load_action_templates, load_user_stress_table  # noqa: PLC0415 - keep import cost off J1-J3
     from iip.services import cron  # noqa: PLC0415 - cron resolves this hook by name; avoid an import cycle
 
     as_of = latest_data_date(conn)
@@ -1366,7 +1368,7 @@ def cron_snapshot_step(conn: sqlite3.Connection, now: datetime) -> cron_types.Sn
             raise ValueError("no NAV data to compute a snapshot from")
         as_of = date.fromisoformat(newest)
     as_of = min(as_of, now.date())
-    daily = run_daily(conn, as_of=as_of, now=now.isoformat(), stress_table=load_stress_table(),
+    daily = run_daily(conn, as_of=as_of, now=now.isoformat(), stress_table=load_user_stress_table(None, os.environ),
                       templates=load_action_templates())  # fmt: skip
     snap = daily.snapshot
     reg = registry_problems(daily.shadow)

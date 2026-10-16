@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from iip.rules.loader import LOCAL_STRESS_ENV
 from iip.services import cron, notify
 from iip.services import risk_snapshot as rs
 from tests.services import _snapshot_fixtures as fx
@@ -68,17 +69,34 @@ def test_send_ping_refuses_without_a_transport_and_sends_only_the_fixed_text(mon
         notify.send_ping(_row(channel="webpush", kind="report", as_of_date=None))
 
 
-def test_cron_snapshot_step_stores_once_and_reports_codes_only(conn: Any) -> None:
+def test_cron_snapshot_step_stores_once_and_reports_codes_only(conn: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(LOCAL_STRESS_ENV, raising=False)
     fx.seed_two_goals(conn)
     first = rs.cron_snapshot_step(conn, NOW)
     assert isinstance(first, cron.SnapshotOutcome) and first.written
-    # Hosted has no local stress config (U-08): the loss-budget layer cannot run, so the snapshot abstains honestly.
+    # Without the hosted stress values (U-08) the loss-budget layer cannot run, so the snapshot abstains honestly.
     assert first.as_of_date == fx.AS_OF.isoformat() and first.verdict == rs.VERDICT_ABSTAIN
     stored = conn.execute("SELECT card_set_hash FROM signal_snapshots WHERE snapshot_id = ?",
                           (first.snapshot_id,)).fetchone()  # fmt: skip
     assert stored["card_set_hash"] == first.card_set_hash
     again = rs.cron_snapshot_step(conn, NOW)
     assert again.snapshot_id == first.snapshot_id and not again.written
+
+
+def test_cron_snapshot_step_uses_the_hosted_private_stress_values(conn: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """U-08 on hosted: J4 must read the same private values the Today page uses, from the secret env var."""
+    monkeypatch.setenv(LOCAL_STRESS_ENV, "schema_version: 1\nvalues:\n  - {risk_class: EQ_BROAD, stress: '0.500'}\n")
+    seen: list[Any] = []
+    real = rs.run_daily
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        seen.append(kwargs["stress_table"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(rs, "run_daily", spy)
+    fx.seed_two_goals(conn)
+    rs.cron_snapshot_step(conn, NOW)
+    assert seen and seen[0].local_values_loaded and str(seen[0].cited_stress("EQ_BROAD")) == "0.500"
 
 
 def test_cron_snapshot_step_refuses_without_any_nav(conn: Any) -> None:

@@ -11,8 +11,9 @@ No CORS headers are ever emitted.
 Scheduled jobs (research-automation-infra.md §3, PLAN rank 10): ``GET|POST /api/cron/{job}`` is the ONE route that
 also accepts the generated deployment host (``$VERCEL_URL``), authenticates with ``Authorization: Bearer
 <CRON_SECRET>`` instead of a session, and skips CSRF (no cookie, no ambient credential). Every other route keeps the
-exact host allowlist. Wrong secrets are rate-limited; while the limit is exhausted every cron call is refused, the
-correct secret included, so the limiter actually slows guessing. With no secret configured the route answers 404.
+exact host allowlist. Wrong secrets are rate-limited (401, then 429 while the limit is exhausted); the correct secret
+is checked first and always passes, so junk bearers cannot suppress the public cron schedule. With no secret
+configured the route answers 404.
 
 Session lookups (database statements when hosted) run in the thread pool, never on the event loop, and a hosted
 session's ``last_seen`` is written at most once per ``LAST_SEEN_THROTTLE_S``.

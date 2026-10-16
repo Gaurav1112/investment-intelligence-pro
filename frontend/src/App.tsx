@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useRef, useState, type ComponentType, type ReactNode } from "react";
 import { Link, NavLink, Route, Routes, useLocation } from "react-router-dom";
 import { ApiError, login, readLoginFragment, restoreSession, UNAUTHORIZED_EVENT } from "./lib/api";
 import { dateLabel, inr, utcStamp } from "./lib/format";
@@ -9,6 +9,7 @@ import type { DataHealthResponse } from "./lib/types";
 import { useApi } from "./lib/useApi";
 
 const Onboarding = lazy(() => import("./pages/Onboarding"));
+const Today = lazy(() => import("./pages/Today"));
 const Discovery = lazy(() => import("./pages/Discovery"));
 const Overview = lazy(() => import("./pages/Overview"));
 const MfExplorer = lazy(() => import("./pages/MfExplorer"));
@@ -72,7 +73,8 @@ const NAV: { group: string; items: [string, string][] }[] = [
   {
     group: "Decide",
     items: [
-      ["/", "Overview"],
+      ["/", "Today"],
+      ["/overview", "Overview"],
       ["/discover", "Discovery"],
       ["/compare", "Compare"],
       ["/scenarios", "Scenarios"],
@@ -236,6 +238,27 @@ export function Shell({ children }: { children: ReactNode }) {
   );
 }
 
+/** Every page route inside the shell. `/` is Today (C01); Overview moved to `/overview`. */
+export const ROUTES: { path: string; name: string; Component: ComponentType }[] = [
+  { path: "/", name: "Today", Component: Today },
+  { path: "/overview", name: "Overview", Component: Overview },
+  { path: "/discover", name: "Discovery", Component: Discovery },
+  { path: "/mf", name: "Mutual funds", Component: MfExplorer },
+  { path: "/fi", name: "Fixed income", Component: FixedIncome },
+  { path: "/i/:id", name: "Instrument detail", Component: InstrumentDetail },
+  { path: "/compare", name: "Compare", Component: Compare },
+  { path: "/scenarios", name: "Scenarios", Component: Scenarios },
+  { path: "/simulate", name: "Simulator", Component: Simulator },
+  { path: "/risk", name: "Risk", Component: Risk },
+  { path: "/watchlist", name: "Watchlist", Component: Watchlist },
+  { path: "/alerts", name: "Alerts", Component: Alerts },
+  { path: "/evidence", name: "Evidence", Component: Evidence },
+  { path: "/evidence/:obsId", name: "Evidence", Component: Evidence },
+  { path: "/methodology", name: "Methodology", Component: Methodology },
+  { path: "/settings", name: "Settings", Component: Settings },
+  { path: "/data-health", name: "Data health", Component: DataHealth },
+];
+
 export function App() {
   return (
     <AuthGate>
@@ -254,22 +277,9 @@ export function App() {
             element={
               <Shell>
                 <Routes>
-                  <Route path="/" element={<Overview />} />
-                  <Route path="/discover" element={<Discovery />} />
-                  <Route path="/mf" element={<MfExplorer />} />
-                  <Route path="/fi" element={<FixedIncome />} />
-                  <Route path="/i/:id" element={<InstrumentDetail />} />
-                  <Route path="/compare" element={<Compare />} />
-                  <Route path="/scenarios" element={<Scenarios />} />
-                  <Route path="/simulate" element={<Simulator />} />
-                  <Route path="/risk" element={<Risk />} />
-                  <Route path="/watchlist" element={<Watchlist />} />
-                  <Route path="/alerts" element={<Alerts />} />
-                  <Route path="/evidence" element={<Evidence />} />
-                  <Route path="/evidence/:obsId" element={<Evidence />} />
-                  <Route path="/methodology" element={<Methodology />} />
-                  <Route path="/settings" element={<Settings />} />
-                  <Route path="/data-health" element={<DataHealth />} />
+                  {ROUTES.map(({ path, Component }) => (
+                    <Route key={path} path={path} element={<Component />} />
+                  ))}
                 </Routes>
               </Shell>
             }

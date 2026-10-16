@@ -380,9 +380,14 @@ def _g9(inp: GateInputs) -> GateResult:
 
 def _g10(inp: GateInputs) -> GateResult:
     parts: list[GateResult] = []
+    # An empty regime (no pre-vault period: mean_edge None) is missing evidence, never a non-positive edge, so it
+    # abstains (U-06: the threshold is unchanged; only missing data is no longer read as a failure).
+    empty = [r.regime_id for r in inp.regimes if r.mean_edge is None or r.n_periods == 0]
     positive = sum(1 for r in inp.regimes if r.mean_edge is not None and r.mean_edge > ZERO)
     if len(inp.regimes) < 3:
         parts.append(_abstain("G10.regimes", "regimes_undefined", f"{len(inp.regimes)} regimes declared"))
+    elif empty:
+        parts.append(_abstain("G10.regimes", "regime_empty", f"no pre-vault period in regime(s) {', '.join(empty)}"))
     elif positive >= MIN_REGIMES_POSITIVE:
         parts.append(_pass("G10.regimes", float(positive), 2.0))
     else:

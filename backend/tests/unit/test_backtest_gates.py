@@ -156,3 +156,36 @@ def test_large_families_need_spa_which_fails_closed() -> None:
 def test_p_value_from_sharpe() -> None:
     assert gt.p_value_from_sharpe(0.0, 100) == pytest.approx(0.5)
     assert gt.p_value_from_sharpe(0.3, 100) == pytest.approx(1 - 0.998650, abs=1e-6)  # Φ(3) = 0.998650
+
+
+def _regimes(*edges: str | None) -> tuple[RegimeEdge, ...]:
+    return tuple(
+        RegimeEdge(regime_id=f"r{i}", n_periods=0 if e is None else 10, mean_edge=None if e is None else D(e))
+        for i, e in enumerate(edges)
+    )
+
+
+def _g10_regimes(panel: gt.GatePanel) -> str:
+    return next(p for p in panel.gate("G10").detail.split("; ") if p.startswith("G10.regimes"))
+
+
+def test_g10_abstains_when_a_regime_is_empty_never_counts_it_as_not_positive() -> None:
+    # SIG-4: an empty regime (no pre-vault period, mean_edge None) is MISSING evidence, not a non-positive edge.
+    panel = gt.evaluate_gates(replace(_good(), regimes=_regimes("0.01", None, "-0.01")))
+    g = panel.gate("G10")
+    assert g.status is gt.GateStatus.ABSTAIN and g.reason_code == "regime_empty"
+    assert _g10_regimes(panel) == "G10.regimes: abstain (regime_empty)"
+    assert panel.verdict.state is gt.SignalState.ABSTAIN and panel.verdict.gate_id == "G10"
+    assert panel.verdict.reason_code == "regime_empty"
+    # even with the threshold count reached, an empty regime still abstains (U-06: no inference from missing data)
+    assert gt.evaluate_gates(replace(_good(), regimes=_regimes("0.01", "0.02", None))).gate("G10").reason_code == (
+        "regime_empty"
+    )
+
+
+def test_g10_still_fails_when_every_regime_has_evidence_and_too_few_are_positive() -> None:
+    panel = gt.evaluate_gates(replace(_good(), regimes=_regimes("0.01", "-0.01", "0")))
+    g = panel.gate("G10")
+    assert g.status is gt.GateStatus.FAIL and g.reason_code == "not_robust"
+    assert _g10_regimes(panel) == "G10.regimes: fail (not_robust)"
+    assert panel.verdict.state is gt.SignalState.NO_SIGNAL and panel.verdict.reason_code == "not_robust"

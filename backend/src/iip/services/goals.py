@@ -30,7 +30,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints, ValidationError, model_validator
 
 from iip.engine.money import engine_context, money, rate_store
 from iip.engine.ranking import Objective
@@ -252,8 +252,45 @@ class GoalIn(BaseModel):
         return self
 
 
-class SetupGoalIn(GoalIn):
+class GoalPatchIn(BaseModel):
+    """An update to a stored goal: only the fields the body carries change (GOAL-1).
+
+    An omitted field keeps its stored value; an explicit ``null`` clears it. The name cannot be cleared. The merged
+    goal is validated as a whole (:class:`GoalIn`) before anything is written.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: Name | None = None
+    target_amount: Dec | None = Field(default=None, gt=0, le=MAX_INR)
+    target_date: date | None = None
+    objective: Objective | None = None
+    loss_budget_inr: Dec | None = Field(default=None, ge=0, le=MAX_INR)
+    recovery_months: int | None = Field(default=None, ge=0, le=600)
+    h_safe_years: Dec | None = Field(default=None, ge=0, le=50)
+    priority: int | None = Field(default=None, ge=1, le=1000)
+
+    @model_validator(mode="after")
+    def _name_kept(self) -> GoalPatchIn:
+        if "name" in self.model_fields_set and self.name is None:
+            raise ValueError("a goal's name cannot be cleared")
+        return self
+
+    def given(self) -> dict[str, Any]:
+        """The fields this body carries (explicit ``null`` included), by name."""
+        return {k: getattr(self, k) for k in self.model_fields_set if k in GoalIn.model_fields}
+
+
+class SetupGoalIn(GoalPatchIn):
+    """A setup goal: with ``goal_id`` it updates that goal (merge); without it creates one, which needs a name."""
+
     goal_id: Annotated[str, StringConstraints(pattern=GOAL_ID_PATTERN)] | None = None
+
+    @model_validator(mode="after")
+    def _new_goal_named(self) -> SetupGoalIn:
+        if self.goal_id is None and self.name is None:
+            raise ValueError("a new goal needs a name")
+        return self
 
 
 class WorstFallLine(BaseModel):
@@ -393,6 +430,10 @@ def _given(model: BaseModel) -> list[str]:
     return [k for k, v in model.model_dump().items() if v is not None]
 
 
+def _given_fields(model: BaseModel) -> dict[str, Any]:
+    return {k: getattr(model, k) for k in model.model_fields_set}
+
+
 def _new_goal_id() -> str:
     return "g-" + secrets.token_hex(6)
 
@@ -404,6 +445,28 @@ def _next_priority(conn: sqlite3.Connection) -> int:
 
 def _get_goal(conn: sqlite3.Connection, goal_id: str) -> repo.Goal | None:
     return next((g for g in repo.list_goals(conn) if g.goal_id == goal_id), None)
+
+
+def _stored_fields(g: repo.Goal) -> dict[str, Any]:
+    """A stored goal as :class:`GoalIn` field values (the base an update merges onto)."""
+    return {
+        "name": g.name,
+        "target_amount": g.target_amount,
+        "target_date": None if g.target_date is None else date.fromisoformat(g.target_date),
+        "objective": None if g.objective is None else _OBJ_BY_LETTER[g.objective],
+        "loss_budget_inr": g.loss_budget_inr,
+        "recovery_months": g.recovery_months,
+        "h_safe_years": g.h_safe_years,
+        "priority": g.priority,
+    }
+
+
+def _merged(base: Mapping[str, Any], given: Mapping[str, Any]) -> GoalIn:
+    try:
+        return GoalIn.model_validate({**base, **given})
+    except ValidationError as exc:
+        msg = "; ".join(str(e.get("msg", "")) for e in exc.errors()) or "invalid goal"
+        raise GoalsError(422, "INVALID_INPUT", msg) from exc
 
 
 def _to_goal(goal_id: str, body: GoalIn, priority: int, keep: repo.Goal | None) -> repo.Goal:
@@ -421,24 +484,31 @@ def _to_goal(goal_id: str, body: GoalIn, priority: int, keep: repo.Goal | None) 
     )
 
 
-def _write_goal(conn: sqlite3.Connection, goal_id: str | None, body: GoalIn, now: str) -> repo.Goal:
-    """Create (``goal_id`` None) or update one goal; must run inside a write transaction."""
+def _write_goal(conn: sqlite3.Connection, goal_id: str | None, given: Mapping[str, Any], now: str) -> repo.Goal:
+    """Create (``goal_id`` None) or update one goal; must run inside a write transaction.
+
+    ``given`` holds only the fields the request carried. An update merges them onto the stored goal (an omitted field
+    keeps its value, an explicit ``None`` clears it) and validates the merged goal before writing.
+    """
     keep: repo.Goal | None = None
     if goal_id is not None:
         keep = _get_goal(conn, goal_id)
         if keep is None:
             raise GoalsError(404, "GOAL_NOT_FOUND", f"no goal {goal_id}")
+    body = _merged({} if keep is None else _stored_fields(keep), given)
     gid = goal_id or _new_goal_id()
     priority = body.priority or (keep.priority if keep is not None else _next_priority(conn))
     goal = _to_goal(gid, body, priority, keep)
     repo.upsert_goals(conn, [goal], now)
-    _audit(conn, now, "goal.update" if keep else "goal.create", gid, _given(body))
+    _audit(conn, now, "goal.update" if keep else "goal.create", gid, sorted(given))
     return goal
 
 
-def save_goal(conn: sqlite3.Connection, goal_id: str | None, body: GoalIn, now: str) -> repo.Goal:
+def save_goal(conn: sqlite3.Connection, goal_id: str | None, body: GoalIn | GoalPatchIn, now: str) -> repo.Goal:
+    """Create a goal from a full :class:`GoalIn`, or merge a :class:`GoalPatchIn` onto the stored goal."""
+    given = body.given() if isinstance(body, GoalPatchIn) else _given_fields(body)
     with write_tx(conn):
-        return _write_goal(conn, goal_id, body, now)
+        return _write_goal(conn, goal_id, given, now)
 
 
 def delete_goal(conn: sqlite3.Connection, goal_id: str, now: str) -> None:
@@ -843,8 +913,7 @@ def setup(conn: sqlite3.Connection, body: SetupIn, fy: str, now: str) -> None:
             )
             _write_risk_profile(conn, merged, now)
         for g in body.goals:
-            fields = g.model_dump(exclude={"goal_id"})
-            _write_goal(conn, g.goal_id, GoalIn(**fields), now)
+            _write_goal(conn, g.goal_id, g.given(), now)
         if body.tax is not None:
             _write_tax(conn, fy, body.tax, now)
 
@@ -910,8 +979,10 @@ class SetupGoalOut(BaseModel):
     priority: int
     target_amount: Decimal | None
     target_date: date | None
+    objective: Objective | None
     loss_budget_inr: Decimal | None
     recovery_months: int | None
+    h_safe_years: Decimal | None
 
 
 class SetupAnswersOut(BaseModel):
@@ -955,7 +1026,8 @@ def setup_state(conn: sqlite3.Connection, table: loader.StressTable, today: date
                 SetupGoalOut(
                     goal_id=g.goal_id, name=g.name, priority=g.priority, target_amount=g.target_amount,
                     target_date=None if g.target_date is None else date.fromisoformat(g.target_date),
-                    loss_budget_inr=g.loss_budget_inr, recovery_months=g.recovery_months,
+                    objective=None if g.objective is None else _OBJ_BY_LETTER[g.objective],
+                    loss_budget_inr=g.loss_budget_inr, recovery_months=g.recovery_months, h_safe_years=g.h_safe_years,
                 )
                 for g in ctx.goals
             ],
@@ -974,6 +1046,7 @@ __all__ = [
     "GOAL_ID_PATTERN",
     "STRESS_ON_AMOUNT_ID",
     "GoalIn",
+    "GoalPatchIn",
     "GoalView",
     "GoalsError",
     "GoalsOverview",

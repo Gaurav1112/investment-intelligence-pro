@@ -153,7 +153,7 @@ def router() -> APIRouter:
         return goal_view(request, goal)
 
     @r.put("/{goal_id}")
-    def update_goal(goal_id: GoalId, body: svc.GoalIn, request: Request) -> svc.GoalView:
+    def update_goal(goal_id: GoalId, body: svc.GoalPatchIn, request: Request) -> svc.GoalView:
         st = state(request)
         goal = _guard(lambda: svc.save_goal(st.conn, goal_id, body, st.clock().isoformat()))
         return goal_view(request, goal)

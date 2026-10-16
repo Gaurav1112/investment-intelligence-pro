@@ -11,15 +11,16 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from itertools import groupby
 from typing import Any
 
 from iip.engine import candidates as cb
 from iip.engine import tax as tx
 from iip.engine.determinism import CANONICAL_VERSION, canonical_json, content_hash
-from iip.engine.money import D, format_inr, money, pct, quantize
+from iip.engine.money import ZERO, D, engine_context, format_inr, money, pct, quantize
 from iip.engine.ranking import (
     MIN_PRESERVATION_INDEPENDENT_WINDOWS,
     POLICY_VERSION,
@@ -30,7 +31,7 @@ from iip.engine.ranking import (
     Tier,
     rank,
 )
-from iip.services import bonds, inputs
+from iip.services import bonds
 from iip.services import portfolio as pf
 from iip.services.explain import badge, source_ref
 from iip.services.instruments import FD_RATE_STALE_DAYS, TBILL_STALE_DAYS
@@ -67,13 +68,29 @@ class Universe:
     sources: dict[str, dict[str, Any]]  # instrument_id → provenance summary
     skipped_no_history: int
     evaluated_mf: int
+    # Time budget (A02): schemes with enough history that were NOT evaluated because the budget ran out, and the
+    # instrument kinds whose evaluation was cut short. Both empty ⇔ the universe is complete.
+    not_evaluated: int = 0
+    incomplete_kinds: tuple[str, ...] = ()
+    # FD institution types read in the same batched statement as the FD terms (None = never recorded).
+    fd_institution_types: dict[str, str | None] = field(default_factory=dict)
+
+    @property
+    def partial(self) -> bool:
+        return bool(self.incomplete_kinds)
 
 
 # ----------------------------------------------------------------------------- universe
 
+# A user-facing Discovery request must never run into the platform's 300 s wall (audit-perf-hosted RC-2): after this
+# many seconds the universe build stops and the result is returned flagged as PARTIAL. PARAMETER.
+DISCOVER_BUDGET_S = 60.0
+TIME_BUDGET_EXCEEDED = "TIME_BUDGET_EXCEEDED"
+_USABLE = "('ok','manual','fixture')"
 
 # Official AMFI sources in precedence order when both report the same date (they must agree; see _nav_series).
 _NAV_SOURCE_PRECEDENCE = ("amfi.navall", "amfi.navhistory", "fixture")
+_NAV_COLUMNS = "series_id, observation_date, value, source_id, source_url, retrieved_at, quality_status"
 
 
 def _nav_series(
@@ -85,11 +102,18 @@ def _nav_series(
     the date is recorded in prov['conflicts'] and callers must not evaluate the series — never pick one silently.
     """
     rows = conn.execute(
-        "SELECT observation_date, value, source_id, source_url, retrieved_at, quality_status FROM observations"
-        " WHERE series_id=? AND superseded_by IS NULL AND quality_status IN ('ok','manual','fixture')"
-        " ORDER BY observation_date",
+        f"SELECT {_NAV_COLUMNS} FROM observations"  # noqa: S608
+        f" WHERE series_id=? AND superseded_by IS NULL AND quality_status IN {_USABLE}"
+        " ORDER BY observation_date, source_id",
         (f"nav:{code}",),
     ).fetchall()
+    return _nav_series_from_rows(rows, as_of)
+
+
+def _nav_series_from_rows(
+    rows: Sequence[sqlite3.Row], as_of: date | None
+) -> tuple[list[date], list[Decimal], dict[str, Any]]:
+    """The rule of :func:`_nav_series` applied to rows already fetched (the batched universe build uses it)."""
 
     def rank(r: sqlite3.Row) -> int:
         sid = r["source_id"]
@@ -147,7 +171,44 @@ def _tax_profile(status: ProfileStatus) -> tx.TaxProfile | None:
     )
 
 
-def build_universe(  # noqa: PLR0915 - one linear pass per instrument kind
+def _fund_credit_facts_batch(
+    conn: sqlite3.Connection, instrument_ids: Sequence[str], as_of: date
+) -> dict[str, cb.FundCreditFacts]:
+    """:func:`inputs.fund_credit_facts` for many schemes in ONE statement (same filter and the same ordering: the
+    latest portfolio date on or before ``as_of``, then the latest entry)."""
+    if not instrument_ids:
+        return {}
+    out: dict[str, cb.FundCreditFacts] = {}
+    for r in conn.execute(
+        "SELECT instrument_id, lowest_rating, as_of_date FROM fund_facts"
+        " WHERE instrument_id IN (SELECT value FROM json_each(?)) AND as_of_date <= ?"
+        " ORDER BY instrument_id, as_of_date DESC, entered_at DESC, fact_id DESC",
+        (json.dumps(sorted(instrument_ids)), as_of.isoformat()),
+    ):
+        if r["instrument_id"] not in out:  # first row per scheme = the latest
+            out[r["instrument_id"]] = cb.FundCreditFacts(
+                lowest_rating=r["lowest_rating"], as_of=date.fromisoformat(r["as_of_date"])
+            )
+    return out
+
+
+def _existing_fd(
+    raw_json: str | None, institution: str, dicgc_eligible: object, held: dict[pf.BankKey, Decimal] | None
+) -> Decimal | None:
+    """:func:`portfolio.existing_fd_deposits` on values already fetched (same rule; the parity test with
+    ``analysis.build_one``, which calls the original, keeps them equal)."""
+    raw = None if raw_json is None else json.loads(raw_json)
+    manual = None if raw is None else Decimal(raw)
+    if held is None:
+        return None
+    k = pf._bank_key(institution, dicgc_eligible)
+    if manual is None and k not in held:
+        return None
+    with engine_context():
+        return (manual or ZERO) + held.get(k, ZERO)
+
+
+def build_universe(
     conn: sqlite3.Connection,
     *,
     amount: Decimal,
@@ -156,143 +217,82 @@ def build_universe(  # noqa: PLR0915 - one linear pass per instrument kind
     ruleset: tx.TaxRuleSet,
     profile: tx.TaxProfile | None,
     excluded_kinds: Sequence[str],
+    time_left: Callable[[], float] | None = None,
 ) -> Universe:
+    """Every evaluable instrument, read with a CONSTANT number of statements per instrument kind (audit-perf-hosted
+    RC-2: one statement per scheme took 1,791 statements and a 504). Statements: MF list with history counts, fund
+    credit facts, one NAV stream; T-bills with their quotes; FD terms with their settings (+ the portfolio exposure
+    read); bonds (services/bonds.py, per bond — user-entered rows).
+
+    ``time_left`` (seconds remaining; None = no budget) is checked before every instrument: when it reaches 0 the
+    build stops and the universe is flagged partial (``incomplete_kinds``) instead of running into a timeout."""
     built: list[cb.BuiltCandidate] = []
     sources: dict[str, dict[str, Any]] = {}
-    skipped = evaluated = 0
+    skipped = evaluated = not_evaluated = 0
+    incomplete: list[str] = []
+    fd_types: dict[str, str | None] = {}
+
+    def out_of_time() -> bool:
+        return time_left is not None and time_left() <= 0
 
     if "mf_scheme" not in excluded_kinds:
-        for r in conn.execute(
-            "SELECT i.instrument_id, i.name, i.amfi_code, m.category_raw, m.exit_load_json FROM instruments i"
-            " JOIN mf_schemes m USING(instrument_id) ORDER BY i.instrument_id"
-        ):
-            # RT-27: only usable rows count (not rejected/suspect, not superseded), one per date — the same filter
-            # _nav_series applies, so the gate cannot admit a scheme on rows the evaluation will never see.
-            n = conn.execute(
-                "SELECT COUNT(DISTINCT observation_date) FROM observations WHERE series_id=? AND superseded_by IS NULL"
-                " AND quality_status IN ('ok','manual','fixture')",
-                (f"nav:{r['amfi_code']}",),
-            ).fetchone()[0]
-            if n < MIN_HISTORY_POINTS:
-                skipped += 1
-                continue
-            evaluated += 1
-            dates, navs, prov = _nav_series(conn, r["amfi_code"], as_of)
-            if prov["conflicts"]:
-                tier = cb.mf_tier_from_category(r["category_raw"] or "")
-                reason = [f"SOURCE_CONFLICT: official sources disagree on {prov['conflicts'][0]}"]
-                built.append(cb._ineligible(r["instrument_id"], r["name"], tier, reason, amount))
-                sources[r["instrument_id"]] = {**prov, "kind": "mf_scheme", "category": r["category_raw"] or ""}
-                continue
-            load = None
-            if r["exit_load_json"]:
-                el = json.loads(r["exit_load_json"])
-                load = cb.ExitLoadSpec(days=int(el["days"]), rate=Decimal(el["rate"]), citation=el["citation"])
-            cat = r["category_raw"] or ""
-            settle = 1 if cb.mf_tier_from_category(cat).name == "T3" else 3
-            built.append(
-                cb.mf_candidate(
-                    instrument_id=r["instrument_id"],
-                    name=r["name"],
-                    category=cat,
-                    amount=amount,
-                    as_of=as_of,
-                    withdrawal=withdrawal,
-                    nav_dates=dates,
-                    navs=navs,
-                    exit_load=load,
-                    ruleset=ruleset,
-                    profile=profile,
-                    settlement_days=settle,
-                    credit_facts=inputs.fund_credit_facts(conn, r["instrument_id"], as_of),
-                )
+        # RT-27: only usable rows count (not rejected/suspect, not superseded), one per date — the same filter
+        # _nav_series applies, so the gate cannot admit a scheme on rows the evaluation will never see.
+        mf_rows = conn.execute(
+            "SELECT i.instrument_id, i.name, i.amfi_code, m.category_raw, m.exit_load_json,"  # noqa: S608
+            " (SELECT COUNT(DISTINCT o.observation_date) FROM observations o WHERE o.series_id = 'nav:' || i.amfi_code"
+            f"  AND o.superseded_by IS NULL AND o.quality_status IN {_USABLE}) AS nav_points"
+            " FROM instruments i JOIN mf_schemes m USING(instrument_id) ORDER BY i.instrument_id"
+        ).fetchall()
+        eligible = {f"nav:{r['amfi_code']}": r for r in mf_rows if r["nav_points"] >= MIN_HISTORY_POINTS}
+        skipped = len(mf_rows) - len(eligible)
+        credit = _fund_credit_facts_batch(conn, [r["instrument_id"] for r in eligible.values()], as_of)
+        mf_built: dict[str, tuple[cb.BuiltCandidate, dict[str, Any]]] = {}
+        if eligible:
+            cur = conn.execute(
+                f"SELECT {_NAV_COLUMNS} FROM observations WHERE series_id IN (SELECT value FROM json_each(?))"  # noqa: S608
+                f" AND superseded_by IS NULL AND quality_status IN {_USABLE}"
+                " ORDER BY series_id, observation_date, source_id",
+                (json.dumps(sorted(eligible)),),
             )
-            sources[r["instrument_id"]] = {**prov, "kind": "mf_scheme", "category": cat}
+            for sid, group in groupby(cur, key=lambda x: str(x["series_id"])):
+                if out_of_time():
+                    incomplete.append("mf_scheme")
+                    break
+                r = eligible[sid]
+                evaluated += 1
+                mf_built[r["instrument_id"]] = _mf_built(
+                    r, list(group), amount=amount, as_of=as_of, withdrawal=withdrawal, ruleset=ruleset,
+                    profile=profile, credit=credit.get(r["instrument_id"]),
+                )  # fmt: skip
+            not_evaluated = len(eligible) - evaluated
+        for r in mf_rows:  # instrument_id order, as before
+            if r["instrument_id"] in mf_built:
+                b, prov = mf_built[r["instrument_id"]]
+                built.append(b)
+                sources[r["instrument_id"]] = prov
 
     if "tbill" not in excluded_kinds:
-        for inst in conn.execute(
-            "SELECT i.instrument_id, i.name, b.maturity_date FROM instruments i JOIN bond_terms b USING(instrument_id)"
-            " WHERE i.kind='tbill' ORDER BY i.instrument_id"
-        ):
-            iid, name = inst["instrument_id"], inst["name"]
-            r, problem = tbill_quote(conn, iid, as_of)
-            if r is None:
-                continue  # no usable yield observation at all (as before: the T-bill is not in the universe)
-            quote_date = date.fromisoformat(r["observation_date"])
-            if problem is not None:
-                b = cb._ineligible(iid, name, Tier.T1, [problem], amount)
-            elif (as_of - quote_date).days > TBILL_STALE_DAYS:
-                b = cb._ineligible(iid, name, Tier.T1, [f"STALE_DATA: yield quoted {quote_date}"], amount)
-            else:
-                b = cb.tbill_candidate(
-                    instrument_id=iid,
-                    name=name,
-                    amount=amount,
-                    quoted_yield=Decimal(r["value"]),
-                    settlement=as_of + timedelta(days=1),
-                    maturity=date.fromisoformat(inst["maturity_date"]),
-                    withdrawal=withdrawal,
-                    ruleset=ruleset,
-                    profile=profile,
-                )
-            built.append(b)
-            sources[iid] = {
-                "kind": "tbill",
-                "source_id": r["source_id"],  # as stored (a fixture is never labelled as an RBI release)
-                "url": r["source_url"],
-                "retrieved_at": r["retrieved_at"],
-                "observation_date": r["observation_date"],
-                "quality_status": r["quality_status"],
-                "fixture": r["quality_status"] == "fixture",
-            }
-            sources[iid]["freshness"] = badge(sources[iid], as_of)
+        if out_of_time():
+            incomplete.append("tbill")
+        else:
+            _tbills(conn, built, sources, amount=amount, as_of=as_of, withdrawal=withdrawal, ruleset=ruleset,
+                    profile=profile, out_of_time=out_of_time, incomplete=incomplete)  # fmt: skip
 
     if "fd" not in excluded_kinds:
-        held_at_bank = pf.fd_principal_by_bank(conn)  # ECC F1: FDs already in your actual portfolios count too
-        for r in conn.execute(
-            "SELECT i.instrument_id, i.name, i.origin, i.created_at, d.* FROM instruments i"
-            " JOIN deposit_terms d USING(instrument_id)"
-            " ORDER BY i.instrument_id"
-        ):
-            iid, name = r["instrument_id"], r["name"]
-            rate_date = date.fromisoformat(r["rate_as_of"])
-            existing = pf.existing_fd_deposits(conn, iid, held_at_bank)
-            if rate_date > as_of:
-                b = cb._ineligible(iid, name, Tier.T2, [f"LOOK_AHEAD: rate dated {rate_date}, after the analysis date"],
-                                   amount)  # fmt: skip
-            elif (as_of - rate_date).days > FD_RATE_STALE_DAYS:
-                b = cb._ineligible(iid, name, Tier.T2, [f"STALE_DATA: rate as of {rate_date}"], amount)
-            else:
-                b = cb.fd_candidate(
-                    instrument_id=iid,
-                    name=name,
-                    amount=amount,
-                    rate=Decimal(r["rate"]),
-                    start=as_of,
-                    tenure_days=int(r["tenure_days"]),
-                    withdrawal=withdrawal,
-                    dicgc_eligible=bool(r["dicgc_eligible"]),
-                    premature_penalty=None if r["premature_penalty"] is None else Decimal(r["premature_penalty"]),
-                    other_deposits_same_bank=existing,
-                    ruleset=ruleset,
-                    profile=profile,
-                    sovereign_backed=fd_institution_type(conn, iid) == "post_office",
-                )
-            built.append(b)
-            sources[iid] = {
-                "kind": "fd",
-                "source_id": "bank.fd",
-                "url": r["citation_url"],
-                "retrieved_at": fd_entered_at(conn, iid, r["created_at"]),  # when the user entered the cited rate
-                "observation_date": r["rate_as_of"],
-                "quality_status": "fixture" if r["origin"] == "fixture" else "manual",
-                "fixture": r["origin"] == "fixture",
-            }
-            sources[iid]["freshness"] = badge(sources[iid], as_of)
+        if out_of_time():
+            incomplete.append("fd")
+        else:
+            _fds(conn, built, sources, fd_types, amount=amount, as_of=as_of, withdrawal=withdrawal, ruleset=ruleset,
+                 profile=profile, out_of_time=out_of_time, incomplete=incomplete)  # fmt: skip
 
     # G-secs, SDLs, corporate bonds: the same loader/builder as analysis.build_one (services/bonds.py).
     for inst in bonds.bond_rows(conn):
         if inst["kind"] in excluded_kinds:
+            continue
+        if out_of_time():
+            if inst["kind"] not in incomplete:
+                incomplete.append(str(inst["kind"]))
             continue
         b_or_none, prov, _ = bonds.build_bond(
             conn, inst, amount=amount, as_of=as_of, withdrawal=withdrawal, ruleset=ruleset, profile=profile
@@ -301,7 +301,177 @@ def build_universe(  # noqa: PLR0915 - one linear pass per instrument kind
             continue  # no terms or no quote stored at all (as for T-bills: not in the universe)
         built.append(b_or_none)
         sources[str(inst["instrument_id"])] = prov
-    return Universe(tuple(built), sources, skipped, evaluated)
+    return Universe(tuple(built), sources, skipped, evaluated, not_evaluated, tuple(incomplete), fd_types)
+
+
+def _mf_built(
+    r: sqlite3.Row,
+    rows: list[sqlite3.Row],
+    *,
+    amount: Decimal,
+    as_of: date,
+    withdrawal: date,
+    ruleset: tx.TaxRuleSet,
+    profile: tx.TaxProfile | None,
+    credit: cb.FundCreditFacts | None,
+) -> tuple[cb.BuiltCandidate, dict[str, Any]]:
+    dates, navs, prov = _nav_series_from_rows(rows, as_of)
+    cat = r["category_raw"] or ""
+    if prov["conflicts"]:
+        tier = cb.mf_tier_from_category(cat)
+        reason = [f"SOURCE_CONFLICT: official sources disagree on {prov['conflicts'][0]}"]
+        return cb._ineligible(r["instrument_id"], r["name"], tier, reason, amount), {
+            **prov, "kind": "mf_scheme", "category": cat,
+        }  # fmt: skip
+    load = None
+    if r["exit_load_json"]:
+        el = json.loads(r["exit_load_json"])
+        load = cb.ExitLoadSpec(days=int(el["days"]), rate=Decimal(el["rate"]), citation=el["citation"])
+    settle = 1 if cb.mf_tier_from_category(cat).name == "T3" else 3
+    b = cb.mf_candidate(
+        instrument_id=r["instrument_id"],
+        name=r["name"],
+        category=cat,
+        amount=amount,
+        as_of=as_of,
+        withdrawal=withdrawal,
+        nav_dates=dates,
+        navs=navs,
+        exit_load=load,
+        ruleset=ruleset,
+        profile=profile,
+        settlement_days=settle,
+        credit_facts=credit,
+    )
+    return b, {**prov, "kind": "mf_scheme", "category": cat}
+
+
+def _tbills(
+    conn: sqlite3.Connection,
+    built: list[cb.BuiltCandidate],
+    sources: dict[str, dict[str, Any]],
+    *,
+    amount: Decimal,
+    as_of: date,
+    withdrawal: date,
+    ruleset: tx.TaxRuleSet,
+    profile: tx.TaxProfile | None,
+    out_of_time: Callable[[], bool],
+    incomplete: list[str],
+) -> None:
+    """T-bills and all their usable yield quotes in ONE statement; the quote rule is :func:`tbill_quote`'s."""
+    rows = conn.execute(
+        "SELECT i.instrument_id, i.name, b.maturity_date, o.value, o.observation_date, o.source_id, o.source_url,"  # noqa: S608
+        " o.retrieved_at, o.quality_status FROM instruments i JOIN bond_terms b USING(instrument_id)"
+        " LEFT JOIN observations o ON o.series_id = 'yield:' || i.instrument_id AND o.superseded_by IS NULL"
+        f" AND o.quality_status IN {_USABLE}"
+        " WHERE i.kind='tbill' ORDER BY i.instrument_id, o.observation_date DESC, o.source_id"
+    ).fetchall()
+    for iid, group in groupby(rows, key=lambda x: str(x["instrument_id"])):
+        if out_of_time():
+            incomplete.append("tbill")
+            return
+        quotes = [g for g in group if g["observation_date"] is not None]
+        first = quotes[0] if quotes else None
+        r, problem = _pick_tbill_quote(quotes, as_of)
+        if r is None or first is None:
+            continue  # no usable yield observation at all (as before: the T-bill is not in the universe)
+        name = first["name"]
+        quote_date = date.fromisoformat(r["observation_date"])
+        if problem is not None:
+            b = cb._ineligible(iid, name, Tier.T1, [problem], amount)
+        elif (as_of - quote_date).days > TBILL_STALE_DAYS:
+            b = cb._ineligible(iid, name, Tier.T1, [f"STALE_DATA: yield quoted {quote_date}"], amount)
+        else:
+            b = cb.tbill_candidate(
+                instrument_id=iid,
+                name=name,
+                amount=amount,
+                quoted_yield=Decimal(r["value"]),
+                settlement=as_of + timedelta(days=1),
+                maturity=date.fromisoformat(first["maturity_date"]),
+                withdrawal=withdrawal,
+                ruleset=ruleset,
+                profile=profile,
+            )
+        built.append(b)
+        sources[iid] = {
+            "kind": "tbill",
+            "source_id": r["source_id"],  # as stored (a fixture is never labelled as an RBI release)
+            "url": r["source_url"],
+            "retrieved_at": r["retrieved_at"],
+            "observation_date": r["observation_date"],
+            "quality_status": r["quality_status"],
+            "fixture": r["quality_status"] == "fixture",
+        }
+        sources[iid]["freshness"] = badge(sources[iid], as_of)
+
+
+def _fds(
+    conn: sqlite3.Connection,
+    built: list[cb.BuiltCandidate],
+    sources: dict[str, dict[str, Any]],
+    fd_types: dict[str, str | None],
+    *,
+    amount: Decimal,
+    as_of: date,
+    withdrawal: date,
+    ruleset: tx.TaxRuleSet,
+    profile: tx.TaxProfile | None,
+    out_of_time: Callable[[], bool],
+    incomplete: list[str],
+) -> None:
+    """FD terms with their three settings keys in ONE statement (+ the actual-portfolio exposure read)."""
+    held_at_bank = pf.fd_principal_by_bank(conn)  # ECC F1: FDs already in your actual portfolios count too
+    for r in conn.execute(
+        "SELECT i.instrument_id, i.name, i.origin, i.created_at, d.*,"
+        " (SELECT value_json FROM settings WHERE key = 'fd.existing:' || i.instrument_id) AS fd_existing_json,"
+        " (SELECT value_json FROM settings WHERE key = 'fd.institution_type:' || i.instrument_id) AS fd_type_json,"
+        " (SELECT value_json FROM settings WHERE key = 'fd.entered_at:' || i.instrument_id) AS fd_entered_json"
+        " FROM instruments i JOIN deposit_terms d USING(instrument_id)"
+        " ORDER BY i.instrument_id"
+    ).fetchall():
+        if out_of_time():
+            incomplete.append("fd")
+            return
+        iid, name = r["instrument_id"], r["name"]
+        inst_type = None if r["fd_type_json"] is None else str(json.loads(r["fd_type_json"]))
+        fd_types[iid] = inst_type
+        rate_date = date.fromisoformat(r["rate_as_of"])
+        existing = _existing_fd(r["fd_existing_json"], r["institution"], r["dicgc_eligible"], held_at_bank)
+        if rate_date > as_of:
+            b = cb._ineligible(iid, name, Tier.T2, [f"LOOK_AHEAD: rate dated {rate_date}, after the analysis date"],
+                               amount)  # fmt: skip
+        elif (as_of - rate_date).days > FD_RATE_STALE_DAYS:
+            b = cb._ineligible(iid, name, Tier.T2, [f"STALE_DATA: rate as of {rate_date}"], amount)
+        else:
+            b = cb.fd_candidate(
+                instrument_id=iid,
+                name=name,
+                amount=amount,
+                rate=Decimal(r["rate"]),
+                start=as_of,
+                tenure_days=int(r["tenure_days"]),
+                withdrawal=withdrawal,
+                dicgc_eligible=bool(r["dicgc_eligible"]),
+                premature_penalty=None if r["premature_penalty"] is None else Decimal(r["premature_penalty"]),
+                other_deposits_same_bank=existing,
+                ruleset=ruleset,
+                profile=profile,
+                sovereign_backed=inst_type == "post_office",
+            )
+        built.append(b)
+        entered = r["created_at"] if r["fd_entered_json"] is None else str(json.loads(r["fd_entered_json"]))
+        sources[iid] = {
+            "kind": "fd",
+            "source_id": "bank.fd",
+            "url": r["citation_url"],
+            "retrieved_at": entered,  # when the user entered the cited rate
+            "observation_date": r["rate_as_of"],
+            "quality_status": "fixture" if r["origin"] == "fixture" else "manual",
+            "fixture": r["origin"] == "fixture",
+        }
+        sources[iid]["freshness"] = badge(sources[iid], as_of)
 
 
 _YIELD_SOURCE_PRECEDENCE = ("rbi.pr.tbill", "fixture")
@@ -316,11 +486,16 @@ def tbill_quote(conn: sqlite3.Connection, iid: str, as_of: date) -> tuple[sqlite
     never picked silently, and the instrument is evaluated once (duplicate ids used to crash the ranking).
     """
     rows = conn.execute(
-        "SELECT value, observation_date, source_id, source_url, retrieved_at, quality_status FROM observations"
-        " WHERE series_id=? AND superseded_by IS NULL AND quality_status IN ('ok','manual','fixture')"
-        " ORDER BY observation_date DESC",
+        "SELECT value, observation_date, source_id, source_url, retrieved_at, quality_status FROM observations"  # noqa: S608
+        f" WHERE series_id=? AND superseded_by IS NULL AND quality_status IN {_USABLE}"
+        " ORDER BY observation_date DESC, source_id",
         (f"yield:{iid}",),
     ).fetchall()
+    return _pick_tbill_quote(rows, as_of)
+
+
+def _pick_tbill_quote(rows: Sequence[sqlite3.Row], as_of: date) -> tuple[sqlite3.Row | None, str | None]:
+    """The rule of :func:`tbill_quote` on rows already fetched (latest first)."""
     if not rows:
         return None, None
     usable = [r for r in rows if date.fromisoformat(r["observation_date"]) <= as_of]
@@ -499,6 +674,18 @@ def _workers(result: RankingResult, universe: Universe, facts: FactSheet) -> lis
             cites=("universe.evaluated", "universe.ranked"),
         ),
     ]
+    if universe.partial:
+        quant_claims.append(
+            Claim(
+                "partial",
+                "universe",
+                "coverage",
+                Stance.NEUTRAL,
+                "Evaluation stopped at the time budget; {fact:universe.not_evaluated} schemes with history were not"
+                " reached, and this ordering covers only the instruments shown.",
+                cites=("universe.not_evaluated",),
+            )
+        )
     if universe.skipped_no_history:
         quant_claims.append(
             Claim(
@@ -659,13 +846,13 @@ def _exclude_fixtures(universe: Universe, amount: Decimal) -> Universe:
             built.append(cb._ineligible(c.instrument_id, c.name, c.tier, reason, amount))
         else:
             built.append(b)
-    return Universe(tuple(built), universe.sources, universe.skipped_no_history, universe.evaluated_mf)
+    return replace(universe, built=tuple(built))
 
 
 _NBFC_TYPES = frozenset({"nbfc", "hfc"})
 
 
-def _exclude_nbfc_deposits(conn: sqlite3.Connection, universe: Universe, amount: Decimal) -> Universe:
+def _exclude_nbfc_deposits(universe: Universe, amount: Decimal) -> Universe:
     """requirements.md §3.2 item 8: the profile's "exclude NBFC deposits" restriction (default on).
 
     NBFC/HFC deposits are excluded; so is an uninsured deposit whose institution type was never recorded (it cannot
@@ -675,14 +862,14 @@ def _exclude_nbfc_deposits(conn: sqlite3.Connection, universe: Universe, amount:
         c = b.candidate
         iid = c.instrument_id
         if universe.sources.get(iid, {}).get("kind") == "fd":
-            kind = fd_institution_type(conn, iid)
+            kind = universe.fd_institution_types.get(iid)  # read with the FD terms (one batched statement)
             unknown_uninsured = kind is None and "NOT_DICGC_INSURED" in c.flags
             if kind in _NBFC_TYPES or unknown_uninsured:
                 reason = ["EXCLUDED_BY_USER: your profile excludes NBFC/HFC deposits"]
                 built.append(cb._ineligible(iid, c.name, c.tier, reason, amount))
                 continue
         built.append(b)
-    return Universe(tuple(built), universe.sources, universe.skipped_no_history, universe.evaluated_mf)
+    return replace(universe, built=tuple(built))
 
 
 def discover(  # noqa: PLR0915 - one auditable orchestration sequence
@@ -693,7 +880,10 @@ def discover(  # noqa: PLR0915 - one auditable orchestration sequence
     ruleset: tx.TaxRuleSet | None,
     allow_fixtures: bool = False,
     llm_rephrase: Callable[[str], str] | None = None,
+    time_left: Callable[[], float] | None = None,
 ) -> dict[str, Any]:
+    """``time_left`` (seconds remaining, None = unbounded): see :func:`build_universe`. A build cut short by the
+    budget is returned with ``partial`` set and a coverage claim in the report — never presented as complete."""
     p = status.profile
     personalised = status.mode == "PERSONALISED"
     amount = p.amount if personalised and p.amount is not None else ILLUSTRATIVE_AMOUNT
@@ -711,11 +901,12 @@ def discover(  # noqa: PLR0915 - one auditable orchestration sequence
             ruleset=ruleset,
             profile=tax_profile,
             excluded_kinds=p.excluded_kinds,
+            time_left=time_left,
         )
         if personalised and not allow_fixtures:
             universe = _exclude_fixtures(universe, amount)
         if personalised and p.exclude_nbfc_deposits:
-            universe = _exclude_nbfc_deposits(conn, universe, amount)
+            universe = _exclude_nbfc_deposits(universe, amount)
 
     def present(v: object) -> ContextValue:
         return ContextValue("", present=v is not None, valid=v is not None)
@@ -739,7 +930,11 @@ def discover(  # noqa: PLR0915 - one auditable orchestration sequence
             provenance_complete=True,
             valid=bool(universe.built),
             observation_date=as_of,
-            note="" if universe.built else "no instruments with evaluable data",
+            note=""
+            if universe.built
+            else "evaluation stopped at the time budget before any instrument was evaluated"
+            if universe.partial
+            else "no instruments with evaluable data",
         ),
     }
     if not personalised:
@@ -769,6 +964,7 @@ def discover(  # noqa: PLR0915 - one auditable orchestration sequence
         ("universe.evaluated", len(universe.built)),
         ("universe.ranked", n_ranked),
         ("universe.skipped", universe.skipped_no_history),
+        *((("universe.not_evaluated", universe.not_evaluated),) if universe.partial else ()),
     ):
         facts.add(
             Fact(
@@ -880,6 +1076,9 @@ def discover(  # noqa: PLR0915 - one auditable orchestration sequence
     else:
         status_text = ranking.status.value if ranking else RankStatus.NO_SUITABLE_CANDIDATE.value
 
+    budget_reason = [f"{TIME_BUDGET_EXCEEDED}: evaluation stopped at the time budget"] if universe.partial else []
+    if universe.built:
+        budget_reason = []  # with results, the flag is the `partial` field and the coverage claim instead
     output: dict[str, Any] = {
         "status": status_text,
         "mode": status.mode,
@@ -896,12 +1095,13 @@ def discover(  # noqa: PLR0915 - one auditable orchestration sequence
             ),
         },
         "message": (ranking.message if ranking and ranking.message else None),
-        "abstain_reasons": list(sup.abstain_reasons),
+        "abstain_reasons": list(sup.abstain_reasons) + budget_reason,
         "policy": ranking.policy if ranking else None,
         "criteria": _criteria(request) if personalised else [],
         "ranked": ranked_rows,
         "excluded": excluded_rows,
         "skipped_no_history": universe.skipped_no_history,
+        "partial": _partial(universe),
         "contains_fixtures": any(v.get("fixture") for v in universe.sources.values()),
         "report": None
         if sup.report is None
@@ -947,6 +1147,20 @@ def discover(  # noqa: PLR0915 - one auditable orchestration sequence
     return output
 
 
+def _partial(universe: Universe) -> dict[str, Any] | None:
+    """The flag on a result whose universe build was cut short by the time budget (None = complete)."""
+    if not universe.partial:
+        return None
+    return {
+        "reason": TIME_BUDGET_EXCEEDED,
+        "budget_s": int(DISCOVER_BUDGET_S),
+        "incomplete_kinds": list(universe.incomplete_kinds),
+        "mf_not_evaluated": universe.not_evaluated,
+        "message": "Evaluation stopped at the time budget; instruments that were not reached are missing from this"
+        " result, so it is not a complete comparison.",
+    }
+
+
 def _loss_display(b: cb.BuiltCandidate) -> dict[str, str] | None:
     c = b.candidate
     if b.evidence is None:
@@ -987,8 +1201,15 @@ def _criteria(req: RankingRequest) -> list[str]:
     return out
 
 
-def store_run(conn: sqlite3.Connection, output: dict[str, Any], at: datetime) -> str:
+def store_run(conn: sqlite3.Connection, output: dict[str, Any], at: datetime) -> str | None:
+    """Store the run once per distinct result (content-addressed id). A repeat visit with unchanged inputs and data
+    reads the existing row and writes nothing (A02: no DB write per Discovery visit). A PARTIAL result (time budget)
+    is never stored: it depends on timing, not only on inputs, so it is not a reproducible run record."""
+    if output.get("partial"):
+        return None
     run_id = f"disc_{output['run']['result_hash'][:16]}"
+    if conn.execute("SELECT 1 FROM runs WHERE run_id=?", (run_id,)).fetchone() is not None:
+        return run_id
     with write_tx(conn):
         conn.execute(
             "INSERT INTO runs(run_id, kind, input_hash, versions_json, params_json, output_hash, output_json,"

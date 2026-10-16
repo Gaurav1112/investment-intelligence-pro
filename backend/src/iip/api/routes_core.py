@@ -6,9 +6,9 @@ import json
 import logging
 from datetime import date
 from functools import lru_cache
-from typing import Any
+from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -77,13 +77,6 @@ def _backfill_hosted(st: Any, amfi_code: int, amc: str, years: int) -> Any:
         )  # fmt: skip
     except ingestion.FundHouseNotFound as exc:
         raise HTTPException(424, "could not determine AMFI's fund-house id for this AMC") from exc
-
-
-_TERMS_QUERIES = (
-    ("mf_schemes", "SELECT * FROM mf_schemes WHERE instrument_id=?"),
-    ("bond_terms", "SELECT * FROM bond_terms WHERE instrument_id=?"),
-    ("deposit_terms", "SELECT * FROM deposit_terms WHERE instrument_id=?"),
-)
 
 
 class DiscoverIn(BaseModel):
@@ -178,8 +171,11 @@ def router() -> APIRouter:  # noqa: PLR0915 - route table
         profile = profile_svc.load(st.conn)
         status = profile_svc.evaluate(profile, as_of)
         rephrase, _ = routes_llm.rephraser(st, profile)  # None unless the optional AI wording is enabled (ADR-0007)
+        # A02: a time budget instead of the platform's 300 s timeout (a 504 also killed the instance).
+        deadline = st.monotonic() + discovery.DISCOVER_BUDGET_S
         out = discovery.discover(st.conn, status, as_of=as_of, ruleset=tax_rules(),
-                                 allow_fixtures=body.include_fixtures, llm_rephrase=rephrase)  # fmt: skip
+                                 allow_fixtures=body.include_fixtures, llm_rephrase=rephrase,
+                                 time_left=lambda: deadline - st.monotonic())  # fmt: skip
         if rephrase is not None and out["report"] is not None:
             routes_llm.runtime(st).record_rejection(out["report"]["rejected_llm_reasons"])
         out["run"]["run_id"] = discovery.store_run(st.conn, out, st.clock())
@@ -213,26 +209,46 @@ def router() -> APIRouter:  # noqa: PLR0915 - route table
             row["fixture"] = row["origin"] == "fixture"
         return {"items": rows, "truncated": len(rows) == 500}
 
-    @r.get("/instruments/{instrument_id}")
-    def get_instrument(instrument_id: str, request: Request) -> dict[str, Any]:
+    @r.get("/instruments/{instrument_id}/summary")
+    def get_instrument_summary(instrument_id: str, request: Request) -> dict[str, Any]:
+        """Name, terms, latest point, point count and freshness WITHOUT the history (A02/A06: no page fetches a
+        full history to show a name). One statement."""
         st = _state(request)
-        row = st.conn.execute("SELECT * FROM instruments WHERE instrument_id=?", (instrument_id,)).fetchone()
-        if row is None:
+        head = instruments.instrument_head(st.conn, instrument_id, summary=True)
+        if head is None:
             raise HTTPException(404, "not found")
-        out: dict[str, Any] = {"instrument": dict(row)}
-        for table, sql in _TERMS_QUERIES:
-            extra = st.conn.execute(sql, (instrument_id,)).fetchone()
-            if extra:
-                out[table] = dict(extra)
-        series = "nav:" + str(row["amfi_code"]) if row["amfi_code"] else "yield:" + instrument_id
-        obs = st.conn.execute(
-            "SELECT observation_date, value, source_id, source_url, retrieved_at, quality_status FROM observations"
-            " WHERE series_id=? AND superseded_by IS NULL ORDER BY observation_date",
-            (series,),
-        ).fetchall()
-        out["series"] = {"series_id": series, "points": [dict(o) for o in obs]}
-        if row["amfi_code"]:
-            badge, observed = ingestion.latest_freshness(st.conn, int(row["amfi_code"]), st.clock())
+        out: dict[str, Any] = {k: v for k, v in head.items() if k == "instrument" or k in instruments.TERMS_TABLES}
+        out["series"] = {"series_id": head["series_id"], "points": head["points"], "first_date": head["first_date"],
+                         "latest": head["latest"]}  # fmt: skip
+        if head["instrument"]["amfi_code"]:
+            badge, observed = instruments.nav_freshness(head["fresh"], st.clock())
+            out["freshness"] = {"badge": badge, "observed": observed}
+        return out
+
+    @r.get("/instruments/{instrument_id}")
+    def get_instrument(
+        instrument_id: str,
+        request: Request,
+        start: date | None = Query(default=None, alias="from"),  # noqa: B008 - FastAPI parameter declaration
+        grid: Literal["monthly"] | None = None,
+    ) -> dict[str, Any]:
+        """The instrument with its series (2 statements: audit-perf-hosted RC-7 measured 8). ``?from=YYYY-MM-DD``
+        limits the series to dates on or after it; ``?grid=monthly`` keeps the last observation date of each month.
+        Freshness always describes the latest NAV, whatever the filter."""
+        st = _state(request)
+        head = instruments.instrument_head(st.conn, instrument_id)
+        if head is None:
+            raise HTTPException(404, "not found")
+        out: dict[str, Any] = {k: v for k, v in head.items() if k == "instrument" or k in instruments.TERMS_TABLES}
+        series: dict[str, Any] = {
+            "series_id": head["series_id"],
+            "points": instruments.series_points(st.conn, head["series_id"], start=start, grid=grid),
+        }
+        if start is not None or grid is not None:
+            series["filter"] = {"from": start.isoformat() if start else None, "grid": grid}
+        out["series"] = series
+        if head["instrument"]["amfi_code"]:
+            badge, observed = instruments.nav_freshness(head["fresh"], st.clock())
             out["freshness"] = {"badge": badge, "observed": observed}
         return out
 
@@ -335,19 +351,24 @@ def router() -> APIRouter:  # noqa: PLR0915 - route table
     def data_health(request: Request) -> dict[str, Any]:
         st = _state(request)
         runs = [dict(x) for x in st.conn.execute("SELECT * FROM ingestion_runs ORDER BY started_at DESC LIMIT 50")]
+        # A02 (audit-perf-hosted RC-6): the latest run of every registry source in ONE statement, not one per source.
+        latest = {
+            x["source_id"]: {k: x[k] for k in ("status", "finished_at", "rows_ok", "rows_rejected", "error")}
+            for x in st.conn.execute(
+                "SELECT source_id, status, finished_at, rows_ok, rows_rejected, error FROM (SELECT *, ROW_NUMBER()"
+                " OVER (PARTITION BY source_id ORDER BY started_at DESC, run_id DESC) AS rn FROM ingestion_runs"
+                " WHERE source_id IN (SELECT value FROM json_each(?))) WHERE rn = 1",
+                (json.dumps(sorted(REGISTRY)),),
+            )
+        }
         sources = []
         for spec in REGISTRY.values():
-            last = st.conn.execute(
-                "SELECT status, finished_at, rows_ok, rows_rejected, error FROM ingestion_runs WHERE source_id=?"
-                " ORDER BY started_at DESC LIMIT 1",
-                (spec.id,),
-            ).fetchone()
             sources.append({
                 "source_id": spec.id, "name": spec.name, "owner": spec.owner, "official": spec.official,
                 "mode": spec.mode.value, "licence": spec.licence_class.value, "licence_note": spec.licence_note,
                 "terms_url": spec.terms_url, "freshness": spec.freshness.description,
                 "requires_configuration": spec.requires_configuration or spec.mode is SourceMode.LIVE,
-                "last_run": dict(last) if last else None,
+                "last_run": latest.get(spec.id),
             })  # fmt: skip
         counts = st.conn.execute(
             "SELECT quality_status, COUNT(*) AS n FROM observations WHERE superseded_by IS NULL GROUP BY quality_status"

@@ -260,11 +260,19 @@ _EVAL_KEY = ("rule_id", "version", "as_of_date", "scope_id")
 
 
 def _append_keyed(
-    conn: sqlite3.Connection, table: str, rows: Sequence[Any], hash_col: str, columns: tuple[str, ...]
+    conn: sqlite3.Connection,
+    table: str,
+    rows: Sequence[Any],
+    hash_col: str,
+    columns: tuple[str, ...],
+    *,
+    keep_existing: bool = False,
 ) -> int:
     """Append rows keyed by (rule_id, version, as_of_date, scope_id). A re-run with the same content is a no-op
     (idempotent cron); the same key with a different content hash is a :class:`LedgerConflict` and nothing is
-    written. Statements: one chunked read of the existing keys, then chunked multi-row inserts."""
+    written, unless ``keep_existing`` (then the row already recorded stands and the new one is skipped: "the first
+    write for a data date stands"). Statements: one chunked read of the existing keys, then chunked multi-row
+    inserts."""
     if not rows:
         return 0
     keys = [tuple(getattr(r, k) for k in _EVAL_KEY) for r in rows]
@@ -274,6 +282,8 @@ def _append_keyed(
     }
     new: dict[tuple[Any, ...], Any] = {}
     for key, r in zip(keys, rows, strict=True):
+        if keep_existing and key in existing:
+            continue
         known = existing.get(key)
         if known is None and key in new:
             known = getattr(new[key], hash_col)
@@ -285,9 +295,14 @@ def _append_keyed(
     return insert_many(conn, table, columns, [_values(r) for r in new.values()])
 
 
-def append_rule_evaluations(conn: sqlite3.Connection, rows: Sequence[RuleEvaluation]) -> int:
-    """The daily shadow ledger (J4): returns the number of new rows."""
-    return _append_keyed(conn, "rule_evaluations", rows, "input_hash", _columns(RuleEvaluation))
+def append_rule_evaluations(
+    conn: sqlite3.Connection, rows: Sequence[RuleEvaluation], *, keep_existing: bool = False
+) -> int:
+    """The daily shadow ledger (J4): returns the number of new rows. ``keep_existing``: a key already recorded is
+    left as it is even when the new content differs (the J4 re-run semantics), instead of a conflict."""
+    return _append_keyed(
+        conn, "rule_evaluations", rows, "input_hash", _columns(RuleEvaluation), keep_existing=keep_existing
+    )
 
 
 @dataclass(frozen=True)
@@ -302,6 +317,9 @@ class Outcome:
     unscorable_reason: str | None
     inputs_hash: str
     scored_at: str
+    # Graft TA-1: the DATA date on which this outcome became known (the scoring pass's as_of, never the wall clock).
+    # None = unknown, and then no point-in-time read ever sees the row (outcomes_as_of).
+    resolved_on: str | None = None
 
 
 def append_outcomes(conn: sqlite3.Connection, rows: Sequence[Outcome]) -> int:
@@ -309,18 +327,68 @@ def append_outcomes(conn: sqlite3.Connection, rows: Sequence[Outcome]) -> int:
     return _append_keyed(conn, "outcomes", rows, "inputs_hash", _columns(Outcome))
 
 
+# The first date an evaluation can be resolved: its horizon end, or its own date when it has none (an abstained
+# evaluation is recorded as unscorable then). Same expression as ix_rule_evaluations_due (migration 0004).
+_DUE_ON = "COALESCE(json_extract(e.payload_json, '$.horizon_end'), e.as_of_date)"
+_UNSCORED = (
+    "SELECT e.rule_id, e.version, e.as_of_date, e.scope_id, e.state, e.condition_met, e.payload_json,"  # noqa: S608
+    f" {_DUE_ON} AS due_on FROM rule_evaluations e WHERE e.as_of_date < ? AND NOT EXISTS (SELECT 1 FROM outcomes o"
+    " WHERE o.rule_id = e.rule_id AND o.version = e.version AND o.as_of_date = e.as_of_date"
+    " AND o.scope_id = e.scope_id)"
+)
+_DUE_SQL = (
+    f"WITH u AS ({_UNSCORED})"  # noqa: S608 - module constants only
+    " SELECT * FROM (SELECT 'row' AS part, rule_id, version, as_of_date, scope_id, state, condition_met,"
+    " payload_json, NULL AS n_not_due, NULL AS n_waiting_for_basis FROM u"
+    " WHERE due_on <= ? AND (? OR condition_met IS NULL)"
+    " ORDER BY due_on, as_of_date, rule_id, version, scope_id LIMIT ?)"
+    " UNION ALL SELECT 'counts', NULL, NULL, NULL, NULL, NULL, NULL, NULL,"
+    " COALESCE(SUM(due_on > ?), 0), COALESCE(SUM(due_on <= ? AND condition_met IS NOT NULL AND NOT ?), 0) FROM u"
+)
+
+
+@dataclass(frozen=True)
+class DueEvaluations:
+    rows: list[sqlite3.Row]  # due, unscored and able to progress, oldest due date first (at most ``limit``)
+    not_yet_due: int  # unscored rows whose resolution date is after as_of (counted, not read)
+    waiting_for_basis: int  # due rows with a condition result while no cost/tax basis is given (counted, not read)
+
+
+def due_evaluations(conn: sqlite3.Connection, as_of: str, *, has_basis: bool, limit: int = 500) -> DueEvaluations:
+    """Unscored evaluations dated before ``as_of`` that can progress today, in ONE statement (database-reviewer-06).
+
+    Rows that cannot progress are counted but never read: those not due yet (resolution date after ``as_of``) and,
+    while no cost/tax basis is given, those with a condition result. So the oldest stuck rows can never crowd the
+    recordable ones (an abstained evaluation, recorded as unscorable) out of the ``limit`` window, and a daily run
+    does not re-read the whole backlog's payloads."""
+    basis = 1 if has_basis else 0
+    rows = conn.execute(_DUE_SQL, (as_of, as_of, basis, limit, as_of, as_of, basis)).fetchall()
+    data = [r for r in rows if r["part"] == "row"]
+    counts = next(r for r in rows if r["part"] == "counts")
+    return DueEvaluations(data, int(counts["n_not_due"]), int(counts["n_waiting_for_basis"]))
+
+
 def unscored_evaluations(conn: sqlite3.Connection, as_of_before: str, limit: int = 500) -> list[sqlite3.Row]:
-    """Evaluations dated before ``as_of_before`` without an outcome, oldest first (one statement)."""
-    return list(
-        conn.execute(
-            "SELECT e.rule_id, e.version, e.as_of_date, e.scope_id, e.state, e.condition_met, e.payload_json"
-            " FROM rule_evaluations e LEFT JOIN outcomes o ON o.rule_id=e.rule_id AND o.version=e.version"
-            " AND o.as_of_date=e.as_of_date AND o.scope_id=e.scope_id"
-            " WHERE o.rule_id IS NULL AND e.as_of_date < ? ORDER BY e.as_of_date, e.rule_id, e.version, e.scope_id"
-            " LIMIT ?",
-            (as_of_before, limit),
-        ).fetchall()
-    )
+    """Evaluations dated before ``as_of_before`` without an outcome that are due by then, oldest due first (one
+    statement; see :func:`due_evaluations`)."""
+    return due_evaluations(conn, as_of_before, has_basis=True, limit=limit).rows
+
+
+def outcomes_as_of(
+    conn: sqlite3.Connection, as_of: str, *, rule_id: str | None = None, version: int | None = None
+) -> list[sqlite3.Row]:
+    """Point-in-time read of outcomes (graft TA-1): only rows whose outcome was KNOWN on ``as_of``
+    (``resolved_on <= as_of``). A row without ``resolved_on`` is excluded (conservative: it cannot be placed in
+    time). Every gate or score that asks "as of d" must read outcomes through this function. One statement."""
+    sql = "SELECT * FROM outcomes WHERE resolved_on IS NOT NULL AND resolved_on <= ?"
+    params: list[Any] = [as_of]
+    if rule_id is not None:
+        sql += " AND rule_id = ?"
+        params.append(rule_id)
+    if version is not None:
+        sql += " AND version = ?"
+        params.append(version)
+    return list(conn.execute(sql + " ORDER BY resolved_on, rule_id, version, as_of_date, scope_id", params))
 
 
 # ------------------------------------------------------------------------------------------------- snapshots
@@ -372,8 +440,8 @@ LATEST_RUN_ORDER = "r.as_of_date DESC, r.computed_at DESC, r.run_id DESC"
 def latest_snapshot(conn: sqlite3.Connection) -> sqlite3.Row | None:
     """Today's read: ONE statement. Columns of ``signal_snapshots`` plus ``computed_at`` of the newest run."""
     row: sqlite3.Row | None = conn.execute(
-        "SELECT s.*, r.computed_at FROM snapshot_runs r JOIN signal_snapshots s ON s.snapshot_id = r.snapshot_id"
-        f" ORDER BY {LATEST_RUN_ORDER} LIMIT 1"  # noqa: S608 - module constant
+        "SELECT s.*, r.computed_at FROM snapshot_runs r JOIN signal_snapshots s ON s.snapshot_id = r.snapshot_id"  # noqa: S608
+        f" ORDER BY {LATEST_RUN_ORDER} LIMIT 1"  # module constant
     ).fetchone()
     return row
 
@@ -389,6 +457,7 @@ class Decision:
     decision: str  # 'done' | 'not_now' | 'disagree'
     note: str | None
     decided_at: str
+    card_key: str | None = None  # notify.card_key of the card (snapshot-independent); None for legacy callers
 
 
 def append_decisions(conn: sqlite3.Connection, rows: Sequence[Decision]) -> int:

@@ -137,7 +137,7 @@ def _translate(exc: Exception) -> sqlite3.Error:
 class _Cursor:
     def __init__(self, cur: Any) -> None:
         self._cur = cur
-        desc = cur.description
+        desc = getattr(cur, "description", None)  # None for a script (libSQL returns no cursor for one)
         self.description = desc
         self._keys: tuple[str, ...] = tuple(d[0] for d in desc) if desc else ()
         index: dict[str, int] = {}
@@ -150,10 +150,10 @@ class _Cursor:
         return None if values is None else Row(self._keys, self._index, values)
 
     def fetchone(self) -> Row | None:
-        return self._row(self._cur.fetchone())
+        return None if self._cur is None else self._row(self._cur.fetchone())
 
     def fetchall(self) -> list[Row]:
-        return [Row(self._keys, self._index, v) for v in self._cur.fetchall()]
+        return [] if self._cur is None else [Row(self._keys, self._index, v) for v in self._cur.fetchall()]
 
     def fetchmany(self, size: int | None = None) -> list[Row]:
         rows = self._cur.fetchmany(size) if size is not None else self._cur.fetchmany()
@@ -164,15 +164,16 @@ class _Cursor:
 
     @property
     def rowcount(self) -> int:
-        return int(self._cur.rowcount)
+        return -1 if self._cur is None else int(self._cur.rowcount)
 
     @property
     def lastrowid(self) -> int | None:
-        value = self._cur.lastrowid
+        value = None if self._cur is None else self._cur.lastrowid
         return None if value is None else int(value)
 
     def close(self) -> None:
-        self._cur.close()
+        if self._cur is not None:
+            self._cur.close()
 
 
 BUSY_RETRY_S = 10.0  # like sqlite3's busy_timeout: libSQL does not wait on a locked database, so we do
@@ -252,6 +253,9 @@ class LibsqlConnection:
             self.rollback()
 
     def executescript(self, script: str) -> _Cursor:
+        """Run a multi-statement script in ONE round trip. NOTE: libSQL stops at the first failing statement
+        WITHOUT raising, so a caller must verify the effect (see :func:`_apply_migration`). The driver returns no
+        cursor for a script, so the result carries no rows (and costs no extra round trip)."""
         try:
             return _Cursor(self._raw.executescript(script))
         except Exception as exc:
@@ -332,40 +336,92 @@ def read_schema_version(conn: sqlite3.Connection) -> int:
     return int(row["v"] or 0) if row is not None else 0
 
 
-def ensure_schema(conn: sqlite3.Connection, applied_at: str) -> list[str]:
+MIGRATION_WAIT_S = 60.0  # how long a cold start waits for ANOTHER instance's migration before reporting the lock
+
+
+def ensure_schema(conn: sqlite3.Connection, applied_at: str, *, wait_s: float = MIGRATION_WAIT_S) -> list[str]:
     """Startup path (A05): read-only when the database is current; runs :func:`migrate` only when a migration is
     pending (a fresh local database, or the first instance after a deploy that ships a migration). Returns the
-    names applied, like :func:`migrate`."""
-    if read_schema_version(conn) >= latest_version():
-        return []
-    return migrate(conn, applied_at)
+    names applied, like :func:`migrate`.
+
+    Two instances can cold-start together after a deploy. The one that takes the write lock migrates; the other's
+    lock wait (``BUSY_RETRY_S`` / ``busy_timeout``) can run out first. A busy/locked error is therefore read as
+    "another instance is migrating": re-read the version and retry (the retry re-checks the version under the
+    lock, so nothing is applied twice) for up to ``wait_s`` seconds. A lock that never frees is still raised."""
+    deadline = time.monotonic() + wait_s
+    while True:
+        if read_schema_version(conn) >= latest_version():
+            return []
+        try:
+            return migrate(conn, applied_at)
+        except sqlite3.OperationalError as exc:
+            if not _busy(exc) or time.monotonic() >= deadline:
+                raise
+            if conn.in_transaction:  # never leave this connection holding a half-open transaction
+                conn.execute("ROLLBACK")
+            time.sleep(0.05)
 
 
 def migrate(conn: sqlite3.Connection, applied_at: str) -> list[str]:
-    """Apply pending migrations in order, each in its own transaction. Returns names applied."""
+    """Apply pending migrations in order, each in its own transaction (BEGIN IMMEDIATE, the version re-checked
+    under the lock, the statements, the ``schema_version`` row, COMMIT). Returns names applied."""
     applied: list[str] = []
-    conn.execute(_SCHEMA_VERSION_DDL)
-    have = current_version(conn)
+    if read_schema_version(conn) == 0:  # DDL only when the table may be missing: it takes the write lock
+        conn.execute(_SCHEMA_VERSION_DDL)
+    have = read_schema_version(conn)
     for version, name, sql in _migration_files():
         if version <= have:
             continue
         conn.execute("BEGIN IMMEDIATE")
-        if current_version(conn) >= version:  # another process (a parallel cold start) applied it first
-            conn.execute("ROLLBACK")
-            continue
         try:
-            for statement in _split_sql(sql):
-                conn.execute(statement)
-            conn.execute(
-                "INSERT INTO schema_version(version, name, applied_at) VALUES (?, ?, ?)",
-                (version, name, applied_at),
-            )
-        except Exception:
-            conn.execute("ROLLBACK")
+            if read_schema_version(conn) >= version:  # another process (a parallel cold start) applied it first
+                conn.execute("ROLLBACK")
+                continue
+            _apply_migration(conn, version, name, sql, applied_at)
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
             raise
         conn.execute("COMMIT")
         applied.append(name)
     return applied
+
+
+def _sql_text(value: str) -> str:
+    """A SQL string literal (quotes doubled). Used only for the package-file name and the service's timestamp."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _apply_migration(conn: sqlite3.Connection, version: int, name: str, sql: str, applied_at: str) -> None:
+    """Apply ONE migration inside the caller's open write transaction, including its ``schema_version`` row.
+
+    On a libSQL connection (hosted: every statement is a round trip, ~0.4 s on Turso) the statements and the
+    version row go as ONE script, then ONE read verifies it. libSQL's ``executescript`` stops at the first failing
+    statement WITHOUT raising (checked against the installed driver), so the version row is the script's LAST
+    statement: it exists only if every statement before it ran. When it is missing the transaction is rolled back
+    and re-opened, and the statements are replayed one by one to raise the real error (nothing is half-applied).
+    The sqlite3 driver (local, no round-trip cost; its ``executescript`` would COMMIT the open transaction) runs
+    the statements one at a time."""
+    statements = _split_sql(sql)
+    insert = "INSERT INTO schema_version(version, name, applied_at) VALUES (?, ?, ?)"
+    if isinstance(conn, LibsqlConnection):
+        # Literals, not bound values (a script takes none): an int, the package file name and the service's
+        # timestamp, each quoted by _sql_text.
+        row = (
+            f"INSERT INTO schema_version(version, name, applied_at) VALUES ({int(version)}, {_sql_text(name)},"  # noqa: S608
+            f" {_sql_text(applied_at)})"
+        )
+        conn.executescript(";\n".join([*statements, row]) + ";")
+        if read_schema_version(conn) >= version:
+            return
+        conn.execute("ROLLBACK")
+        conn.execute("BEGIN IMMEDIATE")
+        for statement in statements:
+            conn.execute(statement)
+        raise MigrationError(f"{name}: the batched script stopped early but every statement ran on replay")
+    for statement in statements:
+        conn.execute(statement)
+    conn.execute(insert, (version, name, applied_at))
 
 
 _TRIGGER_START = re.compile(r"CREATE\s+(?:TEMP\s+|TEMPORARY\s+)?TRIGGER\b", re.IGNORECASE)

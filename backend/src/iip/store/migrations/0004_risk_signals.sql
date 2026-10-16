@@ -108,6 +108,9 @@ CREATE TABLE decisions_log (
     cas_confirmed       INTEGER CHECK (cas_confirmed IN (0, 1) OR cas_confirmed IS NULL),
     cas_checked_at      TEXT,
     cas_import_ref      TEXT,
+    -- Snapshot-independent identity of the card (notify.card_key): an unchecked 'done' is carried to the same card
+    -- in later snapshots, so the next day's Today does not ask again for an action the user already took.
+    card_key            TEXT,
     CHECK ((cas_confirmed IS NULL) = (cas_checked_at IS NULL)),
     CHECK (cas_confirmed IS NULL OR decision = 'done')
 );
@@ -115,8 +118,10 @@ CREATE INDEX ix_decisions_log_card ON decisions_log(card_id, decided_at);
 -- Today's one-statement read joins the decisions of ONE snapshot (risk_snapshot.TODAY_SQL): without this index the
 -- correlated subquery scans the whole (never pruned) log on every page load.
 CREATE INDEX ix_decisions_log_snapshot ON decisions_log(snapshot_id, card_id);
+-- Today's carry-forward of unchecked 'done' entries reads only these (few) rows.
+CREATE INDEX ix_decisions_log_pending_done ON decisions_log(card_key) WHERE decision = 'done' AND cas_confirmed IS NULL;
 CREATE TRIGGER decisions_log_no_update BEFORE UPDATE OF decision_id, card_id, snapshot_id, goal_id, decision, note,
-    decided_at ON decisions_log
+    decided_at, card_key ON decisions_log
 BEGIN SELECT RAISE(ABORT, 'append-only constraint: decisions_log'); END;
 CREATE TRIGGER decisions_log_cas_once BEFORE UPDATE OF cas_confirmed, cas_checked_at, cas_import_ref ON decisions_log
 WHEN OLD.cas_confirmed IS NOT NULL
@@ -346,6 +351,9 @@ CREATE TABLE rule_evaluations (
     evaluated_at        TEXT NOT NULL,
     PRIMARY KEY (rule_id, version, as_of_date, scope_id)
 );
+-- The date an evaluation can first be resolved (its horizon end, or its own date when it has none): J4 reads only
+-- the rows that are due, so rows that cannot progress yet never crowd out the ones that can (outcomes.py).
+CREATE INDEX ix_rule_evaluations_due ON rule_evaluations(COALESCE(json_extract(payload_json, '$.horizon_end'), as_of_date));
 CREATE TRIGGER rule_evaluations_no_update BEFORE UPDATE ON rule_evaluations
 BEGIN SELECT RAISE(ABORT, 'append-only constraint: rule_evaluations'); END;
 CREATE TRIGGER rule_evaluations_no_replace BEFORE INSERT ON rule_evaluations
@@ -356,6 +364,8 @@ WHEN NOT EXISTS (SELECT 1 FROM ledger_erase_gate)
 BEGIN SELECT RAISE(ABORT, 'append-only constraint: rule_evaluations'); END;
 
 -- Scored once, at the rule's horizon, from realised NAVs. Absence of a row = not yet due or not yet scored.
+-- resolved_on (graft TA-1): the DATA date on which the outcome became known. A point-in-time read "as of d" sees a
+-- row only when resolved_on <= d; a row without resolved_on is never seen by one (ledger.outcomes_as_of).
 CREATE TABLE outcomes (
     rule_id             TEXT NOT NULL,
     version             INTEGER NOT NULL,
@@ -367,13 +377,16 @@ CREATE TABLE outcomes (
     unscorable_reason   TEXT,
     inputs_hash         TEXT NOT NULL,
     scored_at           TEXT NOT NULL,
+    resolved_on         TEXT CHECK (resolved_on IS NULL OR resolved_on GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]'),
     PRIMARY KEY (rule_id, version, as_of_date, scope_id),
     FOREIGN KEY (rule_id, version, as_of_date, scope_id)
         REFERENCES rule_evaluations(rule_id, version, as_of_date, scope_id),
     CHECK (horizon_end >= as_of_date),
+    CHECK (resolved_on IS NULL OR resolved_on >= horizon_end),
     CHECK ((status = 'scored' AND edge_after_cost_tax IS NOT NULL AND unscorable_reason IS NULL)
         OR (status = 'unscorable' AND edge_after_cost_tax IS NULL AND unscorable_reason IS NOT NULL))
 );
+CREATE INDEX ix_outcomes_resolved ON outcomes(resolved_on);
 CREATE TRIGGER outcomes_no_update BEFORE UPDATE ON outcomes
 BEGIN SELECT RAISE(ABORT, 'append-only constraint: outcomes'); END;
 CREATE TRIGGER outcomes_no_replace BEFORE INSERT ON outcomes

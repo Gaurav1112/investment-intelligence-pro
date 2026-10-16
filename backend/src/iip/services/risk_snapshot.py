@@ -253,6 +253,9 @@ class SnapshotInputs:
     debt_shock: DebtShock
     stress_table_version: str
     flags: tuple[str, ...] = ()
+    # (portfolio_id, error code) of every ACTUAL portfolio whose ledger cannot be replayed (e.g. a sell with no
+    # prior buy). Its holdings are unknown, so every holdings-based card abstains (silent-failure-hunter-01).
+    invalid_portfolios: tuple[tuple[str, str], ...] = ()
 
 
 def _dec(v: object) -> Decimal | None:
@@ -302,8 +305,12 @@ def _limit_params(policy: Mapping[str, Any] | None) -> LimitParams | None:
     return LimitParams(**{n: _dec(raw.get(n)) for n in names})
 
 
-def _actual_positions(conn: sqlite3.Connection) -> tuple[dict[str, Decimal], list[str]]:
-    """Units held per instrument over every ACTUAL portfolio (FIFO per portfolio). One statement."""
+def _actual_positions(
+    conn: sqlite3.Connection,
+) -> tuple[dict[str, Decimal], list[str], list[tuple[str, str]]]:
+    """Units held per instrument over every ACTUAL portfolio (FIFO per portfolio), the flags, and the portfolios
+    whose ledger is invalid (``(portfolio_id, error code)``; their units are left out and the snapshot fails closed
+    on them, see :func:`compute_snapshot`). One statement."""
     rows = conn.execute(
         "SELECT t.portfolio_id, t.txn_id, t.instrument_id, t.txn_date, t.txn_type, t.units, t.amount, t.created_at"
         " FROM transactions t JOIN portfolios p ON p.portfolio_id = t.portfolio_id WHERE p.nature = 'actual'"
@@ -317,16 +324,18 @@ def _actual_positions(conn: sqlite3.Connection) -> tuple[dict[str, Decimal], lis
         )  # fmt: skip
     units: dict[str, Decimal] = defaultdict(Decimal)
     flags: list[str] = []
+    invalid: list[tuple[str, str]] = []
     for pid in sorted(per):
         try:
             positions = fifo_positions(per[pid])
-        except PortfolioError:
+        except PortfolioError as exc:
             flags.append("PORTFOLIO_LEDGER_INVALID_EXCLUDED")
+            invalid.append((str(pid), exc.code))
             continue
         for iid, pos in positions.items():
             if pos.units > 0:
                 units[iid] += pos.units
-    return dict(units), sorted(set(flags))
+    return dict(units), sorted(set(flags)), invalid
 
 
 def _in(n: int) -> str:
@@ -344,10 +353,12 @@ def _credit(lowest_rating: str | None, share_below_aaa: Decimal | None) -> Credi
     return CreditBucket.BELOW_AAA
 
 
-def load_holdings(conn: sqlite3.Connection, as_of: date) -> tuple[tuple[HoldingFact, ...], list[str]]:
+def load_holdings(
+    conn: sqlite3.Connection, as_of: date
+) -> tuple[tuple[HoldingFact, ...], list[str], list[tuple[str, str]]]:
     """Holdings valued at the latest usable NAV on or before ``as_of``. Statements: one for positions, then (per
     chunk of instruments) one for metadata, one for NAVs and one for factsheet facts — never one per holding."""
-    units, flags = _actual_positions(conn)
+    units, flags, invalid = _actual_positions(conn)
     ids = sorted(units)
     meta: dict[str, Any] = {}
     navs: dict[str, Any] = {}
@@ -422,12 +433,12 @@ def load_holdings(conn: sqlite3.Connection, as_of: date) -> tuple[tuple[HoldingF
                 fund_fact_id=int(f["fact_id"]) if f is not None else None,
             )
         )  # fmt: skip
-    return tuple(out), flags
+    return tuple(out), flags, invalid
 
 
 def load_inputs(conn: sqlite3.Connection, as_of: date, stress_table: StressTable) -> SnapshotInputs:
     ctx = load_goal_context(conn, financial_year_label(as_of))
-    holdings, flags = load_holdings(conn, as_of)
+    holdings, flags, invalid = load_holdings(conn, as_of)
     stress, shock = stress_from_table(stress_table)
     return SnapshotInputs(
         as_of=as_of,
@@ -441,6 +452,7 @@ def load_inputs(conn: sqlite3.Connection, as_of: date, stress_table: StressTable
         debt_shock=shock,
         stress_table_version=stress_table.table_version,
         flags=tuple(flags),
+        invalid_portfolios=tuple(invalid),
     )
 
 
@@ -509,15 +521,23 @@ def _num(slot: str, value: Decimal | date, unit: NumberUnit, as_of: date, *, fac
     return CardNumber(slot, value, unit, as_of, tuple(sorted(set(facts))), formula)
 
 
-def _scope_holdings(inputs: SnapshotInputs) -> tuple[dict[str, list[ScopeHolding]], list[ScopeHolding], set[str]]:
+def _scope_holdings(
+    inputs: SnapshotInputs,
+) -> tuple[dict[str, list[ScopeHolding]], list[ScopeHolding], set[str], dict[str, list[str]]]:
     """Split each holding over goals by the user's fractions; the remainder is Unassigned. Links with a folio are
-    not applied (holdings carry no folio yet) and their instruments stay Unassigned (flagged)."""
+    not applied (holdings carry no folio yet): their instruments stay Unassigned (flagged), and the goals they were
+    meant for are returned (``goal_id -> instrument ids``) so those goals fail closed instead of being checked
+    without the holding."""
     flags: set[str] = set()
     by_inst: dict[str, list[GoalLink]] = defaultdict(list)
     goal_ids = {g.goal_id for g in inputs.goals}
+    held = {h.instrument_id for h in inputs.holdings}
+    folio_goals: dict[str, list[str]] = defaultdict(list)
     for link in inputs.links:
         if link.folio != "":
             flags.add("FOLIO_LINK_NOT_APPLIED")
+            if link.goal_id in goal_ids and link.instrument_id in held:
+                folio_goals[link.goal_id].append(link.instrument_id)
             continue
         if link.goal_id in goal_ids:
             by_inst[link.instrument_id].append(link)
@@ -535,7 +555,7 @@ def _scope_holdings(inputs: SnapshotInputs) -> tuple[dict[str, list[ScopeHolding
                 rest = Decimal(1) - used
                 mv = None if h.market_value is None else money(h.market_value * rest)
             unassigned.append(ScopeHolding(h, rest, mv))
-    return per_goal, unassigned, flags
+    return per_goal, unassigned, flags, {g: sorted(set(ids)) for g, ids in folio_goals.items()}
 
 
 def _valued(items: Sequence[ScopeHolding]) -> ContextValue:
@@ -597,12 +617,26 @@ def _risk_abstention(a: RiskAbstention) -> Abstention:
     return Abstention(code=a.code, missing_input=a.missing_input, how_to_fix=a.how_to_fix)
 
 
-def _abstain_card(b: _Builder, layer: RiskLayer, scope_id: str | None, abstentions: Sequence[Abstention]) -> None:
+def _abstain_card(
+    b: _Builder, layer: RiskLayer, scope_id: str | None, abstentions: Sequence[Abstention], phrase: str | None = None
+) -> None:
     uniq = {(a.code, a.missing_input): a for a in abstentions}
     b.card(
         CardKind.ABSTAIN, _LAYER_OF[layer], _RULE_OF[layer], goal_id=scope_id, template_id="abstain_missing_input",
         status=CardStatus.REQUIRES_CONFIGURATION, abstentions=[uniq[k] for k in sorted(uniq)],
-        text_slots={"missing_input": _PHRASE[layer]},
+        text_slots={"missing_input": phrase or _PHRASE[layer]},
+    )  # fmt: skip
+
+
+def _integrity_card(b: _Builder, scope_id: str | None, abstentions: Sequence[Abstention], phrase: str) -> None:
+    """An L0 (data-integrity) abstention. The ranking suppresses every lower-layer card of its scope (the whole
+    household when ``scope_id`` is None) and keeps them in ``suppressed``: nothing computed on a partial picture is
+    shown as an action, and the reason is visible on Today and in "Needs from you"."""
+    uniq = {(a.code, a.missing_input): a for a in abstentions}
+    b.card(
+        CardKind.ABSTAIN, Layer.L0, ("risk.snapshot", 1), goal_id=scope_id, template_id="abstain_missing_input",
+        status=CardStatus.REQUIRES_CONFIGURATION, abstentions=[uniq[k] for k in sorted(uniq)],
+        text_slots={"missing_input": phrase},
     )  # fmt: skip
 
 
@@ -740,8 +774,25 @@ def _l2(b: _Builder, goal: Goal, items: Sequence[ScopeHolding], values: dict[str
             impact=Impact(at_risk, ImpactBasis.AMOUNT_AT_RISK, "at_risk"),
             text_slots={"goal_name": goal.name, "safe_sleeve": "your debt or liquid sleeve"},
         )  # fmt: skip
-    elif res.outcome is Outcome.ABSTAIN:
-        _abstain_card(b, RiskLayer.L2, goal.goal_id, [_risk_abstention(a) for a in res.abstentions])
+    # One L2 abstain card per goal carries both the engine's abstentions and every ACTION finding: an ACTION
+    # (debt duration longer than the time left to the goal) has no neutral action template yet, so it is shown as
+    # a review the user must make, never dropped and never read as "nothing needed" (python-reviewer-2).
+    pending = [_risk_abstention(a) for a in res.abstentions] if res.outcome is Outcome.ABSTAIN else []
+    names = {s.fact.instrument_id: s.fact.name for s in items}
+    durations = {s.fact.instrument_id: s.fact.macaulay_duration for s in items}
+    actions = [f for f in res.findings if f.outcome is Outcome.ACTION]
+    for f in actions:
+        pending.append(Abstention(
+            code=f.code,
+            missing_input=(f'a review of {names.get(f.holding_id, f.holding_id)} ({f.holding_id}) for {label}: its'
+                           f" Macaulay duration of {durations.get(f.holding_id)} years is longer than the"
+                           f" {res.years_to_goal:.2f} years left to the goal date"),
+            how_to_fix=("review whether this debt fund suits a goal this close (its value moves with interest rates"
+                        " until the goal date); Today has no action card for this finding yet"),
+        ))  # fmt: skip
+    if pending:
+        _abstain_card(b, RiskLayer.L2, goal.goal_id, pending,
+                      phrase="a review of a long-duration debt holding" if actions else None)  # fmt: skip
     return summary
 
 
@@ -845,13 +896,27 @@ def _l4(b: _Builder, all_holdings: Sequence[ScopeHolding]) -> dict[str, Any]:
     for s in all_holdings:
         assert s.fact.risk_class is not None and s.market_value is not None
         rc = s.fact.risk_class
+        # theme=None: no sector/theme attribute is collected yet. The SEBI category text ("Sectoral/ Thematic") is
+        # shared by unrelated sectors, so grouping by it would sum banking + pharma + tech into one "theme" and
+        # raise a VERIFIED breach no single theme has (python-reviewer-3). The theme limit abstains below instead.
         holdings.append(LimitHolding(
-            s.fact.instrument_id, rc, s.market_value, scheme_id=s.fact.instrument_id, amc=s.fact.amc,
-            theme=s.fact.category if rc is RiskClass.EQ_SECTOR_THEMATIC else None,
+            s.fact.instrument_id, rc, s.market_value, scheme_id=s.fact.instrument_id, amc=s.fact.amc, theme=None,
             is_factor=rc is RiskClass.EQ_FACTOR,
         ))  # fmt: skip
     res: LimitsResult = check_limits(holdings, inputs.limits)
-    summary.update(outcome=res.outcome.value, findings=len(res.findings))
+    themed = sorted(
+        {s.fact.name for s in all_holdings if s.fact.risk_class is RiskClass.EQ_SECTOR_THEMATIC and s.market_value}
+    )
+    theme_gap = (
+        [Abstention(
+            code="theme_unknown", missing_input="the sector or theme of " + ", ".join(themed),
+            how_to_fix=("no sector or theme is recorded for these schemes yet, so the theme limit cannot be checked"
+                        " (their SEBI category is shared by unrelated sectors and is not a theme)"),
+        )]
+        if themed else []
+    )  # fmt: skip
+    outcome = Outcome.ABSTAIN if theme_gap and res.outcome is Outcome.PASS else res.outcome
+    summary.update(outcome=outcome.value, findings=len(res.findings), theme="UNKNOWN" if theme_gap else None)
     names = {s.fact.instrument_id: s.fact.name for s in all_holdings}
     pv = inputs.policy_version_id
     for f in res.findings:
@@ -884,8 +949,8 @@ def _l4(b: _Builder, all_holdings: Sequence[ScopeHolding]) -> dict[str, Any]:
             impact=Impact(excess, ImpactBasis.AMOUNT_TO_MOVE, "excess"),
             text_slots={"holding_name": holding_name, "scope_name": _LIMIT_SCOPE.get(f.kind, "your portfolio")},
         )  # fmt: skip
-    if res.abstentions:
-        _abstain_card(b, RiskLayer.L4, None, [_risk_abstention(a) for a in res.abstentions])
+    if res.abstentions or theme_gap:
+        _abstain_card(b, RiskLayer.L4, None, [*(_risk_abstention(a) for a in res.abstentions), *theme_gap])
     return summary
 
 
@@ -941,6 +1006,7 @@ def _card_json(card: ActionCard, templates: TemplateSet, slots: Mapping[str, str
     out["card_class"] = card.card_class.value
     out["is_action"] = card.is_action
     out["rule_ref"] = card.why.rule_ref
+    out["card_key"] = notify.card_key(card)  # snapshot-independent: carries an unchecked "I did this" forward
     out.update(_render(card, templates, slots))
     return out
 
@@ -954,8 +1020,29 @@ def compute_snapshot(inputs: SnapshotInputs, templates: TemplateSet) -> Snapshot
     """Pure: the same inputs and templates always give the same snapshot, byte for byte."""
     sid, manifest_hash, rv = snapshot_identity(inputs, templates)
     b = _Builder(inputs, templates, sid, manifest_hash, rv, flags=set(inputs.flags))
-    per_goal, unassigned, split_flags = _scope_holdings(inputs)
+    per_goal, unassigned, split_flags, folio_goals = _scope_holdings(inputs)
     b.flags |= split_flags
+    if inputs.invalid_portfolios:
+        _integrity_card(b, None, [
+            Abstention(
+                code="portfolio_ledger_invalid",
+                missing_input=f"a valid transaction history for portfolio {pid} ({code})",
+                how_to_fix=("re-import the CAS statement or correct the transaction in that portfolio; until then no"
+                            " card is computed from your holdings"),
+            )
+            for pid, code in inputs.invalid_portfolios
+        ], "a valid transaction history for every portfolio")  # fmt: skip
+    goal_names = {g.goal_id: g.name for g in inputs.goals}
+    for gid in sorted(folio_goals):
+        _integrity_card(b, gid, [
+            Abstention(
+                code="folio_link_not_applied",
+                missing_input=f'a goal mapping without a folio for {iid} (goal "{goal_names[gid]}")',
+                how_to_fix=("map the whole holding to the goal (no folio) on the Goals page; a folio-level mapping"
+                            " is not applied yet, so this goal is not checked without it"),
+            )
+            for iid in folio_goals[gid]
+        ], "a goal mapping that can be applied")  # fmt: skip
     whole = [ScopeHolding(h, Decimal(1), h.market_value) for h in inputs.holdings]
 
     household: dict[str, Any] = {"scope_id": HOUSEHOLD_SCOPE, "layers": {}}
@@ -1050,8 +1137,8 @@ def store_snapshot(conn: sqlite3.Connection, snap: Snapshot, now: str) -> Snapsh
     Three statements: the current snapshot's card-set hash, the conditional insert and the run row (plus one more
     only when the id already exists, to verify the stored payload)."""
     prev = conn.execute(
-        "SELECT s.card_set_hash FROM snapshot_runs r JOIN signal_snapshots s ON s.snapshot_id = r.snapshot_id"
-        f" ORDER BY {ledger.LATEST_RUN_ORDER} LIMIT 1"  # noqa: S608 - module constant
+        "SELECT s.card_set_hash FROM snapshot_runs r JOIN signal_snapshots s ON s.snapshot_id = r.snapshot_id"  # noqa: S608
+        f" ORDER BY {ledger.LATEST_RUN_ORDER} LIMIT 1"  # module constant
     ).fetchone()
     created = ledger.put_snapshot(
         conn,
@@ -1080,14 +1167,20 @@ def run_snapshot(
 
 # ------------------------------------------------------------------------------------------------ Today (read side)
 
-# ONE statement: the snapshot of the newest computation (snapshot_runs, so inputs reverted A -> B -> A show A again)
-# plus the decisions already recorded against its cards (json_group_array is in SQLite's JSON1 and in libSQL).
-# Served by ix_snapshot_runs_latest and ix_decisions_log_snapshot. The engine never runs here.
+# ONE statement: the snapshot of the newest computation (snapshot_runs, so inputs reverted A -> B -> A show A again),
+# the decisions already recorded against its cards, and every "I did this" no CAS has checked yet (any snapshot), so
+# it can be carried to the same card today (json_group_array is in SQLite's JSON1 and in libSQL). Served by
+# ix_snapshot_runs_latest, ix_decisions_log_snapshot and the partial ix_decisions_log_pending_done. The engine never
+# runs here.
 TODAY_SQL = (
-    "SELECT s.snapshot_id, s.as_of_date, s.verdict, s.payload_json, r.computed_at,"
+    "SELECT s.snapshot_id, s.as_of_date, s.verdict, s.payload_json, r.computed_at,"  # noqa: S608 - module constant
     " (SELECT json_group_array(json_object('decision_id', d.decision_id, 'card_id', d.card_id,"
     " 'decision', d.decision, 'decided_at', d.decided_at, 'cas_confirmed', d.cas_confirmed))"
-    " FROM decisions_log d WHERE d.snapshot_id = s.snapshot_id) AS decisions"
+    " FROM decisions_log d WHERE d.snapshot_id = s.snapshot_id) AS decisions,"
+    " (SELECT json_group_array(json_object('decision_id', p.decision_id, 'card_id', p.card_id,"
+    " 'snapshot_id', p.snapshot_id, 'card_key', p.card_key, 'decided_at', p.decided_at))"
+    " FROM decisions_log p WHERE p.decision = 'done' AND p.cas_confirmed IS NULL AND p.card_key IS NOT NULL)"
+    " AS pending_done"
     " FROM snapshot_runs r JOIN signal_snapshots s ON s.snapshot_id = r.snapshot_id"
     f" ORDER BY {ledger.LATEST_RUN_ORDER} LIMIT 1"
 )
@@ -1102,11 +1195,40 @@ def read_today(conn: sqlite3.Connection) -> dict[str, Any]:
         return {"state": NO_SNAPSHOT, "verdict": None, "cards": [], "needs": [], "decisions": []}
     payload: dict[str, Any] = json.loads(row["payload_json"])
     decisions = json.loads(row["decisions"]) if row["decisions"] else []
+    decisions += _carried_done(payload, decisions, json.loads(row["pending_done"]) if row["pending_done"] else [])
     payload["decisions"] = sorted(
         decisions, key=lambda d: (d["decided_at"], d["card_id"], d["decision"], d.get("decision_id") or 0)
     )
     payload["computed_at"] = row["computed_at"]
     return payload
+
+
+def _carried_done(
+    payload: Mapping[str, Any], own: Sequence[Mapping[str, Any]], pending: Sequence[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    """An "I did this" that no CAS has checked yet stays attached to the SAME card (same ``card_key``: kind, rule,
+    goal, instruments) in later snapshots, so the card does not come back unmarked and invite the same transaction
+    twice (design-judgement.md §1 graft 9; silent-failure-hunter-04). A CAS that contradicts it (cas_confirmed = 0)
+    ends the carry and the card is shown as open again. Each carried entry names the decision it came from."""
+    sid = payload.get("snapshot_id")
+    latest: dict[str, Mapping[str, Any]] = {}
+    for p in sorted(pending, key=lambda p: (str(p["decided_at"]), int(p["decision_id"]))):
+        if p.get("snapshot_id") != sid:
+            latest[str(p["card_key"])] = p
+    if not latest:
+        return []
+    marked = {str(d["card_id"]) for d in own if d.get("decision") == "done"}
+    out: list[dict[str, Any]] = []
+    for c in payload.get("cards", []):
+        src = latest.get(str(c.get("card_key")))
+        if src is None or not c.get("is_action") or str(c["card_id"]) in marked:
+            continue
+        out.append({
+            "decision_id": src["decision_id"], "card_id": c["card_id"], "decision": "done",
+            "decided_at": src["decided_at"], "cas_confirmed": None,
+            "carried_from_snapshot_id": src["snapshot_id"], "carried_from_card_id": src["card_id"],
+        })  # fmt: skip
+    return out
 
 
 def read_needs(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -1165,7 +1287,7 @@ def record_decision(
         ledger.append_decisions(
             conn,
             [ledger.Decision(card_id=card_id, snapshot_id=snapshot_id, goal_id=card.get("goal_id"), decision=decision,
-                             note=note, decided_at=now)],
+                             note=note, decided_at=now, card_key=card.get("card_key"))],
         )  # fmt: skip
         existing = conn.execute(_DECISION_ROW_SQL, (card_id, snapshot_id, decision)).fetchone()
         status = "recorded"

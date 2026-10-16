@@ -254,8 +254,8 @@ def append_policy_version(
     body = _canonical(policy)
     digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
     cur = conn.execute(
-        "INSERT INTO policy_versions(policy_json, policy_hash, decided_at, created_at) SELECT ?, ?, ?, ?"
-        " WHERE NOT EXISTS (SELECT 1 FROM (SELECT policy_hash FROM policy_versions"  # noqa: S608 - module constant
+        "INSERT INTO policy_versions(policy_json, policy_hash, decided_at, created_at) SELECT ?, ?, ?, ?"  # noqa: S608
+        " WHERE NOT EXISTS (SELECT 1 FROM (SELECT policy_hash FROM policy_versions"  # module constant
         f" ORDER BY {_LATEST_POLICY_ORDER} LIMIT 1) WHERE policy_hash = ?)",  # see migration 0004 header
         (body, digest, decided_at, now, digest),
     )

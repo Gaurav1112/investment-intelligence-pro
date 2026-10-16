@@ -604,6 +604,7 @@ def test_route_runs_j1_with_the_app_fetcher(cron_client: TestClient) -> None:
     st = state(cron_client)
     st.fetcher_factory = make_fetcher(Amfi())
     st.clock = lambda: J1_TIME
+    watch_schemes(st.conn, navall_codes(), J1_TIME)  # U-01: STORED only means something with a non-empty scope
     cron_client.app.app.state.cron_hooks = hooks()  # type: ignore[attr-defined]
     r = cron_client.get("/api/cron/navall", headers=BEARER)
     assert r.status_code == 200 and r.json()["code"] == "STORED"

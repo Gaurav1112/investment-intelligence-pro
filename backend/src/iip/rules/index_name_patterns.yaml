@@ -1,0 +1,159 @@
+# Mutual-fund tax class inferred from an index fund's NAME (PLAN.md row A08; audit-journey.md §2.2 and C5 Fix A).
+#
+# Why: AMFI's NAVAll files equity AND debt index funds under the same label "Other Scheme - Index Funds", so the
+# category alone cannot give the tax class.  The scheme name usually names the tracked index.  A SEBI index fund holds
+# at least 95 % of its assets in the constituents of the index it tracks (rule IDX-FUND-95), so:
+#   - an index made only of Indian listed equity shares  -> at least 65 % domestic listed equity
+#                                                           -> equity-oriented fund (ITA 2025 s.198(8)(ii));
+#   - an index made only of G-secs / SDLs / bonds         -> more than 65 % in debt
+#                                                           -> specified mutual fund (ITA 2025 s.76(5)(b)).
+#
+# Rules of use (enforced by iip.engine.candidates.mf_tax_classification):
+#   1. Patterns apply ONLY to the categories in `applies_to_categories`. A category that already decides the class
+#      (e.g. "Index Funds - Equity Funds" -> equity) is never overridden by the name.
+#   2. Any `exclusions` match -> UNKNOWN (overseas, commodity, fund-of-funds and multi-asset names: their tax class
+#      cannot be read off the index name).
+#   3. Equity AND debt patterns both match -> UNKNOWN.  Neither matches -> UNKNOWN.  No guessing.
+#   4. Every inferred result carries the flag TAX_CLASS_INFERRED_FROM_NAME and the matched rule_id.
+#
+# Matching: the name is case-folded and every character other than a-z, 0-9 and "&" becomes a space (so "G-Sec",
+# "CRISIL-IBX" and "Nifty50" normalise predictably); patterns are Python regular expressions searched in that text.
+#
+# `examples` are SYNTHETIC fixture names (the repo is public: no real scheme names or codes).  The test suite checks
+# every pattern against its examples and checks that this file and the engine's built-in table are identical.
+#
+# verification_status: P = primary source read during research (see `source_url`); NV = the index's composition was
+#   not read from a primary source in this repo's research; the pattern still only fires on an index whose name says
+#   what it holds, and it is listed here so a reviewer can verify or remove it.
+
+schema_version: 1
+rule_id: IDX-NAME-2026-10
+flag: TAX_CLASS_INFERRED_FROM_NAME
+
+basis:
+  - rule_id: IDX-FUND-95
+    claim: Index funds/ETFs invest at least 95 % of total assets in the constituents of the index they track.
+    source_url: https://www.sebi.gov.in/sebi_data/attachdocs/feb-2026/1772079826878.pdf
+    verification_status: P
+    notes: SEBI MF categorisation circular (26-Feb-2026), summarised in docs/research/indian-instruments-and-tax.md §1.4.
+  - rule_id: TAX-EQUITY-ORIENTED
+    claim: Equity-oriented fund = at least 65 % of total proceeds in equity shares of domestic listed companies.
+    source_url: https://www.incometaxindia.gov.in/documents/d/guest/income_tax_act_2025_as_amended_by_fa_act_2026-pdf
+    verification_status: P
+    notes: ITA 2025 s.198(8)(ii); same citation as rule MF-EQ-STCG in rules/tax/india.yaml.
+  - rule_id: TAX-SPECIFIED-MF
+    claim: Specified mutual fund = more than 65 % of total proceeds in debt and money market instruments.
+    source_url: https://www.incometaxindia.gov.in/documents/d/guest/income_tax_act_2025_as_amended_by_fa_act_2026-pdf
+    verification_status: P
+    notes: ITA 2025 s.76(5)(b); same citation as rule MF-DEBT-SMF/ITA2025 in rules/tax/india.yaml.
+
+applies_to_categories:
+  - Other Scheme - Index Funds
+
+patterns:
+  # ---------------- Indian equity indices -> equity_oriented ----------------
+  - rule_id: IDX-EQ-NIFTY50
+    tax_class: equity_oriented
+    regex: '\bnifty ?50\b'
+    index: Nifty 50 (50 large NSE-listed Indian companies)
+    source_url: https://www.niftyindices.com/Factsheet/ind_nifty50.pdf
+    verification_status: P
+    examples: [Fixture Nifty 50 Index Fund Direct Growth, Fixture NIFTY50 Equal Weight Index Fund]
+  - rule_id: IDX-EQ-NIFTY-NEXT50
+    tax_class: equity_oriented
+    regex: '\bnifty next ?50\b'
+    index: Nifty Next 50 (NSE-listed Indian companies ranked 51-100)
+    source_url: doc:docs/research/wave1/audit-journey.md
+    verification_status: NV
+    examples: [Fixture Nifty Next 50 Index Fund Regular IDCW]
+  - rule_id: IDX-EQ-NIFTY-BROAD
+    tax_class: equity_oriented
+    regex: '\bnifty ?(?:100|200|500)\b'
+    index: Nifty 100 / Nifty 200 / Nifty 500 (NSE-listed Indian companies)
+    source_url: https://www.niftyindices.com/Factsheet/ind_nifty_500.pdf
+    verification_status: P
+    examples: [Fixture Nifty 500 Index Fund, Fixture Nifty 100 Low Volatility 30 Index Fund, Fixture Nifty 200 Momentum 30 Index Fund]
+  - rule_id: IDX-EQ-NIFTY-TOTAL-MARKET
+    tax_class: equity_oriented
+    regex: '\bnifty total market\b'
+    index: Nifty Total Market (NSE-listed Indian companies)
+    source_url: doc:docs/research/wave1/audit-journey.md
+    verification_status: NV
+    examples: [Fixture Nifty Total Market Index Fund]
+  - rule_id: IDX-EQ-MIDCAP
+    tax_class: equity_oriented
+    regex: 'mid ?cap'
+    index: Midcap indices such as Nifty Midcap 150 (NSE-listed Indian companies)
+    source_url: https://www.niftyindices.com/Factsheet/ind_Nifty_Midcap_150.pdf
+    verification_status: P
+    examples: [Fixture Nifty Midcap 150 Index Fund, Fixture LargeMidcap 250 Index Fund, Fixture Nifty Midcap150 Momentum 50 Index Fund]
+  - rule_id: IDX-EQ-SMALLCAP
+    tax_class: equity_oriented
+    regex: 'small ?cap'
+    index: Smallcap indices such as Nifty Smallcap 250 (NSE-listed Indian companies)
+    source_url: https://www.niftyindices.com/Factsheet/ind_Nifty_Smallcap_250.pdf
+    verification_status: P
+    examples: [Fixture Nifty Smallcap 250 Index Fund, Fixture Small Cap Momentum Index Fund, Fixture Nifty Smallcap250 Quality 50 Index Fund]
+  - rule_id: IDX-EQ-SENSEX
+    tax_class: equity_oriented
+    regex: '\bsensex\b'
+    index: BSE Sensex (30 BSE-listed Indian companies)
+    source_url: doc:docs/research/wave1/audit-journey.md
+    verification_status: NV
+    examples: [Fixture BSE Sensex Index Fund, Fixture Sensex Next 50 Index Fund]
+
+  # ---------------- Government-security and bond indices -> specified_debt ----------------
+  - rule_id: IDX-DEBT-GILT
+    tax_class: specified_debt
+    regex: '\bgilt\b'
+    index: Gilt (central-government securities) indices
+    source_url: https://www.niftyindices.com/Factsheet/ind_debt_Nifty_Composite.pdf
+    verification_status: P
+    examples: [Fixture Gilt Index Fund, Fixture Constant Maturity Gilt Index Fund]
+  - rule_id: IDX-DEBT-GSEC
+    tax_class: specified_debt
+    regex: '\bg ?sec\b'
+    index: G-Sec (government-securities) indices
+    source_url: https://www.niftyindices.com/Factsheet/ind_debt_Nifty_Composite.pdf
+    verification_status: P
+    examples: [Fixture Nifty G-Sec Dec 2030 Index Fund, Fixture Nifty 5yr Benchmark GSec Index Fund]
+  - rule_id: IDX-DEBT-SDL
+    tax_class: specified_debt
+    regex: '\bsdl\b|\bstate development loans?\b'
+    index: SDL (state-government securities) indices
+    source_url: doc:docs/research/wave1/audit-journey.md
+    verification_status: NV
+    examples: [Fixture Nifty SDL Apr 2031 Index Fund, Fixture State Development Loan Index Fund]
+  - rule_id: IDX-DEBT-BHARAT-BOND
+    tax_class: specified_debt
+    regex: '\bbharat bond\b'
+    index: Bharat Bond indices (AAA-rated public-sector bonds)
+    source_url: doc:docs/research/wave1/audit-journey.md
+    verification_status: NV
+    examples: [Fixture Bharat Bond Index Fund April 2033]
+  - rule_id: IDX-DEBT-CRISIL-IBX
+    tax_class: specified_debt
+    regex: '\bcrisil ?ibx\b'
+    index: CRISIL-IBX fixed-income indices
+    source_url: doc:docs/research/wave1/audit-journey.md
+    verification_status: NV
+    examples: [Fixture CRISIL-IBX 60:40 Index Fund Sep 2027, Fixture CRISIL IBX AAA Index Fund]
+
+exclusions:
+  # Any match -> UNKNOWN even if an equity or debt pattern also matches.
+  - rule_id: IDX-X-OVERSEAS
+    regex: '\b(?:nasdaq|s ?& ?p ?500|hang seng|nyse|fang|msci|global|international|overseas|world|us|usa|china|japan|taiwan|europe|emerging)\b'
+    reason: Overseas indices are not domestic equity, so the equity-oriented test fails; the tax class is not read off the name.
+    examples: [Fixture Nasdaq 100 Index Fund, Fixture S&P 500 Top 50 Index Fund, Fixture MSCI World Index Fund]
+  - rule_id: IDX-X-COMMODITY
+    regex: '\b(?:gold|silver|commodit(?:y|ies))\b'
+    reason: Commodity index funds are neither equity-oriented nor debt.
+    examples: [Fixture Gold Index Fund, Fixture Silver Index Fund]
+  - rule_id: IDX-X-FOF
+    regex: '\b(?:fund of funds?|fof)\b'
+    reason: The fund-of-funds limb (s.198(8)(i), s.76(5)(b)) needs look-through data the app does not have.
+    examples: [Fixture Nifty 50 Index FoF, Fixture Gilt Fund of Funds]
+  - rule_id: IDX-X-MULTI-ASSET
+    regex: '\b(?:multi asset|hybrid|balanced|equity savings|arbitrage)\b'
+    reason: Mixed-asset indices have no single class readable from the name.
+    examples: [Fixture Multi Asset Index Fund, Fixture Hybrid 50 Index Fund]

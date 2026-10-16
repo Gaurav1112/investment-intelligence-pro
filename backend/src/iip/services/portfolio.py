@@ -40,6 +40,7 @@ from iip.engine.stats.metrics import hhi_from_values
 from iip.services import ingestion
 from iip.services.explain import source_ref
 from iip.services.instruments import TBILL_STALE_DAYS, _slug
+from iip.store import ledger
 from iip.store.db import backup as db_backup
 from iip.store.db import current_version, is_remote, write_tx
 
@@ -1378,6 +1379,9 @@ assert all(t.isidentifier() for t in PUBLIC_TABLES)
 # Precomputed from identifier-checked constants: no SQL is ever built from runtime values (SEC-65).
 _COUNT_SQL = {t: "SELECT COUNT(*) FROM " + t for t in (*USER_TABLES, *PUBLIC_TABLES)}  # noqa: S608 - identifier-asserted constants
 _DELETE_SQL = {t: "DELETE FROM " + t for t in USER_TABLES}  # noqa: S608 - identifier-asserted constants
+# Migration 0004 user tables (goals, decisions, snapshots, ...): counted here, deleted only through
+# ledger.erase_user_rows, which opens the append-only erase gate inside the caller's transaction (SEC-81).
+_COUNT_SQL_0004 = {t: "SELECT COUNT(*) FROM " + t for t in ledger.USER_TABLES_0004}  # noqa: S608 - identifier-asserted constants
 
 
 def inventory(conn: sqlite3.Connection, data_dir: Path) -> dict[str, Any]:
@@ -1448,6 +1452,7 @@ def erase(conn: sqlite3.Connection, data_dir: Path, *, delete_backups: bool) -> 
     """Delete every user row (SEC-81), with ``secure_delete`` on, then VACUUM and truncate the WAL so the bytes
     are gone from the database files. Public market data and the schema are kept."""
     counts = {t: int(conn.execute(_COUNT_SQL[t]).fetchone()[0]) for t in USER_TABLES}
+    counts.update({t: int(conn.execute(_COUNT_SQL_0004[t]).fetchone()[0]) for t in ledger.USER_TABLES_0004})
     if is_remote(conn):
         return _erase_hosted(conn, counts)
     previous = int(conn.execute("PRAGMA secure_delete").fetchone()[0])
@@ -1456,6 +1461,7 @@ def erase(conn: sqlite3.Connection, data_dir: Path, *, delete_backups: bool) -> 
         with write_tx(conn):
             for t in USER_TABLES:
                 conn.execute(_DELETE_SQL[t])
+            ledger.erase_user_rows(conn)
         conn.execute("VACUUM")
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     finally:
@@ -1488,6 +1494,7 @@ def _erase_hosted(conn: sqlite3.Connection, counts: dict[str, int]) -> dict[str,
     with write_tx(conn):
         for t in USER_TABLES:
             conn.execute(_DELETE_SQL[t])
+        ledger.erase_user_rows(conn)
         conn.execute("DELETE FROM job_progress")
     log.info("user data erased tables=%d (hosted)", len(counts))
     return {

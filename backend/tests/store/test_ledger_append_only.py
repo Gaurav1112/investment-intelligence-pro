@@ -200,6 +200,22 @@ def test_erase_is_the_only_way_out_and_closes_the_gate(db: Any) -> None:
         db.execute("DELETE FROM backtest_trials")
 
 
+def test_portfolio_erase_also_removes_migration_0004_user_rows(db: Any, tmp_path: Path) -> None:
+    """SEC-81 wiring (integration): 'erase all my data' clears the 0004 user tables, append-only ledgers included,
+    and reports them in deleted_rows; public 0004 data is kept. Both drivers (local and hosted erase paths)."""
+    from iip.services import portfolio as pf
+
+    _seed_everything(db)
+    out = pf.erase(db, tmp_path, delete_backups=False)
+    assert out["status"] == "erased"
+    assert out["deleted_rows"]["goals"] == 1 and out["deleted_rows"]["decisions_log"] == 1
+    for t in lg.USER_TABLES_0004:
+        assert db.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] == 0, t
+    for t in lg.PUBLIC_TABLES_0004:
+        assert db.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] >= 1, t
+    assert db.execute("SELECT COUNT(*) FROM ledger_erase_gate").fetchone()[0] == 0
+
+
 def test_erase_outside_a_transaction_is_refused(db: Any) -> None:
     _seed_everything(db)
     with pytest.raises(RuntimeError, match="write transaction"):

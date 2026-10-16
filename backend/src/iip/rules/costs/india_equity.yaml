@@ -1,0 +1,143 @@
+# Cash-market equity delivery and ETF transaction costs — research-backtest-method.md §6.1; verify BT-4; package A11.
+#
+# Same conventions as tax/india.yaml: every row has rule_id, effective_from (inclusive), effective_to (null = in
+# force at snapshot), source_url and verification_status; decimals are quoted strings (floats are refused).
+# * effective_from is the date the rate was OBSERVED on the cited page (2026-10-15), not the date it started.
+#   Rates before that date are NOT VERIFIED here: a backtest period without a row must use the upper-bound rule
+#   (COST-EQ-UPPER-BOUND, flagged costs_estimated) or abstain.
+# * rate is a fraction of `basis`; amount_inr is a flat rupee charge.  A row with neither must be
+#   REQUIRES_CONFIGURATION (broker-specific, the user supplies it) or NV (no verified rate).
+# * The broker page (Zerodha) is a SECONDARY source; regulator/statute texts were not opened (status S).
+# * ETFs: the broker page does not mention ETFs at all; only the STT row is listed for them and it is NV.
+
+schema_version: 1
+table_version: india-equity-costs@2026-10-16.r1
+snapshot_date: 2026-10-15
+
+rows:
+  - rule_id: COST-EQ-BROKERAGE
+    component: BROKERAGE
+    applies_to: EQUITY_DELIVERY
+    side: BOTH
+    basis: TRADED_VALUE
+    rate: null
+    broker_specific: true
+    effective_from: 2026-10-15
+    effective_to: null
+    source_url: https://zerodha.com/charges/
+    verification_status: REQUIRES_CONFIGURATION
+    notes: The user's broker sets it (the cited broker page says "Zero Brokerage" for delivery).
+  - rule_id: COST-EQ-STT
+    component: STT
+    applies_to: EQUITY_DELIVERY
+    side: BOTH
+    basis: TRADED_VALUE
+    rate: "0.001"
+    rounding: NEAREST_RUPEE
+    effective_from: 2026-10-15
+    effective_to: null
+    source_url: https://zerodha.com/charges/
+    verification_status: S
+    notes: >-
+      "0.1% on buy & sell". Unchanged by the 1-Apr-2026 F&O change. Rounded to the nearest rupee (paise >= 50
+      round up), per the broker's STT support article.
+  - rule_id: COST-ETF-STT
+    component: STT
+    applies_to: ETF
+    side: SELL
+    basis: TRADED_VALUE
+    rate: null
+    rounding: NEAREST_RUPEE
+    effective_from: 2026-10-15
+    effective_to: null
+    source_url: doc:docs/research/wave1/verify-backtest-method.md
+    verification_status: NV
+    notes: >-
+      NOT VERIFIED (verify BT-4). The broker page does not mention ETFs; units of equity-oriented funds sold on an
+      exchange are thought to fall under a different, lower, seller-side row of Finance (No.2) Act 2004 s.98. No
+      rate is recorded until a primary source is read; until then ETF backtests use COST-EQ-UPPER-BOUND on the
+      equity delivery rates and are flagged costs_estimated.
+  - rule_id: COST-EQ-TXN-NSE
+    component: EXCHANGE_TRANSACTION
+    applies_to: EQUITY_DELIVERY
+    venue: NSE
+    side: BOTH
+    basis: TRADED_VALUE
+    rate: "0.0000307"
+    effective_from: 2026-10-15
+    effective_to: null
+    source_url: https://zerodha.com/charges/
+    verification_status: S
+    notes: >-
+      "NSE: 0.00307%". NSE circular NSE/FA/64232 (0.00297 % + IPFT from 1-Oct-2024) and the Feb-2026 re-split are
+      NOT VERIFIED (archive timed out).
+  - rule_id: COST-EQ-TXN-BSE
+    component: EXCHANGE_TRANSACTION
+    applies_to: EQUITY_DELIVERY
+    venue: BSE
+    side: BOTH
+    basis: TRADED_VALUE
+    rate: "0.0000375"
+    effective_from: 2026-10-15
+    effective_to: null
+    source_url: https://zerodha.com/charges/
+    verification_status: S
+    notes: '"BSE: 0.00375%".'
+  - rule_id: COST-EQ-SEBI-FEE
+    component: SEBI_TURNOVER_FEE
+    applies_to: EQUITY_DELIVERY
+    side: BOTH
+    basis: TRADED_VALUE
+    rate: "0.000001"
+    effective_from: 2026-10-15
+    effective_to: null
+    source_url: https://zerodha.com/charges/
+    verification_status: S
+    notes: '"₹10 / crore".'
+  - rule_id: COST-EQ-STAMP
+    component: STAMP_DUTY
+    applies_to: EQUITY_DELIVERY
+    side: BUY
+    basis: TRADED_VALUE
+    rate: "0.00015"
+    effective_from: 2026-10-15
+    effective_to: null
+    source_url: https://zerodha.com/charges/
+    verification_status: S
+    notes: '"0.015% or ₹1500 / crore on buy side". Indian Stamp Act schedule not opened.'
+  - rule_id: COST-EQ-GST
+    component: GST
+    applies_to: EQUITY_DELIVERY
+    side: BOTH
+    basis: BROKERAGE_SEBI_FEE_AND_TRANSACTION
+    rate: "0.18"
+    effective_from: 2026-10-15
+    effective_to: null
+    source_url: https://zerodha.com/charges/
+    verification_status: S
+    notes: '"18% on (brokerage + SEBI charges + transaction charges)".'
+  - rule_id: COST-EQ-DP
+    component: DP_CHARGE
+    applies_to: EQUITY_DELIVERY
+    side: SELL
+    basis: PER_SCRIP_PER_SELL_DAY
+    amount_inr: "15.34"
+    broker_specific: true
+    effective_from: 2026-10-15
+    effective_to: null
+    source_url: https://zerodha.com/charges/
+    verification_status: S
+    notes: >-
+      "₹15.34 per scrip (₹3.5 CDSL fee + ₹9.5 Zerodha fee + ₹2.34 GST) ... when stocks are sold, irrespective of
+      quantity". Broker-specific: replace with the user's broker figure.
+
+parameters:
+  - rule_id: COST-EQ-UPPER-BOUND
+    parameter: unverified_period_multiplier
+    value: "1.5"
+    effective_from: 2026-10-16
+    source_url: doc:docs/research/wave1/research-backtest-method.md#61-equity-delivery-and-etf-cash-market--rates-as-published-today
+    verification_status: PARAMETER
+    notes: >-
+      A backtest period without a verified cost row uses today's rates x 1.5 as a conservative upper bound and is
+      flagged costs_estimated (or abstains).

@@ -1164,3 +1164,103 @@ levies:
       0.005 %. Not charged on redemption. No government URL was fetched by the research (SEBI letter
       29-Jun-2020 referenced by AMCs; methodology §2.10 cross-checks against HDFC/LIC/ABSL MF FAQs), so the
       source is the research document itself. Status stays S.
+
+# ================================================================================================
+# HISTORICAL ROWS (package A11, wave 2; verify-backtest-method.md BT-3).  OPT-IN ONLY.
+# ================================================================================================
+# These rows extend listed-equity and equity-oriented-MF capital gains back to transfers from 1-Apr-2018, for
+# BACKTESTS.  They are NOT part of the default rule set: ``load_tax_rules()`` ignores them and the live app keeps
+# abstaining on pre-FY2024-25 transfers.  Only ``load_tax_rules(include_historical=True)`` merges them, and the
+# merged table_version then carries the historical_table_version suffix so a backtest manifest records it.
+# * Every row here is NV (NOT VERIFIED) until a Chartered Accountant reviews it, even where the primary text was
+#   read; the loader refuses any other status in this section.
+# * Every row must close on or before 2024-03-31 (the main table starts on 2024-04-01; no overlap).
+# * Lots acquired on or before 31-Jan-2018 still abstain: the LTCG rows keep acquisition_date_from 2018-02-01
+#   (s.55(2)(ac) grandfathering / FMV-on-31-Jan-2018 cost is not modelled).
+# * Transfers before 1-Apr-2018 have NO rows: long-term gains there fall under the s.10(38) exemption, whose
+#   STT-on-acquisition conditions are not modelled, so they abstain (RuleNotFound).
+# * Only capital-gains rate rows are added.  Cess, surcharge and slab rows for FY2018-19..FY2023-24 are NOT in
+#   this table, so compute_tax() still abstains for those years on the cess/surcharge lookup; a backtest must
+#   apply its own (cited) cess handling or report pre-tax only.
+# * Primary texts read for this section (2026-10-16):
+#   [FA18]  Finance Act 2018 (No. 13 of 2018), Gazette of India Extraordinary No. 17, 29-Mar-2018,
+#           https://egazette.gov.in/writereaddata/2018/184302.pdf (SHA-256 296402f97e17a4a22c66267364d207e1e620b62a221624631c86add0a692f8e1)
+#   [FA24]  as in the header above (s.29 substitutes s.111A(1) with a rate keyed to the transfer date).
+historical_table_version: india-tax-hist@2026-10-16.r1
+historical_rules:
+  - rule_id: EQ-STCG-HIST
+    act: ITA1961
+    section_1961: "111A"
+    section_2025: "196"
+    instrument_class: LISTED_EQUITY_SHARE
+    conditions: {}
+    holding_threshold_months: 12
+    gain_type: STCG
+    rate: "0.15"
+    effective_from: 2018-04-01
+    effective_to: 2024-03-31
+    source_url: https://egazette.gov.in/WriteReadData/2024/256436.pdf
+    verification_status: NV
+    notes: >-
+      [FA24] s.29 (s.111A(1) as substituted): "at the rate of fifteen per cent. for any transfer which takes place
+      before the 23rd day of July, 2024". Corroborated by [FA18] First Schedule Part II: "short-term capital gains
+      referred to in section 111A ... 15 per cent.". STT-paid condition of s.111A not modelled. NOT VERIFIED until
+      a CA reviews it.
+  - rule_id: EQ-LTCG-HIST
+    act: ITA1961
+    section_1961: "112A"
+    section_2025: "198"
+    instrument_class: LISTED_EQUITY_SHARE
+    conditions: {acquisition_date_from: 2018-02-01}
+    holding_threshold_months: 12
+    gain_type: LTCG
+    rate: "0.10"
+    annual_exemption_inr: "100000"
+    exemption_scope: EQUITY_LTCG_ANNUAL
+    effective_from: 2018-04-01
+    effective_to: 2024-03-31
+    source_url: https://egazette.gov.in/writereaddata/2018/184302.pdf
+    verification_status: NV
+    notes: >-
+      [FA18] s.33 inserts s.112A "with effect from the 1st day of April, 2019" (AY2019-20 = FY2018-19): tax on
+      "long-term capital gains exceeding one lakh rupees at the rate of ten per cent."; s.10(38) is switched off
+      for such transfers "made on or after the 1st day of April, 2018". Rs 1 lakh applies up to 31-Mar-2024 only
+      (from 1-Apr-2024 the pool is Rs 1.25 lakh, see EQ-LTCG-OLD). Lots acquired before 1-Feb-2018 abstain
+      ([FA18] s.22 inserts s.55(2)(ac), FMV grandfathering, not modelled). STT conditions of s.112A(1)(iii) not
+      modelled. NOT VERIFIED until a CA reviews it.
+  - rule_id: MF-EQ-STCG-HIST
+    act: ITA1961
+    section_1961: "111A"
+    section_2025: "196"
+    instrument_class: MUTUAL_FUND
+    conditions: {domestic_equity_share_min: "0.65"}
+    holding_threshold_months: 12
+    gain_type: STCG
+    rate: "0.15"
+    effective_from: 2018-04-01
+    effective_to: 2024-03-31
+    source_url: https://egazette.gov.in/WriteReadData/2024/256436.pdf
+    verification_status: NV
+    notes: >-
+      Same primary text as EQ-STCG-HIST ([FA24] s.29; [FA18] First Schedule Part II, s.111A 15 per cent.). The
+      equity-oriented-fund definition of that period (65 % in listed domestic equity, plus a fund-of-funds limb) is
+      approximated by domestic_equity_share >= 0.65 only. NOT VERIFIED until a CA reviews it.
+  - rule_id: MF-EQ-LTCG-HIST
+    act: ITA1961
+    section_1961: "112A"
+    section_2025: "198"
+    instrument_class: MUTUAL_FUND
+    conditions: {domestic_equity_share_min: "0.65", acquisition_date_from: 2018-02-01}
+    holding_threshold_months: 12
+    gain_type: LTCG
+    rate: "0.10"
+    annual_exemption_inr: "100000"
+    exemption_scope: EQUITY_LTCG_ANNUAL
+    effective_from: 2018-04-01
+    effective_to: 2024-03-31
+    source_url: https://egazette.gov.in/writereaddata/2018/184302.pdf
+    verification_status: NV
+    notes: >-
+      Same primary text as EQ-LTCG-HIST ([FA18] s.33: s.112A covers "a unit of an equity oriented fund", 10 % on
+      gains "exceeding one lakh rupees"). Shares the Rs 1 lakh pool with listed equity. Pre-1-Feb-2018 lots
+      abstain. NOT VERIFIED until a CA reviews it.

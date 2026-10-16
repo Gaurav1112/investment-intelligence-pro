@@ -132,3 +132,102 @@ def test_the_purge_reference_lists_cover_every_table_tied_to_instruments(conn: s
         if t != "instruments" and any(str(r[1]) == "instrument_id" for r in conn.execute(f"PRAGMA table_info({t})"))
     }
     assert tied == set(ing.HOSTED_PURGE_KEEPS_IF_REFERENCED) | set(ing.HOSTED_PURGE_DERIVED)
+
+
+# ---- SOLD-1 (user decision 2026-10-16): a fully sold, unwatched fund keeps its NAV history but is not refreshed
+
+
+def _txn(c: sqlite3.Connection, code: int, n: int, kind: str, units: str, on: str, portfolio: str = "pf_1") -> None:
+    c.execute(
+        "INSERT INTO instruments(instrument_id, kind, name, amfi_code, origin, created_at)"
+        " VALUES (?, 'mf_scheme', ?, ?, 'source', ?) ON CONFLICT(instrument_id) DO NOTHING",
+        (ing.instrument_id(code), f"Fictional scheme {code}", str(code), NOW.isoformat()),
+    )
+    c.execute(
+        "INSERT INTO portfolios(portfolio_id, name, nature, created_at) VALUES (?, 'Fictional', 'actual', ?)"
+        " ON CONFLICT(portfolio_id) DO NOTHING",
+        (portfolio, NOW.isoformat()),
+    )
+    c.execute(
+        "INSERT INTO transactions(txn_id, portfolio_id, instrument_id, txn_date, txn_type, units, amount, source,"
+        " created_at) VALUES (?, ?, ?, ?, ?, ?, '1000.00', 'manual', ?)",
+        (f"tx_{code}_{n}", portfolio, ing.instrument_id(code), on, kind, units, NOW.isoformat()),
+    )
+
+
+def _history(c: sqlite3.Connection, code: int, dates: list[str]) -> None:
+    """Older NAV history of a scheme (synthetic values), as a NAV-history backfill stores it."""
+    for k, d in enumerate(dates):
+        c.execute(
+            "INSERT INTO observations(series_id, kind, value, unit, currency, observation_date, retrieved_at,"
+            " source_id, source_url, quality_status, raw_sha256) VALUES (?, 'nav', ?, 'INR', 'INR', ?, ?,"
+            " 'amfi.navhistory', 'https://example.invalid/fixture', 'ok', ?)",
+            (ing.series_id(code), f"{10 + k}.0000", d, NOW.isoformat(), "0" * 64),
+        )
+
+
+def _nav_dates(c: sqlite3.Connection, code: int) -> list[str]:
+    return [str(r[0]) for r in c.execute(
+        "SELECT observation_date FROM observations WHERE series_id=? ORDER BY observation_date",
+        (ing.series_id(code),))]  # fmt: skip
+
+
+OLD = ["2026-01-05", "2026-01-06"]
+
+
+def test_refresh_scope_is_held_or_watched_and_sold_schemes_stay_in_the_keep_scope(conn: sqlite3.Connection) -> None:
+    held, sold, split, watched_sold = navall_codes()[:4]
+    _txn(conn, held, 1, "buy", "10.5", "2026-01-01")
+    _txn(conn, sold, 1, "buy", "10.1", "2026-01-01")
+    _txn(conn, sold, 2, "buy", "0.2", "2026-01-02")
+    _txn(conn, sold, 3, "sell", "10.3", "2026-02-01")  # exactly zero units left (Decimal, not float)
+    # held in one portfolio, sold out of another: units across ALL portfolios decide
+    _txn(conn, split, 1, "buy", "5", "2026-01-01", "pf_1")
+    _txn(conn, split, 2, "buy", "5", "2026-01-01", "pf_2")
+    _txn(conn, split, 3, "sell", "5", "2026-02-01", "pf_2")
+    _txn(conn, watched_sold, 1, "buy", "1", "2026-01-01")
+    _txn(conn, watched_sold, 2, "sell", "1", "2026-02-01")
+    watch_schemes(conn, [watched_sold])
+    assert ing.refresh_scheme_codes(conn) == {held, split, watched_sold}
+    assert ing.tracked_scheme_codes(conn) == {held, sold, split, watched_sold}  # prune/purge keep: held or sold
+
+
+def test_a_fully_sold_scheme_keeps_its_history_but_is_not_refreshed_until_bought_again(
+    conn: sqlite3.Connection,
+) -> None:
+    code = navall_codes()[0]
+    _txn(conn, code, 1, "buy", "10", "2026-01-02")
+    _history(conn, code, OLD)
+    _txn(conn, code, 2, "sell", "10", "2026-02-02")  # fully sold, not watched
+    out = _run_hosted_navall(conn)
+    assert out["status"] == "ok"
+    assert _nav_dates(conn, code) == OLD  # history kept (returns, tax records); no new NAVAll row stored
+    # Bought again: the next hosted run refreshes it.
+    _txn(conn, code, 3, "buy", "2", "2026-03-02")
+    _run_hosted_navall_at(conn, NOW + timedelta(days=1))
+    dates = _nav_dates(conn, code)
+    assert dates[: len(OLD)] == OLD and len(dates) == len(OLD) + 1  # the NAVAll date was added
+
+
+def test_a_sold_scheme_put_on_the_watchlist_is_refreshed_again(conn: sqlite3.Connection) -> None:
+    code = navall_codes()[1]
+    _txn(conn, code, 1, "buy", "10", "2026-01-02")
+    _txn(conn, code, 2, "sell", "10", "2026-02-02")
+    _history(conn, code, OLD)
+    _run_hosted_navall(conn)
+    assert _nav_dates(conn, code) == OLD
+    watch_schemes(conn, [code])
+    _run_hosted_navall_at(conn, NOW + timedelta(days=1))
+    assert len(_nav_dates(conn, code)) == len(OLD) + 1
+
+
+def test_j3_gap_fill_skips_fully_sold_unwatched_schemes(conn: sqlite3.Connection) -> None:
+    held, sold = navall_codes()[:2]
+    _txn(conn, held, 1, "buy", "10", "2026-01-02")
+    _txn(conn, sold, 1, "buy", "10", "2026-01-02")
+    _txn(conn, sold, 2, "sell", "10", "2026-02-02")
+    _history(conn, held, OLD)
+    _history(conn, sold, OLD)
+    res = cron.run_job(ctx_for(conn, Amfi(), hooks()), "history")
+    assert res.counts["schemes"] == 1  # the held scheme only; the sold one keeps its rows and is not gap-filled
+    assert _nav_dates(conn, sold) == OLD

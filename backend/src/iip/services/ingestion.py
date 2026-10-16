@@ -3,7 +3,9 @@
 Data minimisation (AMFI ToU: personal use; do not store a "significant portion"):
 * local: latest NAV is kept only for Direct-plan Growth-option open-ended schemes, plus anything held or watched;
 * hosted (``ingest_navall_resumable``, U-01): ONLY held and watched schemes, no name heuristic
-  (:data:`HOSTED_NAVALL_SCOPE`);
+  (:data:`HOSTED_NAVALL_SCOPE`). A fully sold, unwatched scheme is not refreshed but keeps its stored NAVs (SOLD-1,
+  user decision 2026-10-16: :func:`refresh_scheme_codes` decides what is refreshed, :func:`tracked_scheme_codes`
+  what is kept);
 * NAV history is backfilled only on explicit request for individual schemes, keeping just that scheme's rows;
 * raw payloads are hashed and recorded in the run ledger, not archived;
 * the core universe U1 (``rules/core_universe.yaml``, roles only) is tracked automatically ONLY after the user confirms
@@ -180,12 +182,60 @@ def mark_interrupted_runs(conn: sqlite3.Connection, now: datetime, *, started_be
 
 
 def tracked_scheme_codes(conn: sqlite3.Connection) -> set[int]:
+    """Schemes whose stored NAVs are KEPT: watched, or with any transaction (held now or sold since). Pruning and the
+    hosted purge never remove these, so a sold fund's history stays for past returns and tax records (SOLD-1).
+    Which schemes are REFRESHED is :func:`refresh_scheme_codes`."""
     rows = conn.execute(
         "SELECT i.amfi_code FROM instruments i WHERE i.amfi_code IS NOT NULL AND ("
         " i.instrument_id IN (SELECT instrument_id FROM watchlist) OR"
         " i.instrument_id IN (SELECT instrument_id FROM transactions))"
     ).fetchall()
     return {int(r["amfi_code"]) for r in rows}
+
+
+# Transaction types that move units (portfolio.fifo_positions); dividends (IDCW payouts) move none.
+_UNIT_SIGN = {"buy": 1, "sell": -1}
+
+
+def refresh_scheme_codes(conn: sqlite3.Connection) -> set[int]:
+    """Schemes the hosted/automatic NAV ingestion REFRESHES (user decision 2026-10-16, SOLD-1): watched, or held now
+    (net units across ALL portfolios above zero). A fully sold, unwatched scheme keeps its stored history
+    (:func:`tracked_scheme_codes`) but gets no new NAVs; buying it again or watching it resumes refreshing.
+
+    Units are summed as Decimal (never float), so a position sold to exactly zero is not "held" by rounding. When a
+    ledger row cannot be read as units (or carries units under a type that is not modelled), the scheme counts as
+    held: refreshing one scheme too many is harmless, while stopping a held scheme's refresh would lose data."""
+    rows = conn.execute(
+        "SELECT i.amfi_code, t.txn_type, t.units FROM transactions t JOIN instruments i USING(instrument_id)"
+        " WHERE i.amfi_code IS NOT NULL"
+    ).fetchall()
+    net: dict[int, Decimal] = {}
+    unsure: set[int] = set()
+    for r in rows:
+        code = int(r["amfi_code"])
+        net.setdefault(code, Decimal(0))
+        sign = _UNIT_SIGN.get(str(r["txn_type"]))
+        if sign is None:
+            if r["units"] not in (None, "") and str(r["txn_type"]) != "dividend":
+                unsure.add(code)
+            continue
+        try:
+            units = Decimal(str(r["units"]))
+        except (InvalidOperation, ValueError):
+            unsure.add(code)
+            continue
+        if not units.is_finite():
+            unsure.add(code)
+            continue
+        net[code] += sign * units
+    held = {c for c, u in net.items() if u > 0} | unsure
+    watched = {
+        int(r["amfi_code"])
+        for r in conn.execute(
+            "SELECT i.amfi_code FROM instruments i JOIN watchlist w USING(instrument_id) WHERE i.amfi_code IS NOT NULL"
+        )
+    }
+    return held | watched
 
 
 def in_minimised_scope(rec: SchemeRecord, tracked: set[int]) -> bool:
@@ -840,8 +890,9 @@ def _stage_navall(
         summary = RunSummary(run_id, "amfi.navall", "failed", 0, 0, 0, f"{type(exc).__name__}: {exc}")
         return {"done": True, "phase": "complete", "schemes_done": 0, "schemes_total": 0, **summary.__dict__}
     with _failing_run(conn, run_id, now):
-        tracked = tracked_scheme_codes(conn)
-        records = {r.scheme_code: r for r in result.records if r.scheme_code in tracked}  # U-01: held/watched only
+        # U-01: held/watched only; SOLD-1: a fully sold, unwatched scheme is not refreshed (its history is kept).
+        tracked = refresh_scheme_codes(conn)
+        records = {r.scheme_code: r for r in result.records if r.scheme_code in tracked}
         scope = sorted(records)
         rows: dict[int, list[list[object]]] = {}
         for o in _validated(result):

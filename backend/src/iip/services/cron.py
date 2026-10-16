@@ -540,7 +540,8 @@ def _j3_history(ctx: CronContext) -> CronResult:
                 coordination.clear_job(ctx.conn, HISTORY_OPEN)
             if not _claim(ctx, "history", run_key):
                 return CronResult("history", "noop", "DUPLICATE", run_key)
-            codes = sorted(ingestion.tracked_scheme_codes(ctx.conn))  # U-01: held and watched only, hosted
+            # U-01: held and watched only, hosted; SOLD-1: a fully sold, unwatched scheme is not gap-filled.
+            codes = sorted(ingestion.refresh_scheme_codes(ctx.conn))
             latest = _latest_per_code(ctx.conn, codes)
             counts.update(schemes=len(codes), schemes_without_history=len(codes) - len(latest))
             last = coordination.load_job(ctx.conn, HISTORY_LAST)

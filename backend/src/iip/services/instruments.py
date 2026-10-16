@@ -12,11 +12,12 @@ import re
 import sqlite3
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from iip.data.validators import validate_isin
+from iip.engine.freshness import nav_is_stale
 from iip.engine.ranking import CREDIT_SCALE
 from iip.store.db import write_tx
 from iip.store.observations import ObservationRow, upsert_observation
@@ -426,3 +427,102 @@ def delete_instrument(conn: sqlite3.Connection, instrument_id: str) -> bool:
         conn.execute("DELETE FROM settings WHERE key = ?", (f"bond.meta:{instrument_id}",))
         conn.execute("DELETE FROM instruments WHERE instrument_id=?", (instrument_id,))
     return True
+
+
+# ------------------------------------------------------------------ batched reads (A02: instrument detail ≤ 2)
+
+TERMS_TABLES = ("mf_schemes", "bond_terms", "deposit_terms")
+# The observation series shown for an instrument: NAVs for an AMFI scheme, else its yield series (as before).
+_SERIES_SQL = (
+    "CASE WHEN i.amfi_code IS NOT NULL AND i.amfi_code != '' THEN 'nav:' || i.amfi_code"
+    " ELSE 'yield:' || i.instrument_id END"
+)
+_POINT_JSON = (
+    "json_object('observation_date', o.observation_date, 'value', o.value, 'source_id', o.source_id,"
+    " 'source_url', o.source_url, 'retrieved_at', o.retrieved_at, 'quality_status', o.quality_status)"
+)
+_CURRENT = f"o.series_id = {_SERIES_SQL} AND o.superseded_by IS NULL"
+_SUMMARY_COLUMNS = (
+    f", (SELECT COUNT(*) FROM observations o WHERE {_CURRENT}) AS __points"  # noqa: S608
+    f", (SELECT MIN(o.observation_date) FROM observations o WHERE {_CURRENT}) AS __first_date"
+    f", (SELECT {_POINT_JSON} FROM observations o WHERE {_CURRENT}"
+    "   ORDER BY o.observation_date DESC, o.source_id DESC LIMIT 1) AS __latest"
+)
+GRIDS = ("monthly",)
+
+
+def instrument_head(conn: sqlite3.Connection, instrument_id: str, *, summary: bool = False) -> dict[str, Any] | None:
+    """The instrument row, its terms row (only the table that has one), its series id and the latest-NAV freshness
+    input, in ONE statement (audit-perf-hosted RC-7: these were 6 serial statements). ``summary`` adds the series'
+    point count, first date and latest point, so a page can show a name and a latest value without the history.
+    None when the instrument does not exist."""
+    markers = "".join(f', NULL AS "__t_{t}", {a}.*' for t, a in zip(TERMS_TABLES, "mbd", strict=True))
+    row = conn.execute(
+        f"SELECT i.*{markers}, NULL AS __t_end, {_SERIES_SQL} AS __series_id,"  # noqa: S608
+        "  (SELECT json_object('observation_date', o.observation_date, 'quality_status', o.quality_status)"
+        "   FROM observations o WHERE o.series_id = 'nav:' || i.amfi_code AND o.superseded_by IS NULL"
+        "   AND o.quality_status != 'rejected' ORDER BY o.observation_date DESC LIMIT 1) AS __fresh"
+        f"{_SUMMARY_COLUMNS if summary else ''}"
+        " FROM instruments i LEFT JOIN mf_schemes m ON m.instrument_id = i.instrument_id"
+        " LEFT JOIN bond_terms b ON b.instrument_id = i.instrument_id"
+        " LEFT JOIN deposit_terms d ON d.instrument_id = i.instrument_id WHERE i.instrument_id = ?",
+        (instrument_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    parts: dict[str, dict[str, Any]] = {"instrument": {}}
+    extra: dict[str, Any] = {}
+    current: dict[str, Any] | None = parts["instrument"]
+    for key, value in zip(row.keys(), tuple(row), strict=True):
+        if key.startswith("__t_"):
+            current = None if key == "__t_end" else parts.setdefault(key[4:], {})
+        elif current is not None:
+            current[key] = value
+        else:
+            extra[key] = value
+    out: dict[str, Any] = {"instrument": parts["instrument"]}
+    for table in TERMS_TABLES:
+        if parts.get(table, {}).get("instrument_id") is not None:  # LEFT JOIN miss = all NULL
+            out[table] = parts[table]
+    out["series_id"] = extra["__series_id"]
+    out["fresh"] = json.loads(extra["__fresh"]) if extra["__fresh"] else None
+    if summary:
+        out["points"] = int(extra["__points"])
+        out["first_date"] = extra["__first_date"]
+        out["latest"] = json.loads(extra["__latest"]) if extra["__latest"] else None
+    return out
+
+
+def nav_freshness(fresh: dict[str, Any] | None, now: datetime) -> tuple[str, str | None]:
+    """``ingestion.latest_freshness`` on the row :func:`instrument_head` already read (same rule, same badges)."""
+    if fresh is None:
+        return "UNKNOWN", None
+    if fresh["quality_status"] == "fixture":
+        return "FIXTURE", fresh["observation_date"]
+    observed = date.fromisoformat(fresh["observation_date"])
+    return ("STALE" if nav_is_stale(observed, now.date()) else "END_OF_DAY"), fresh["observation_date"]
+
+
+def series_points(
+    conn: sqlite3.Connection, series_id: str, *, start: date | None = None, grid: str | None = None
+) -> list[dict[str, Any]]:
+    """The current observations of a series in ONE statement, optionally from ``start`` (inclusive) and on a
+    ``monthly`` grid: every row on the LAST observation date of each calendar month (so the latest point is always
+    kept). Sub-sampling only — no value is interpolated or changed."""
+    where = "series_id=? AND superseded_by IS NULL"
+    params: list[Any] = [series_id]
+    if start is not None:
+        where += " AND observation_date >= ?"
+        params.append(start.isoformat())
+    cols = "observation_date, value, source_id, source_url, retrieved_at, quality_status"
+    if grid is None:
+        sql = f"SELECT {cols} FROM observations WHERE {where} ORDER BY observation_date, source_id"  # noqa: S608
+    elif grid == "monthly":
+        sql = (
+            f"SELECT {cols} FROM (SELECT {cols}, MAX(observation_date) OVER (PARTITION BY substr(observation_date,"  # noqa: S608
+            f" 1, 7)) AS month_last FROM observations WHERE {where})"
+            " WHERE observation_date = month_last ORDER BY observation_date, source_id"
+        )
+    else:
+        raise ValueError(f"unknown grid {grid!r}")
+    return [dict(o) for o in conn.execute(sql, params).fetchall()]

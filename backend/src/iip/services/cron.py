@@ -8,8 +8,9 @@ database, so a missed or skipped day is caught up by the next call:
 * **J1 ``navall``** - a cheap conditional fetch of NAVAll (``If-Modified-Since`` from the last success, and the payload
   hash), THEN the run key (the newest NAV date in the file, never the wall clock), THEN the claim, then one bounded
   storage step. Duplicate deliveries may both fetch (accepted: one extra GET); only one wins the claim.
-* **J2 ``navall-continue``** - finishes an open NAVAll run, or catches up a missed J1; then the optional data polls
-  (RBI T-bill RSS, MoSPI CPI) when their service steps exist.
+* **J2 ``navall-continue``** - finishes an open NAVAll run, or catches up a missed J1; then the official data polls
+  (RBI T-bill RSS, MoSPI CPI; ``services/official_polls.py``). J2 is ``done`` when NAVAll or a poll stored something,
+  ``noop`` when nothing was new anywhere, and ``failed`` when NAVAll or a poll failed (a refused release included).
 * **J3 ``history``** - gap-fills NAV history for held and watched schemes (U-01: the hosted store keeps nothing else)
   in bounded windows since the last success, then refreshes ``series_grid`` for the schemes that changed.
 * **J4 ``snapshot``** - a late-NAV re-run (FoF/overseas NAVs land by T+1 10:00 IST), then the risk snapshot step
@@ -51,7 +52,8 @@ from iip.data.registry import SourceRequest, navall_request
 from iip.engine.errors import EngineError
 from iip.engine.freshness import nav_is_stale, weekdays_between
 from iip.engine.stats.series_grid import month_end_grid
-from iip.services import ingestion
+from iip.services import ingestion, official_polls
+from iip.services.official_polls import PollOutcome
 from iip.store import coordination, ledger
 
 log = logging.getLogger("iip.cron")
@@ -101,7 +103,9 @@ class SnapshotOutcome:
 
 
 SnapshotStep = Callable[[sqlite3.Connection, datetime], SnapshotOutcome]
-PollStep = Callable[[sqlite3.Connection, Fetcher, Callable[[], datetime]], Mapping[str, int]]
+# A poll returns an honest PollOutcome (done / noop / failed, a code, counts). A plain mapping of counts is read as
+# "done, OK" (the original hand-over shape).
+PollStep = Callable[[sqlite3.Connection, Fetcher, Callable[[], datetime]], PollOutcome | Mapping[str, int]]
 PingSender = Callable[[sqlite3.Row], None]
 
 
@@ -187,8 +191,8 @@ def default_hooks() -> CronHooks:
     return CronHooks(
         snapshot=_optional("iip.services.risk_snapshot", "cron_snapshot_step"),
         polls=(
-            ("rbi.tbill", _optional("iip.services.ingestion", "poll_rbi_tbill")),
-            ("mospi.cpi", _optional("iip.services.ingestion", "check_mospi_cpi")),
+            ("rbi.tbill", official_polls.poll_rbi_tbill),
+            ("mospi.cpi", official_polls.poll_mospi_cpi),
         ),
         channels=channels,
         sender=_optional("iip.services.notify", "send_ping") if channels else None,
@@ -403,22 +407,9 @@ def _j2_continue(ctx: CronContext) -> CronResult:
         if nav.state != "failed":
             result.state, result.code = "noop", "DUPLICATE"
         return result
-    failed = nav.state == "failed"
-    missing: list[str] = []
-    for name, step in ctx.hooks.polls:
-        if step is None:
-            result.steps[name] = "NOT_IMPLEMENTED"
-            missing.append(name)
-            continue
-        try:
-            for k, v in step(ctx.conn, ctx.fetcher(), ctx.now).items():
-                result.counts[f"{name}.{k}"] = int(v)
-            result.steps[name] = "OK"
-        except Exception as exc:  # class only (C-13); the next day's J2 tries again
-            log.warning("cron poll failed step=%s type=%s", name, type(exc).__name__)
-            _rollback(ctx.conn)
-            result.steps[name] = "FAILED"
-            failed = True
+    states, missing = _run_polls(ctx, result)
+    failed = nav.state == "failed" or "failed" in states
+    stored = nav.state == "done" or "done" in states
     detail = ";".join(f"{k}={v}" for k, v in sorted(result.steps.items()))
     if failed:
         _finish(ctx, "navall-continue", run_key, "failed", detail)
@@ -434,10 +425,41 @@ def _j2_continue(ctx: CronContext) -> CronResult:
             if (source := POLL_SOURCES.get(name)) is not None:
                 _record_missing_poll(ctx, source)
     else:
-        _finish(ctx, "navall-continue", run_key, "done", detail)
-        if nav.state == "noop":
-            result.state = "done"
+        # Honest: 'done' only when NAVAll or a poll stored something; nothing new anywhere is a 'noop'.
+        state = "done" if stored else "noop"
+        _finish(ctx, "navall-continue", run_key, state, detail)
+        result.state = state
     return result
+
+
+def _run_polls(ctx: CronContext, result: CronResult) -> tuple[list[str], list[str]]:
+    """Run every poll once; codes and counts go into ``result``. Returns (each built poll's state, missing polls)."""
+    states: list[str] = []
+    missing: list[str] = []
+    for name, step in ctx.hooks.polls:
+        if step is None:
+            result.steps[name] = "NOT_IMPLEMENTED"
+            missing.append(name)
+            continue
+        try:
+            out = step(ctx.conn, ctx.fetcher(), ctx.now)
+        except Exception as exc:  # class only (C-13); the next day's J2 tries again
+            log.warning("cron poll failed step=%s type=%s", name, type(exc).__name__)
+            _rollback(ctx.conn)
+            result.steps[name] = "FAILED"
+            states.append("failed")
+            continue
+        if isinstance(out, PollOutcome):
+            outcome = out
+        else:
+            outcome = PollOutcome("done", "OK", {k: int(v) for k, v in out.items()})
+        for k, v in outcome.as_counts().items():
+            result.counts[f"{name}.{k}"] = int(v)
+        result.steps[name] = outcome.code
+        if outcome.state == "failed":
+            log.warning("cron poll failed step=%s code=%s", name, outcome.code)
+        states.append(outcome.state)
+    return states, missing
 
 
 def _record_missing_poll(ctx: CronContext, source_id: str) -> None:

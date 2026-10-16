@@ -54,22 +54,33 @@ class TbillPoll:
     feed_retrieved_at: datetime | None = None
     feed_last_modified: datetime | None = None  # pass back as ``if_modified_since`` on the next poll
     page_requests: int = 0
+    skipped_known: int = 0  # cut-off items in the feed that ``known_prids`` skipped
 
 
 def poll_tbill_cutoffs(
-    fetcher: Fetcher, *, if_modified_since: datetime | None = None, fetch_pages: bool = True
+    fetcher: Fetcher,
+    *,
+    if_modified_since: datetime | None = None,
+    fetch_pages: bool = True,
+    known_prids: frozenset[int] = frozenset(),
 ) -> TbillPoll:
-    """One poll of RBI's feed. Raises only on feed-level failures (fetch errors, an unparseable feed)."""
+    """One poll of RBI's feed. Raises only on feed-level failures (fetch errors, an unparseable feed).
+
+    ``known_prids``: releases an earlier poll already handled (stored or abstained). They are skipped without any
+    page request, so a release page is fetched at most once however often the feed changes around it.
+    """
     try:
         feed = fetcher.fetch(rbi_press_releases_rss_request(if_modified_since=if_modified_since))
     except NotModified:
         return TbillPoll(status="NOT_MODIFIED")
-    candidates = select_tbill_cutoffs(parse_feed(feed.content))
+    in_feed = select_tbill_cutoffs(parse_feed(feed.content))
+    candidates = [(item, prid) for item, prid in in_feed if prid not in known_prids]
     base = TbillPoll(
         status="NO_CUTOFF_IN_FEED",
         feed_sha256=feed.sha256,
         feed_retrieved_at=feed.retrieved_at,
         feed_last_modified=feed.last_modified,
+        skipped_known=len(in_feed) - len(candidates),
     )
     if not candidates:
         return base

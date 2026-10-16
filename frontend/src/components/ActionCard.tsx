@@ -154,7 +154,9 @@ function Decision({ card, snapshotId }: { card: CardView; snapshotId: string }) 
   const { run, pending, error } = useMutation<DecisionRequest, DecisionLogged>("POST", DECISIONS_PATH);
   const doneBtn = useRef<HTMLButtonElement>(null);
   const yesBtn = useRef<HTMLButtonElement>(null);
+  const doneMsg = useRef<HTMLDivElement>(null);
   const returnFocus = useRef(false);
+  const justLogged = useRef(false);
   useEffect(() => {
     if (confirming) yesBtn.current?.focus();
     else if (returnFocus.current) {
@@ -162,20 +164,33 @@ function Decision({ card, snapshotId }: { card: CardView; snapshotId: string }) 
       doneBtn.current?.focus();
     }
   }, [confirming]);
+  // The focused "Yes" button disappears once the entry is logged: move focus to the message that replaces it (WCAG 2.4.3).
+  useEffect(() => {
+    if (decision && justLogged.current) {
+      justLogged.current = false;
+      doneMsg.current?.focus();
+    }
+  }, [decision]);
 
-  if (decision)
-    return (
-      <p className="action-card__done small" role="status">
-        You marked this done on {utcStamp(decision.decided_at)}. {casLine(decision)}
-      </p>
-    );
   const confirm = async () => {
     const res = await run({ card_id: card.card_id, snapshot_id: snapshotId });
-    if (res) setDecision(res.decision);
+    if (res) {
+      justLogged.current = true;
+      setDecision(res.decision);
+    }
   };
   return (
     <div className="action-card__decide">
-      {confirming ? (
+      {/* Always mounted, so the text written into it on success is announced (a live region inserted together with its
+          text often is not). */}
+      <div ref={doneMsg} className="action-card__done small" role="status" tabIndex={decision ? -1 : undefined}>
+        {decision ? (
+          <>
+            You marked this done on {utcStamp(decision.decided_at)}. {casLine(decision)}
+          </>
+        ) : null}
+      </div>
+      {decision ? null : confirming ? (
         <div role="group" aria-label="Confirm you did this">
           <button ref={yesBtn} type="button" className="btn btn--primary" disabled={pending} onClick={() => void confirm()}>
             Yes, I did the steps on this card
@@ -198,7 +213,7 @@ function Decision({ card, snapshotId }: { card: CardView; snapshotId: string }) 
           I did this
         </button>
       )}
-      {error ? (
+      {error && !decision ? (
         <p className="field-error" role="alert">
           Could not record it ({error instanceof ApiError ? error.code : "REQUEST_FAILED"}). Try again.
         </p>
@@ -216,6 +231,11 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
+/** The id of a card's heading (focusable with tabIndex -1, so a page can move focus to a card). */
+export function cardTitleId(card: Pick<CardView, "card_id">): string {
+  return `card-${card.card_id.slice(0, 16)}-title`;
+}
+
 /** One engine card (design-risk-first.md §7.1). Every number it shows is an explain button. */
 export function ActionCard({
   card,
@@ -226,7 +246,7 @@ export function ActionCard({
   snapshotId: string | null;
   onExplain: (e: Explained) => void;
 }) {
-  const titleId = `card-${card.card_id.slice(0, 16)}-title`;
+  const titleId = cardTitleId(card);
   const title = `${KIND_TITLE[card.kind]}${card.goal_name ? ` · ${card.goal_name}` : ""}`;
   const parts = splitByNumbers(card.text, card.numbers);
   const stepNumbers = card.steps.flatMap((s) => s.numbers);
@@ -234,7 +254,9 @@ export function ActionCard({
   return (
     <article className={`card action-card action-card--${card.card_class.toLowerCase()}`} aria-labelledby={titleId}>
       <header className="action-card__head">
-        <h3 id={titleId}>{title}</h3>
+        <h3 id={titleId} tabIndex={-1}>
+          {title}
+        </h3>
         <p className="small subtle">
           <span className="badge badge--neutral">
             {card.layer} · {LAYER_LABEL[card.layer]}

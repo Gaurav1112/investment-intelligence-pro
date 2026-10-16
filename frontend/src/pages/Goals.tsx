@@ -2,7 +2,7 @@
 // worst-falls history so the limit is set against crashes, never against returns. The second view, "Return-target
 // feasibility", is the ONLY place a return aim appears, and only as a historical frequency from POST /api/feasibility
 // (engine/feasibility.py). The aim never raises equity: the loss limit sets equity (PLAN §2.2, design-risk-first §11).
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api, ApiError } from "../lib/api";
 import { compareDecimals, dateLabel, inr, percentToFraction, shiftPoint } from "../lib/format";
@@ -72,6 +72,9 @@ function GoalEditor({ goal, onSaved, onCancel }: { goal: GoalView; onSaved: () =
   const [problem, setProblem] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const id = `goal-${goal.goal_id}`;
+  const nameRef = useRef<HTMLInputElement>(null);
+  // The Edit button that opened the editor is gone: start the user at the first field (WCAG 2.4.3).
+  useEffect(() => nameRef.current?.focus(), []);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -94,8 +97,11 @@ function GoalEditor({ goal, onSaved, onCancel }: { goal: GoalView; onSaved: () =
       priority: goal.priority,
       target_amount: amount.trim() ? money(amount) : null,
       target_date: date || null,
+      // Not editable here, but the PUT replaces the whole goal: send the stored values back so they are not erased.
+      objective: goal.objective,
       loss_budget_inr: loss.trim() ? money(loss) : null,
       recovery_months: recovery.trim() ? Number.parseInt(recovery, 10) : null,
+      h_safe_years: goal.h_safe_years,
     };
     setPending(true);
     setProblem(null);
@@ -113,7 +119,7 @@ function GoalEditor({ goal, onSaved, onCancel }: { goal: GoalView; onSaved: () =
     <form onSubmit={submit} noValidate>
       <div className="field">
         <label htmlFor={`${id}-name`}>Goal name</label>
-        <input id={`${id}-name`} maxLength={120} value={name} onChange={(e) => setName(e.target.value)} />
+        <input ref={nameRef} id={`${id}-name`} maxLength={120} value={name} onChange={(e) => setName(e.target.value)} />
       </div>
       <div className="field">
         <label htmlFor={`${id}-amount`}>Goal amount (₹)</label>
@@ -153,16 +159,35 @@ function GoalEditor({ goal, onSaved, onCancel }: { goal: GoalView; onSaved: () =
   );
 }
 
-function GoalCard({ goal, onChanged }: { goal: GoalView; onChanged: () => void }) {
+/** The id of a goal card's heading (focusable with tabIndex -1). */
+const goalTitleId = (goalId: string) => `goal-${goalId}-title`;
+
+type FocusTarget = "edit" | "delete" | "yes" | null;
+
+function GoalCard({ goal, onChanged, onRemoved }: { goal: GoalView; onChanged: () => void; onRemoved: () => void }) {
   const [editing, setEditing] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
-  const titleId = `goal-${goal.goal_id}-title`;
+  const titleId = goalTitleId(goal.goal_id);
+  const editBtn = useRef<HTMLButtonElement>(null);
+  const deleteBtn = useRef<HTMLButtonElement>(null);
+  const yesBtn = useRef<HTMLButtonElement>(null);
+  // Each of these controls removes the focused one (Edit, Delete, Keep, Cancel, Save): say where focus goes next, and
+  // move it there once the new controls are on screen, so it never falls back to <body> (WCAG 2.4.3).
+  const focusNext = useRef<FocusTarget>(null);
+  useEffect(() => {
+    const target = focusNext.current;
+    focusNext.current = null;
+    if (target === "edit") editBtn.current?.focus();
+    else if (target === "delete") deleteBtn.current?.focus();
+    else if (target === "yes") yesBtn.current?.focus();
+  }, [editing, confirming]);
 
   async function remove() {
     setProblem(null);
     try {
       await api(`/api/goals/${encodeURIComponent(goal.goal_id)}`, { method: "DELETE" });
+      onRemoved();
       onChanged();
     } catch (ex) {
       setProblem(`Not deleted (${ex instanceof ApiError ? ex.code : "REQUEST_FAILED"}).`);
@@ -171,7 +196,9 @@ function GoalCard({ goal, onChanged }: { goal: GoalView; onChanged: () => void }
 
   return (
     <section className="card" aria-labelledby={titleId}>
-      <h3 id={titleId}>{goal.name}</h3>
+      <h3 id={titleId} tabIndex={-1}>
+        {goal.name}
+      </h3>
       {goal.outcome === "ABSTAIN" ? (
         <div className="callout callout--warn">
           <strong>ABSTAIN</strong>
@@ -185,8 +212,12 @@ function GoalCard({ goal, onChanged }: { goal: GoalView; onChanged: () => void }
       {editing ? (
         <GoalEditor
           goal={goal}
-          onCancel={() => setEditing(false)}
+          onCancel={() => {
+            focusNext.current = "edit";
+            setEditing(false);
+          }}
           onSaved={() => {
+            focusNext.current = "edit";
             setEditing(false);
             onChanged();
           }}
@@ -206,21 +237,36 @@ function GoalCard({ goal, onChanged }: { goal: GoalView; onChanged: () => void }
             <dd>{goal.holdings.length ? goal.holdings.map((h) => h.name).join(", ") : "none"}</dd>
           </dl>
           <div className="row">
-            <button type="button" className="btn" onClick={() => setEditing(true)}>
+            <button ref={editBtn} type="button" className="btn" onClick={() => setEditing(true)}>
               Edit
             </button>
             {confirming ? (
               <>
-                <button type="button" className="btn btn--danger" onClick={remove}>
+                <button ref={yesBtn} type="button" className="btn btn--danger" onClick={remove}>
                   Yes, delete “{goal.name}”
                 </button>
-                <button type="button" className="btn" onClick={() => setConfirming(false)}>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => {
+                    focusNext.current = "delete";
+                    setConfirming(false);
+                  }}
+                >
                   Keep it
                 </button>
                 <span className="hint">Its holdings become Unassigned; the decision log keeps its rows.</span>
               </>
             ) : (
-              <button type="button" className="btn btn--ghost" onClick={() => setConfirming(true)}>
+              <button
+                ref={deleteBtn}
+                type="button"
+                className="btn btn--ghost"
+                onClick={() => {
+                  focusNext.current = "yes";
+                  setConfirming(true);
+                }}
+              >
                 Delete
               </button>
             )}
@@ -407,32 +453,74 @@ function Feasibility({ view }: { view: GoalsView }) {
   );
 }
 
+const VIEWS = [
+  ["goals", "Goals and loss limits"],
+  ["feasibility", "Return-target feasibility"],
+] as const;
+type ViewKey = (typeof VIEWS)[number][0];
+
 export default function Goals() {
   const [params, setParams] = useSearchParams();
-  const view = params.get("view") === "feasibility" ? "feasibility" : "goals";
+  const view: ViewKey = params.get("view") === "feasibility" ? "feasibility" : "goals";
   const data = useApi<GoalsView>("/api/goals");
+  // Keep the last good overview on screen while a reload after Save or Delete is in flight, so the goal cards stay
+  // mounted and keyboard focus is kept (useApi clears its data on reload). An error still replaces it.
+  const last = useRef<GoalsView | null>(null);
+  if (data.data) last.current = data.data;
+  const overview = data.data ?? (data.loading ? last.current : null);
+  const tabRefs = useRef<Partial<Record<ViewKey, HTMLButtonElement | null>>>({});
+  const focusTab = useRef<ViewKey | null>(null);
 
   useEffect(() => {
     document.title = "Goals · Investment Intelligence Pro";
   }, []);
+  useEffect(() => {
+    if (focusTab.current === view) {
+      focusTab.current = null;
+      tabRefs.current[view]?.focus();
+    }
+  }, [view]);
+
+  const select = (key: ViewKey) => setParams(key === "goals" ? {} : { view: key });
+  // WAI-ARIA tabs pattern: arrow keys, Home and End move between tabs (roving tabindex; selection follows focus).
+  const onTabKey = (e: KeyboardEvent<HTMLButtonElement>) => {
+    const i = VIEWS.findIndex(([k]) => k === view);
+    const n = VIEWS.length;
+    const moves: Record<string, number> = { ArrowRight: (i + 1) % n, ArrowLeft: (i - 1 + n) % n, Home: 0, End: n - 1 };
+    const next = moves[e.key];
+    if (next === undefined) return;
+    e.preventDefault();
+    const key = VIEWS[next]![0];
+    focusTab.current = key;
+    select(key);
+  };
+
+  // After a delete the card is gone: move focus to the next goal (else the previous one, else the selected tab).
+  const focusAfterRemove = (goalId: string) => {
+    const goals = overview?.goals ?? [];
+    const i = goals.findIndex((g) => g.goal_id === goalId);
+    const neighbour = goals[i + 1] ?? goals[i - 1];
+    const el = neighbour ? document.getElementById(goalTitleId(neighbour.goal_id)) : tabRefs.current.goals;
+    el?.focus();
+  };
 
   const tabs = (
-    <div role="tablist" aria-label="Goals views" className="row">
-      {(
-        [
-          ["goals", "Goals and loss limits"],
-          ["feasibility", "Return-target feasibility"],
-        ] as const
-      ).map(([key, label]) => (
+    <div role="tablist" aria-label="Goals views" className="tabs">
+      {VIEWS.map(([key, label]) => (
         <button
           key={key}
+          ref={(el) => {
+            tabRefs.current[key] = el;
+          }}
           type="button"
           role="tab"
           id={`tab-${key}`}
           aria-selected={view === key}
-          aria-controls={`panel-${key}`}
-          className="btn btn--ghost"
-          onClick={() => setParams(key === "goals" ? {} : { view: key })}
+          // Only the selected tab's panel is rendered, so only it is referenced.
+          aria-controls={view === key ? `panel-${key}` : undefined}
+          tabIndex={view === key ? 0 : -1}
+          onClick={() => select(key)}
+          onKeyDown={onTabKey}
         >
           {label}
         </button>
@@ -441,24 +529,26 @@ export default function Goals() {
   );
 
   let body;
-  if (data.loading) body = <Loading label="Loading your goals" />;
-  else if (data.error || !data.data) body = <ErrorState error={data.error} retry={data.reload} />;
-  else if (view === "feasibility") body = <Feasibility view={data.data} />;
+  if (data.error || (!data.loading && !data.data)) body = <ErrorState error={data.error} retry={data.reload} />;
+  else if (!overview) body = <Loading label="Loading your goals" />;
+  else if (view === "feasibility") body = <Feasibility view={overview} />;
   else
     body = (
       <>
-        <CrashHistory history={data.data.stress_history} />
-        {data.data.missing.length ? (
-          <p className="callout callout--warn">Missing, so the parts that need it abstain: {data.data.missing.join("; ")}.</p>
+        <CrashHistory history={overview.stress_history} />
+        {overview.missing.length ? (
+          <p className="callout callout--warn">Missing, so the parts that need it abstain: {overview.missing.join("; ")}.</p>
         ) : null}
-        {data.data.goals.length === 0 ? (
+        {overview.goals.length === 0 ? (
           <Empty title="No goals yet">
             <p>
               Goals come from setup: one CAS upload and about six answers. <Link to="/onboarding">Run setup</Link>
             </p>
           </Empty>
         ) : (
-          data.data.goals.map((g) => <GoalCard key={g.goal_id} goal={g} onChanged={data.reload} />)
+          overview.goals.map((g) => (
+            <GoalCard key={g.goal_id} goal={g} onChanged={data.reload} onRemoved={() => focusAfterRemove(g.goal_id)} />
+          ))
         )}
         <p>
           <Link to="/onboarding">Review setup answers</Link>

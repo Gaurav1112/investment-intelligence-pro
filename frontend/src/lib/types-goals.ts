@@ -90,6 +90,9 @@ export interface EmergencyAnswer {
   months: number | null; // 1–60 (engine/risk/emergency.py rejects 0); 3–6 is US-regulator guidance, SEBI attribution NOT VERIFIED
 }
 
+/** services/goals.py GoalIn.objective (engine/ranking.py Objective values). */
+export type GoalObjective = "A_capital_preservation" | "B_income" | "C_liquidity" | "D_growth" | "E_aggressive_growth";
+
 /** A goal as the setup and the Goals page send it (store/goals_repo.py Goal). */
 export interface GoalIn {
   /** null on create; the server assigns the id. */
@@ -102,10 +105,19 @@ export interface GoalIn {
   loss_budget_inr: string | null;
   /** T_g: the longest the user would wait for a recovery, in months. */
   recovery_months: number | null;
+  /** Set outside these pages (POST /api/goals). The server's PUT REPLACES the goal, so a write of a saved goal must send
+   * back the stored values or they are erased; absent only for a goal the server has not returned yet. */
+  objective?: GoalObjective | null;
+  /** The goal's safe horizon in years (decimal string); drives the L2 goal-date check. Same replace rule as objective. */
+  h_safe_years?: string | null;
 }
 
-/** PUT /api/goals/{goal_id} body: the server rejects unknown fields, and the id travels in the path. */
-export type GoalUpdate = Omit<GoalIn, "goal_id">;
+/** PUT /api/goals/{goal_id} body: the server rejects unknown fields, and the id travels in the path. It is a full
+ * replacement, so objective and h_safe_years are required here: the editor must carry the stored values through. */
+export type GoalUpdate = Omit<GoalIn, "goal_id" | "objective" | "h_safe_years"> & {
+  objective: GoalObjective | null;
+  h_safe_years: string | null;
+};
 
 export interface ExtrasAnswer {
   /** Equity LTCG already realised elsewhere this FY; null keeps the conservative "exemption already used". */
@@ -143,6 +155,8 @@ export interface GoalHolding {
 
 export interface GoalView extends GoalIn {
   goal_id: string;
+  objective: GoalObjective | null;
+  h_safe_years: string | null;
   holdings: GoalHolding[];
   /** "ABSTAIN" with reasons when a required input (loss limit, date, …) is missing. */
   outcome: "PASS" | "ABSTAIN";

@@ -16,6 +16,54 @@ export const TODAY_PATH = "/api/today";
 /** POST {card_id, snapshot_id} → DecisionLogged. Appends to `decisions_log` ("I did this"; graft 9); a retry for the
  * same card and snapshot returns the entry already logged (status "already_recorded") instead of logging twice. */
 export const DECISIONS_PATH = "/api/today/decisions";
+/** POST {} → SnapshotComputed. An explicit, user-initiated recompute (routes_today.py): local mode has no cron, so this is
+ * how a local user gets a Today report. The server picks the data date (newest NAV date among the holdings). */
+export const SNAPSHOT_PATH = "/api/today/snapshot";
+
+export interface SnapshotComputed {
+  snapshot_id: string;
+  as_of: string;
+  verdict: string;
+  created: boolean;
+}
+
+// Same thresholds as backend engine/freshness.py (source-registry.md §4): data is stale when it is more than
+// NAV_MAX_BUSINESS_DAYS weekdays OR more than NAV_MAX_CALENDAR_DAYS calendar days older than today. No holiday calendar
+// is loaded, so a holiday can only make data look OLDER, never fresher.
+export const NAV_MAX_BUSINESS_DAYS = 3;
+export const NAV_MAX_CALENDAR_DAYS = 5;
+
+const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
+const DAY_MS = 86_400_000;
+
+function utcDay(iso: string): number | null {
+  const m = ISO_DATE.exec(iso);
+  if (!m) return null;
+  const t = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  return Number.isNaN(t) ? null : t / DAY_MS;
+}
+
+/** True when a snapshot's data date `asOf` is too old to present as today's result on calendar date `today` (both ISO
+ * "YYYY-MM-DD"; the caller supplies today, nothing here reads a clock). Fails closed: an unreadable date, or a data
+ * date after today, counts as stale. */
+export function snapshotIsStale(asOf: string, today: string): boolean {
+  const a = utcDay(asOf);
+  const t = utcDay(today);
+  if (a === null || t === null || a > t) return true;
+  if (t - a > NAV_MAX_CALENDAR_DAYS) return true;
+  let weekdays = 0;
+  for (let d = a + 1; d <= t; d += 1) {
+    const dow = new Date(d * DAY_MS).getUTCDay();
+    if (dow !== 0 && dow !== 6) weekdays += 1;
+  }
+  return weekdays > NAV_MAX_BUSINESS_DAYS;
+}
+
+/** The viewer's local calendar date as ISO "YYYY-MM-DD". */
+export function localIsoDate(now: Date): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}`;
+}
 
 export type Layer = "L0" | "L1" | "L2" | "L3" | "L4" | "L5" | "L6" | "L7" | "L8";
 
@@ -48,8 +96,8 @@ export type ImpactBasis =
   | "AMOUNT_AT_RISK";
 export type NumberUnit = "inr" | "pct" | "pp" | "units" | "months" | "years" | "days" | "count" | "date";
 
-/** ranking.TodayState, plus NO_SNAPSHOT: the daily job has not produced a snapshot yet (the engine never runs on page
- * load, so the page cannot compute one itself). */
+/** ranking.TodayState, plus NO_SNAPSHOT: no snapshot has been computed yet (the engine never runs on page load; the
+ * hosted morning job or the user's explicit "Compute today's cards" (SNAPSHOT_PATH) produces one). */
 export type TodayState = "ACTIONS" | "NOTHING_NEEDED" | "ABSTAINED_ONLY" | "NO_SNAPSHOT";
 
 /** contracts.CardNumber plus its display string and full explanation. */

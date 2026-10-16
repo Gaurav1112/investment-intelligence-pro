@@ -129,6 +129,27 @@ describe("ActionCard", () => {
     expect(screen.queryByRole("button", { name: "I did this" })).not.toBeInTheDocument();
   });
 
+  it("after confirming, focus moves to the logged message in a live region that was already mounted (a11y-architect-1, react-reviewer-4)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        json({ status: "recorded", snapshot_id: SNAP, card_id: shortfallCard.card_id, decision: { decision: "done", decision_id: "dec-1", decided_at: "2026-10-16T04:00:00+00:00", cas_confirmed: null } }),
+      ),
+    );
+    show(shortfallCard);
+    const card = screen.getByRole("article");
+    // The live region exists (empty) BEFORE the change, so screen readers announce the text written into it.
+    const live = within(card).getByRole("status");
+    expect(live).toHaveTextContent("");
+    await userEvent.click(within(card).getByRole("button", { name: "I did this" }));
+    await userEvent.click(within(card).getByRole("button", { name: "Yes, I did the steps on this card" }));
+    await within(card).findByText(/You marked this done/);
+    expect(within(card).getByRole("status")).toBe(live);
+    expect(live).toHaveTextContent(/You marked this done on 16-Oct-2026 04:00 UTC/);
+    expect(document.activeElement).not.toBe(document.body);
+    expect(live).toHaveFocus();
+  });
+
   it("cancelling the confirmation sends nothing and returns focus to the button", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);

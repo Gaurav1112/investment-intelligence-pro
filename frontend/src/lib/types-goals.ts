@@ -7,9 +7,9 @@
 //
 // Endpoints this file describes (B01 owns them; C02 only calls them; reconciled at wave-2 integration):
 //   GET    /api/goals/setup          → SetupState   (stress_history comes FIRST: crash history before any return figure)
-//   PUT    /api/goals/setup          SetupAnswers → SetupState
+//   PUT    /api/goals/setup          SetupAnswersIn → SetupState (goals merge; profile answers: null keeps, `clear` clears)
 //   GET    /api/goals                → GoalsView (B01 GoalsOverview: also answers, mapping, risk_profile, tax_context, policy)
-//   PUT    /api/goals/{goal_id}      GoalUpdate (GoalIn without goal_id; the id is in the path) → GoalView
+//   PUT    /api/goals/{goal_id}      GoalUpdate (a PATCH: only the fields sent change; the id is in the path) → GoalView
 //   DELETE /api/goals/{goal_id}      → { status: "deleted", goal_id }
 // The return-target feasibility view uses the existing POST /api/feasibility (FeasibilityIn/FeasibilityResponse in
 // lib/types.ts); it is the only place an aspired return appears, as a historical frequency.
@@ -93,31 +93,33 @@ export interface EmergencyAnswer {
 /** services/goals.py GoalIn.objective (engine/ranking.py Objective values). */
 export type GoalObjective = "A_capital_preservation" | "B_income" | "C_liquidity" | "D_growth" | "E_aggressive_growth";
 
-/** A goal as the setup and the Goals page send it (store/goals_repo.py Goal). */
-export interface GoalIn {
-  /** null on create; the server assigns the id. */
-  goal_id: string | null;
+/** A goal as setup returns it (services/goals.py SetupGoalOut): every stored field, objective and h_safe_years too. */
+export interface SetupGoal {
+  goal_id: string;
   name: string;
   priority: number; // 1 = first
   target_amount: string | null; // ₹
   target_date: string | null; // YYYY-MM-DD
+  /** Set outside these pages (POST /api/goals); setup and the Goals editor never send it, so the server keeps it. */
+  objective: GoalObjective | null;
   /** B_g: the ₹ fall the user would sit through without selling. null → that goal gets no equity recommendation. */
   loss_budget_inr: string | null;
   /** T_g: the longest the user would wait for a recovery, in months. */
   recovery_months: number | null;
-  /** Set outside these pages (POST /api/goals). The server's PUT REPLACES the goal, so a write of a saved goal must send
-   * back the stored values or they are erased; absent only for a goal the server has not returned yet. */
-  objective?: GoalObjective | null;
-  /** The goal's safe horizon in years (decimal string); drives the L2 goal-date check. Same replace rule as objective. */
-  h_safe_years?: string | null;
+  /** The goal's safe horizon in years (decimal string); drives the L2 goal-date check. Same rule as objective. */
+  h_safe_years: string | null;
 }
 
-/** PUT /api/goals/{goal_id} body: the server rejects unknown fields, and the id travels in the path. It is a full
- * replacement, so objective and h_safe_years are required here: the editor must carry the stored values through. */
-export type GoalUpdate = Omit<GoalIn, "goal_id" | "objective" | "h_safe_years"> & {
-  objective: GoalObjective | null;
-  h_safe_years: string | null;
-};
+/** The fields of a goal a write may carry (services/goals.py GoalPatchIn). */
+type GoalFields = Omit<SetupGoal, "goal_id">;
+
+/** PUT /api/goals/{goal_id} body (GoalPatchIn, GOAL-1): a merge, not a replacement. An omitted field keeps its stored
+ * value; an explicit null clears it; the name cannot be cleared. Unknown fields are rejected; the id is in the path. */
+export type GoalUpdate = Partial<Omit<GoalFields, "name">> & { name?: string };
+
+/** A goal in the PUT /api/goals/setup body (SetupGoalIn): with goal_id it merges into that goal like GoalUpdate; with
+ * goal_id null it creates one, which needs a name. */
+export type SetupGoalIn = GoalUpdate & { goal_id: string | null };
 
 export interface ExtrasAnswer {
   /** Equity LTCG already realised elsewhere this FY; null keeps the conservative "exemption already used". */
@@ -126,11 +128,48 @@ export interface ExtrasAnswer {
   sweep_fd_balance: string | null;
 }
 
+/** GET/PUT /api/goals/setup answers as the server returns them. */
 export interface SetupAnswers {
   tax: TaxAnswer;
   emergency: EmergencyAnswer;
-  goals: GoalIn[];
+  goals: SetupGoal[];
   extras: ExtrasAnswer;
+}
+
+/** The setup answers that can be cleared (services/goals.py WireClearable, GOAL-2). In the PUT body a null answer KEEPS
+ * its stored value; naming it in `clear` clears it instead. An answer is either given or cleared, never both. */
+export type SetupClearable =
+  | "emergency.essential_monthly_expenses"
+  | "emergency.months"
+  | "extras.savings_balance"
+  | "extras.sweep_fd_balance";
+
+/** PUT /api/goals/setup body (SetupAnswersIn). Tax answers and the LTCG figure cannot be cleared through it. */
+export interface SetupAnswersIn {
+  tax: TaxAnswer;
+  emergency: EmergencyAnswer;
+  goals: SetupGoalIn[];
+  extras: ExtrasAnswer;
+  clear: SetupClearable[];
+}
+
+/** Each clearable answer, as read from a set of answers. */
+const CLEARABLE: readonly [SetupClearable, (a: Pick<SetupAnswers, "emergency" | "extras">) => unknown][] = [
+  ["emergency.essential_monthly_expenses", (a) => a.emergency.essential_monthly_expenses],
+  ["emergency.months", (a) => a.emergency.months],
+  ["extras.savings_balance", (a) => a.extras.savings_balance],
+  ["extras.sweep_fd_balance", (a) => a.extras.sweep_fd_balance],
+];
+
+/** The `clear` list for a setup save: each clearable answer that is stored (non-null in `stored`, the server's last
+ * answers) and that the user emptied (null in `sent`). An answer never stored is not named, so nothing is written for it. */
+export function setupClearList(
+  stored: Pick<SetupAnswers, "emergency" | "extras">,
+  sent: Pick<SetupAnswers, "emergency" | "extras">,
+): SetupClearable[] {
+  return CLEARABLE.filter(([, read]) => read(stored) !== null && read(stored) !== undefined && read(sent) === null).map(
+    ([name]) => name,
+  );
 }
 
 export interface SetupState {
@@ -153,10 +192,7 @@ export interface GoalHolding {
   fraction: string; // share of the holding mapped to this goal, (0, 1]
 }
 
-export interface GoalView extends GoalIn {
-  goal_id: string;
-  objective: GoalObjective | null;
-  h_safe_years: string | null;
+export interface GoalView extends SetupGoal {
   holdings: GoalHolding[];
   /** "ABSTAIN" with reasons when a required input (loss limit, date, …) is missing. */
   outcome: "PASS" | "ABSTAIN";

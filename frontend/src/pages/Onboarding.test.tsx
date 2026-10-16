@@ -224,27 +224,41 @@ const ONE_GOAL = {
   answers: {
     ...SETUP_EMPTY.answers,
     goals: [
-      { goal_id: "g1", name: "Long-term growth", priority: 1, target_amount: "100000", target_date: "2036-03-31", loss_budget_inr: null, recovery_months: null },
+      {
+        goal_id: "g1", name: "Long-term growth", priority: 1, target_amount: "100000", target_date: "2036-03-31", objective: null,
+        loss_budget_inr: null, recovery_months: null, h_safe_years: null,
+      },
     ],
   },
 };
 
-type SetupGoalWire = { goal_id: string | null; name: string; priority: number; target_amount: string | null; target_date: string | null; loss_budget_inr: string | null; recovery_months: number | null };
-type GoalExtras = Record<string, { objective: string | null; h_safe_years: string | null }>;
+type SetupGoalWire = { goal_id: string | null; name?: string; priority?: number; target_amount?: string | null; target_date?: string | null; loss_budget_inr?: string | null; recovery_months?: number | null };
+type Answers = typeof SETUP_EMPTY.answers;
+type PutBody = Answers & { clear: string[] };
 
-/** The Goals overview for the same goals (GET /api/goals): it also carries objective and h_safe_years, which the setup
- * answers do not. */
-function goalsView(state: unknown, extras: GoalExtras = {}) {
-  const goals = ((state as typeof SETUP_EMPTY).answers.goals as SetupGoalWire[]).map((g) => ({
-    ...g, objective: null, h_safe_years: null, ...extras[g.goal_id ?? ""], holdings: [], outcome: "ABSTAIN", abstentions: [],
-  }));
-  return { as_of: "2026-10-16", stress_history: STRESS, goals, setup_complete: false, missing: [] };
+/** Like the server's PUT /api/goals/setup (GOAL-1/GOAL-2): a null profile answer keeps the stored value, one named in
+ * `clear` is cleared; a goal sent without an id is created and comes back with one. */
+function serverMerge(stored: Answers, body: PutBody): Answers {
+  const pick = (path: string, sent: unknown, kept: unknown) => (body.clear.includes(path) ? null : (sent ?? kept));
+  return {
+    tax: body.tax,
+    emergency: {
+      essential_monthly_expenses: pick("emergency.essential_monthly_expenses", body.emergency.essential_monthly_expenses, stored.emergency.essential_monthly_expenses),
+      months: pick("emergency.months", body.emergency.months, stored.emergency.months),
+    } as Answers["emergency"],
+    goals: (body.goals as SetupGoalWire[]).map((g, i) => ({ ...g, goal_id: g.goal_id ?? `g-new${i + 1}` })) as never,
+    extras: {
+      ltcg_used_inr: body.extras.ltcg_used_inr ?? stored.extras.ltcg_used_inr,
+      savings_balance: pick("extras.savings_balance", body.extras.savings_balance, stored.extras.savings_balance),
+      sweep_fd_balance: pick("extras.sweep_fd_balance", body.extras.sweep_fd_balance, stored.extras.sweep_fd_balance),
+    } as Answers["extras"],
+  };
 }
 
 function setupWizard(
   state: unknown = SETUP_EMPTY,
   portfolios: unknown[] = [{ portfolio_id: "p1", name: "Mine", nature: "actual", created_at: "2026-01-01T00:00:00Z", transactions: 0 }],
-  opts: { extras?: GoalExtras; putAnswers?: (body: typeof SETUP_EMPTY.answers) => unknown } = {},
+  opts: { putAnswers?: (body: PutBody) => unknown } = {},
 ) {
   const calls: Call[] = [];
   vi.stubGlobal(
@@ -254,13 +268,10 @@ function setupWizard(
       const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
       calls.push({ url, method, body });
       if (url === "/api/goals/setup" && method === "PUT") {
-        // Like the server: a goal sent without an id is created and comes back with one.
-        const goals = (body.goals as SetupGoalWire[]).map((g, i) => ({ ...g, goal_id: g.goal_id ?? `g-new${i + 1}` }));
-        const answers = opts.putAnswers ? opts.putAnswers(body) : { ...body, goals };
+        const answers = opts.putAnswers ? opts.putAnswers(body) : serverMerge((state as typeof SETUP_EMPTY).answers, body);
         return json({ ...SETUP_EMPTY, answers, missing: [], complete: true });
       }
       if (url === "/api/goals/setup") return json(state);
-      if (url === "/api/goals" && method === "GET") return json(goalsView(state, opts.extras));
       if (url === "/api/portfolios" && method === "POST")
         return json({ portfolio_id: "p-new", name: body.name, nature: body.nature, created_at: "2026-01-01T00:00:00Z" });
       if (url === "/api/portfolios") return json({ items: portfolios });
@@ -367,6 +378,7 @@ describe("Setup: one upload and about six answers (C02)", () => {
         { goal_id: null, name: "Long-term growth", priority: 1, target_amount: "1000000", target_date: "2036-03-31", loss_budget_inr: "250000", recovery_months: 60 },
       ],
       extras: { ltcg_used_inr: null, savings_balance: null, sweep_fd_balance: null },
+      clear: [],
     });
     expect(await screen.findByText(/Setup saved/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Open your goals" })).toHaveAttribute("href", "/goals");
@@ -444,41 +456,92 @@ describe("Setup: one upload and about six answers (C02)", () => {
     expect(screen.getByRole("button", { name: "Remove “Emergency”" })).toBeInTheDocument();
   });
 
-  it("clearing a saved answer that the server keeps is reported, not shown as saved (react-reviewer-3)", async () => {
-    const saved = { ...SETUP_EMPTY, answers: { ...SETUP_EMPTY.answers, extras: { ...SETUP_EMPTY.answers.extras, savings_balance: "50000" } } };
-    setupWizard(saved, undefined, {
-      // The server merges: a null leaves the stored value in place.
-      putAnswers: (body) => ({ ...body, extras: { ...body.extras, savings_balance: "50000" } }),
-    });
+  it("clearing a saved answer the server keeps is still reported, not shown as saved (react-reviewer-3)", async () => {
+    // The LTCG figure is not clearable through setup (no `clear` entry for it): a null keeps the stored value.
+    const saved = { ...SETUP_EMPTY, answers: { ...SETUP_EMPTY.answers, extras: { ...SETUP_EMPTY.answers.extras, ltcg_used_inr: "1000" } } };
+    const calls = setupWizard(saved);
     await screen.findByRole("heading", { level: 1, name: "Setup" });
+    await step(/7\. Optional/);
+    await userEvent.clear(screen.getByLabelText(/Equity long-term gains already realised/));
+    await step(/8\. Review/);
+    await userEvent.click(screen.getByRole("button", { name: "Save setup" }));
+    const status = await screen.findByText(/Setup saved/);
+    expect(status.closest("[role=status]")).toHaveTextContent(/Not cleared: Equity long-term gains already realised elsewhere/);
+    expect((calls.find((c) => c.method === "PUT")!.body as PutBody).clear).toEqual([]);
+    await step(/7\. Optional/);
+    expect(screen.getByLabelText(/Equity long-term gains already realised/)).toHaveValue("1000");
+  });
+
+  it("emptying saved optional answers names them in the clear list, and they are cleared (FE-1, GOAL-2)", async () => {
+    const saved = {
+      ...SETUP_EMPTY,
+      answers: {
+        ...SETUP_EMPTY.answers,
+        emergency: { essential_monthly_expenses: "40000", months: 9 },
+        extras: { ltcg_used_inr: null, savings_balance: "50000", sweep_fd_balance: "20000" },
+      },
+    };
+    const calls = setupWizard(saved);
+    await screen.findByRole("heading", { level: 1, name: "Setup" });
+    await step(/3\. Emergency/);
+    await userEvent.clear(screen.getByLabelText(/Essential monthly expenses/));
+    await userEvent.clear(screen.getByLabelText(/Months \(1–60\)/));
     await step(/7\. Optional/);
     await userEvent.clear(screen.getByLabelText(/Savings account balance/));
     await step(/8\. Review/);
     await userEvent.click(screen.getByRole("button", { name: "Save setup" }));
     const status = await screen.findByText(/Setup saved/);
-    expect(status.closest("[role=status]")).toHaveTextContent(/Not cleared: Savings account balance/);
+    const body = calls.find((c) => c.method === "PUT")!.body as PutBody;
+    expect(body.clear).toEqual(["emergency.essential_monthly_expenses", "emergency.months", "extras.savings_balance"]);
+    // Cleared answers go as null (never given and cleared at once); the untouched sweep balance is sent as it is.
+    expect(body.emergency).toEqual({ essential_monthly_expenses: null, months: null });
+    expect(body.extras).toEqual({ ltcg_used_inr: null, savings_balance: null, sweep_fd_balance: "20000" });
+    expect(status.closest("[role=status]")).not.toHaveTextContent(/Not cleared/);
     await step(/7\. Optional/);
-    expect(screen.getByLabelText(/Savings account balance/)).toHaveValue("50000");
+    expect(screen.getByLabelText(/Savings account balance/)).toHaveValue("");
   });
 
-  it("saving setup keeps each saved goal's objective and safe-horizon years (typescript-reviewer-2)", async () => {
-    const calls = setupWizard(ONE_GOAL, undefined, { extras: { g1: { objective: "D_growth", h_safe_years: "3" } } });
+  it("a second save after clearing does not name the already-cleared answers again", async () => {
+    const saved = { ...SETUP_EMPTY, answers: { ...SETUP_EMPTY.answers, extras: { ...SETUP_EMPTY.answers.extras, savings_balance: "50000" } } };
+    const calls = setupWizard(saved);
+    await screen.findByRole("heading", { level: 1, name: "Setup" });
+    await step(/7\. Optional/);
+    await userEvent.clear(screen.getByLabelText(/Savings account balance/));
+    await step(/8\. Review/);
+    await userEvent.click(screen.getByRole("button", { name: "Save setup" }));
+    await screen.findByText(/Setup saved/);
+    await userEvent.click(screen.getByRole("button", { name: "Save setup" }));
+    await waitFor(() => expect(calls.filter((c) => c.method === "PUT")).toHaveLength(2));
+    const [first, second] = calls.filter((c) => c.method === "PUT") as [Call, Call];
+    expect((first.body as PutBody).clear).toEqual(["extras.savings_balance"]);
+    expect((second.body as PutBody).clear).toEqual([]);
+  });
+
+  it("saving setup never sends a saved goal's objective or safe-horizon years: the server merge keeps them (FE-1)", async () => {
+    const withExtras = {
+      ...ONE_GOAL,
+      answers: { ...ONE_GOAL.answers, goals: [{ ...ONE_GOAL.answers.goals[0]!, objective: "D_growth", h_safe_years: "3" }] },
+    };
+    const calls = setupWizard(withExtras);
     await screen.findByRole("heading", { level: 1, name: "Setup" });
     await step(/8\. Review/);
     await userEvent.click(screen.getByRole("button", { name: "Save setup" }));
     await waitFor(() => expect(calls.some((c) => c.method === "PUT")).toBe(true));
-    expect((calls.find((c) => c.method === "PUT")!.body as { goals: unknown[] }).goals[0]).toMatchObject({
-      goal_id: "g1", objective: "D_growth", h_safe_years: "3",
-    });
+    const goal = (calls.find((c) => c.method === "PUT")!.body as { goals: Record<string, unknown>[] }).goals[0]!;
+    expect(goal).toMatchObject({ goal_id: "g1", name: "Long-term growth" });
+    expect(goal).not.toHaveProperty("objective");
+    expect(goal).not.toHaveProperty("h_safe_years");
   });
 
-  it("if the goals overview cannot be read, setup does not save over the stored goals (abstains instead)", async () => {
+  it("setup no longer reads the goals overview: it loads and saves even when GET /api/goals fails (FE-1)", async () => {
     const calls: Call[] = [];
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string, init?: RequestInit) => {
         const method = init?.method ?? "GET";
-        calls.push({ url, method, body: undefined });
+        const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
+        calls.push({ url, method, body });
+        if (url === "/api/goals/setup" && method === "PUT") return json({ ...ONE_GOAL, missing: [], complete: true });
         if (url === "/api/goals/setup") return json(ONE_GOAL);
         if (url === "/api/goals") return json({ code: "INTERNAL" }, 500);
         if (url === "/api/portfolios") return json({ items: [] });
@@ -492,9 +555,12 @@ describe("Setup: one upload and about six answers (C02)", () => {
         </ProfileProvider>
       </MemoryRouter>,
     );
-    expect(await screen.findByRole("alert")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Save setup" })).not.toBeInTheDocument();
-    expect(calls.some((c) => c.method === "PUT")).toBe(false);
+    await screen.findByRole("heading", { level: 1, name: "Setup" });
+    await step(/8\. Review/);
+    await userEvent.click(await screen.findByRole("button", { name: "Save setup" }));
+    await screen.findByText(/Setup saved/);
+    expect(calls.some((c) => c.url === "/api/goals")).toBe(false);
+    expect(calls.filter((c) => c.method === "PUT")).toHaveLength(1);
   });
 });
 

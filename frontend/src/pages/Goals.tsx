@@ -88,24 +88,18 @@ function GoalEditor({ goal, onSaved, onCancel }: { goal: GoalView; onSaved: () =
         : null,
       recovery.trim() && !INT.test(recovery.trim()) ? "Recovery time: whole months." : null,
     ].filter((x): x is string => x !== null);
-    // The PUT replaces the whole goal. A view without these keys gives no stored value to send back, and sending
-    // nothing (or null) would erase them server-side: refuse rather than guess.
-    if (goal.objective === undefined || goal.h_safe_years === undefined)
-      problems.push("this goal was loaded without its objective or safe-horizon years; reload the page and try again.");
     if (problems.length) {
       setProblem(`Not saved: ${problems.join(" ")}`);
       return;
     }
+    // The PUT merges (GOAL-1): only the fields this editor shows are sent, an emptied one as null (which clears it).
+    // Priority, objective and safe-horizon years are not sent, so the server keeps their stored values.
     const body: GoalUpdate = {
       name: name.trim(),
-      priority: goal.priority,
       target_amount: amount.trim() ? money(amount) : null,
       target_date: date || null,
-      // Not editable here, but the PUT replaces the whole goal: send the stored values back so they are not erased.
-      objective: goal.objective ?? null,
       loss_budget_inr: loss.trim() ? money(loss) : null,
       recovery_months: recovery.trim() ? Number.parseInt(recovery, 10) : null,
-      h_safe_years: goal.h_safe_years ?? null,
     };
     setPending(true);
     setProblem(null);

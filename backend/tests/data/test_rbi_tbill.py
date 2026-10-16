@@ -171,8 +171,8 @@ def test_feed_pubdate_is_used_only_when_the_text_has_no_date() -> None:
 
 
 def test_a_stated_auction_date_is_kept_and_never_inferred() -> None:
-    text = rbi_pr.html_text(release_html(stated_auction=False)).replace("Press Release:", "The auction was held on January 07, 2099. "
-                                                    "Press Release:")  # fmt: skip
+    text = rbi_pr.html_text(release_html(stated_auction=False))
+    text = text.replace("Press Release:", "The auction was held on January 07, 2099. Press Release:")
     rel = rbi_pr.parse_cutoff_text(text, prid=1, pub_date=None)
     assert rel.auction_date == date(2099, 1, 7)
 

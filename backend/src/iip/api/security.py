@@ -258,7 +258,7 @@ def cron_auth_from_env(settings: Settings, environ: Mapping[str, str], limiter: 
     crons only against production). A secret that is set but too short, equal to the access token, or a malformed
     ``VERCEL_URL`` refuses startup instead of silently weakening the boundary."""
     secret = environ.get("CRON_SECRET", "")
-    if not settings.hosted or not secret:
+    if not settings.hosted or not secret.strip():  # blank = unset, as the outer gate in root app.py (A04) reads it
         return None
     if len(secret) < MIN_HOSTED_TOKEN_CHARS:
         raise StartupRefused(f"CRON_SECRET must be at least {MIN_HOSTED_TOKEN_CHARS} characters")

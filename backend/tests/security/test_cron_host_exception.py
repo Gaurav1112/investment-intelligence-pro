@@ -225,7 +225,7 @@ def test_from_env_enables_with_lowercased_host() -> None:
 
 @pytest.mark.parametrize(
     "override",
-    [{"CRON_SECRET": ""}, {"VERCEL_URL": ""}, {"VERCEL_ENV": "preview"}, {"VERCEL_ENV": ""}],
+    [{"CRON_SECRET": ""}, {"CRON_SECRET": "   "}, {"VERCEL_URL": ""}, {"VERCEL_ENV": "preview"}, {"VERCEL_ENV": ""}],
 )
 def test_from_env_off(override: dict[str, str]) -> None:
     assert cron_auth_from_env(_settings(), {**ENV, **override}, _limiter()) is None

@@ -210,10 +210,17 @@ def test_cron_gate_leaves_other_routes_alone(tmp_path: Path, monkeypatch: pytest
 
 
 def test_cron_gate_opens_when_secret_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """With a secret, the request reaches the app's own checks (the route itself is WP B03)."""
+    """With a secret, the request reaches the app's own checks (the route itself is WP B03).
+
+    The app's cron exception (A03, security.cron_auth_from_env) is on only for a production deployment with a
+    deployment host, so the test sets VERCEL_ENV and VERCEL_URL as Vercel does in production."""
+    monkeypatch.setenv("VERCEL_ENV", "production")
+    monkeypatch.setenv("VERCEL_URL", VERCEL_HOST)
     app = load_entrypoint(tmp_path, monkeypatch, cron_secret=secrets.token_urlsafe(32))
     with TestClient(app, base_url=ORIGIN) as c:
-        assert c.get("/api/cron/navall").status_code != 404
+        r = c.get("/api/cron/navall")
+        assert r.status_code != 404
+        assert r.status_code == 401  # no bearer: refused by the app's cron check, not hidden by the outer gate
 
 
 # --- build wiring -----------------------------------------------------------------------------------------------

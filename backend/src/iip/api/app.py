@@ -20,6 +20,9 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from iip.api.security import (
+    CRON_RATE_KEY,
+    CRON_RATE_LIMIT,
+    CRON_RATE_WINDOW_S,
     SESSION_COOKIE,
     DbRateLimiter,
     DbSessionStore,
@@ -28,6 +31,7 @@ from iip.api.security import (
     SecurityMiddleware,
     SessionBackend,
     SessionStore,
+    cron_auth_from_env,
 )
 from iip.api.settings import Settings, ensure_access_token
 from iip.data.fetch import CircuitBreaker, Fetcher
@@ -82,6 +86,7 @@ class AppState:
         self.job_budget_s = HOSTED_JOB_BUDGET_S
         self.sessions: SessionBackend
         self.login_limiter: LoginLimiter
+        self.cron_limiter: DbRateLimiter  # hosted only (the cron route does not exist locally)
         # Only one NAV-history backfill runs at a time, so AMFI sees at most the paced rate (C-16).
         self.backfill_lock: threading.Lock | DbLease
         self.navall_lock: threading.Lock | DbLease  # hosted only: one resumable NAVAll job at a time
@@ -92,6 +97,10 @@ class AppState:
             epoch = self.epoch
             self.sessions = DbSessionStore(lambda: self.conn, clock=epoch)
             self.login_limiter = DbRateLimiter(lambda: self.conn, "login", limit=10, window_s=60, clock=epoch)
+            # A03 / SEC-cron-3: wrong cron secrets are rate-limited in the database, like login.
+            self.cron_limiter = DbRateLimiter(
+                lambda: self.conn, CRON_RATE_KEY, limit=CRON_RATE_LIMIT, window_s=CRON_RATE_WINDOW_S, clock=epoch
+            )
             self.backfill_lock = DbLease(lambda: self.conn, "backfill", ttl_s=LEASE_TTL_S, clock=epoch)
             self.navall_lock = DbLease(lambda: self.conn, "navall", ttl_s=LEASE_TTL_S, clock=epoch)
         else:
@@ -278,4 +287,7 @@ def create_app(
                 return FileResponse(candidate)
             return FileResponse(index)
 
-    return SecurityMiddleware(app, settings, state.sessions)
+    # The cron bearer exception (A03) exists only hosted; cron_auth_from_env returns None (route answers 404) unless
+    # CRON_SECRET, VERCEL_URL and VERCEL_ENV=production are all set, and refuses startup on a weak secret.
+    cron = cron_auth_from_env(settings, os.environ, state.cron_limiter) if settings.hosted else None
+    return SecurityMiddleware(app, settings, state.sessions, cron=cron)

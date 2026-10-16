@@ -263,3 +263,52 @@ def test_every_template_renders_clean_under_the_compliance_guard() -> None:
 
 def test_rendered_numbers_use_the_shared_formatter() -> None:
     assert format_number(Decimal("123456"), c.NumberUnit.INR) == "₹1,23,456"
+
+
+# --- TPL-1: neutral L2 duration template (U-11) ------------------------------------------------------------------
+
+GOAL_DATE_DURATION_TEXT = (
+    "{holding_name} has a Macaulay duration of {duration}, and {goal_name} is {years_to_goal} away (due {goal_date})."
+    " A holding whose duration is longer than the time left to the goal can fall in value when interest rates rise."
+    " Your rule {rule_ref} says: send new contributions for this goal to {safe_sleeve} and review this holding at"
+    " your next rebalance. No redemption is needed."
+)
+
+
+def test_goal_date_duration_template_is_neutral_policy_text_at_l2() -> None:
+    ts = _set()
+    t = ts.templates["goal_date_duration"]
+    assert t.kind is c.CardKind.GOAL_DATE_DURATION
+    assert t.card_class is c.CardClass.POLICY
+    assert c.KIND_LAYER[c.CardKind.GOAL_DATE_DURATION] is c.Layer.L2
+    # An ACTION, not a BREACH: it never suppresses the goal's lower layers.
+    assert c.CardKind.GOAL_DATE_DURATION not in c.BREACH_KINDS
+    assert t.text == GOAL_DATE_DURATION_TEXT
+    assert dict(t.slots) == {
+        "holding_name": "name", "duration": "years", "goal_name": "name", "years_to_goal": "years",
+        "goal_date": "date", "rule_ref": "rule_ref", "safe_sleeve": "name",
+    }  # fmt: skip
+    assert lint_template_text(t.text, t.card_class, ts.linter) == []
+
+
+def test_goal_date_duration_renders_every_number_from_a_traceable_slot() -> None:
+    ts = _set()
+    numbers = (
+        c.CardNumber("duration", Decimal("10"), c.NumberUnit.YEARS, AS_OF, ("fund_fact:synthetic",)),
+        c.CardNumber("years_to_goal", Decimal("2.0027"), c.NumberUnit.YEARS, AS_OF, ("user:goal:g1.target_date",),
+                     "risk.goal_date@1"),
+        c.CardNumber("goal_date", date(2033, 3, 15), c.NumberUnit.DATE, AS_OF, ("user:goal:g1.target_date",)),
+    )  # fmt: skip
+    out = render_card(
+        _card_for("goal_date_duration", c.CardKind.GOAL_DATE_DURATION, numbers), ts,
+        {"holding_name": "Synthetic Long Bond Fund", "goal_name": "Synthetic Goal",
+         "safe_sleeve": "your debt or liquid sleeve"},
+    )  # fmt: skip
+    assert out.text == (
+        "Synthetic Long Bond Fund has a Macaulay duration of 10 years, and Synthetic Goal is 2.0 years away"
+        " (due 15-Mar-2033). A holding whose duration is longer than the time left to the goal can fall in value when"
+        " interest rates rise. Your rule policy.synthetic@1 says: send new contributions for this goal to your debt or"
+        " liquid sleeve and review this holding at your next rebalance. No redemption is needed."
+    )
+    assert blocked(out.text) == []
+    assert all(d.fact_ids or d.formula_id for d in out.numbers)

@@ -70,6 +70,7 @@ export type Layer = "L0" | "L1" | "L2" | "L3" | "L4" | "L5" | "L6" | "L7" | "L8"
 export type CardKind =
   | "EMERGENCY_SHORTFALL"
   | "GOAL_DATE_BREACH"
+  | "GOAL_DATE_DURATION"
   | "LOSS_BUDGET_BREACH"
   | "LIMIT_BREACH"
   | "REBALANCE_DUE"

@@ -172,15 +172,35 @@ def _long_duration_goal(conn: Any, *, equity: bool = False) -> None:
     goals_repo.replace_goal_map(conn, links, fx.NOW)
 
 
+def _l2_cards(p: dict[str, Any]) -> list[dict[str, Any]]:
+    every = [*p["cards"], *(s["card"] for s in p["suppressed"])]
+    return [c for c in every if c["layer"] == 2 and c["goal_id"] == "g1"]
+
+
+def _assert_neutral_duration_card(card: dict[str, Any]) -> None:
+    """TPL-1: the ACTION is a neutral GOAL_DATE_DURATION card: rendered text, traceable numbers, never a sale."""
+    assert card["kind"] == "GOAL_DATE_DURATION"
+    assert card["is_action"] is True
+    assert card["text"] is not None, card.get("text_error")
+    assert "Fictional Long Bond Fund has a Macaulay duration of 10 years" in card["text"]
+    assert "Fictional Goal is" in card["text"] and "No redemption is needed." in card["text"]
+    assert {s["verb"] for s in card["steps"]} <= {"REDIRECT_SIP", "REVIEW"}, "an L2 ACTION must never trigger a sale"
+    assert any(s["verb"] == "REVIEW" and s["instrument_id"] == "mf:970010" for s in card["steps"])
+    assert card["displays"] and all(d["fact_ids"] or d["formula_id"] for d in card["displays"])
+    duration = next(d for d in card["displays"] if d["slot"] == "duration")
+    assert duration["display"] == "10 years" and any(f.startswith("fund_fact:") for f in duration["fact_ids"])
+
+
 def test_l2_action_outcome_is_never_dropped(conn: Any) -> None:
     _long_duration_goal(conn)
     p = _payload(conn)
     g1 = next(s for s in p["scopes"] if s["scope_id"] == "g1")
     assert g1["layers"]["L2"]["outcome"] == "ACTION"
-    l2 = [c for c in p["cards"] if c["layer"] == 2 and c["goal_id"] == "g1"]
+    l2 = _l2_cards(p)
     assert l2, "the engine found an L2 ACTION and no card carries it"
-    assert "duration_exceeds_horizon" in _codes(l2[0])
-    assert "mf:970010" in l2[0]["abstentions"][0]["missing_input"]
+    assert [c["kind"] for c in l2] == ["GOAL_DATE_DURATION"], "an ACTION is an action card, not an abstain/review"
+    _assert_neutral_duration_card(l2[0])
+    assert l2[0] in p["cards"], "an L2 ACTION card must be shown, not suppressed"
     assert p["verdict"] != rs.VERDICT_NOTHING
 
 
@@ -189,8 +209,16 @@ def test_l2_action_finding_survives_next_to_a_breach(conn: Any) -> None:
     p = _payload(conn)
     g1 = next(s for s in p["scopes"] if s["scope_id"] == "g1")
     assert g1["layers"]["L2"]["outcome"] == "BREACH"
-    kinds = {c["kind"]: c for c in p["cards"] if c["layer"] == 2 and c["goal_id"] == "g1"}
-    assert "GOAL_DATE_BREACH" in kinds and "duration_exceeds_horizon" in _codes(kinds["ABSTAIN"])
+    kinds = {c["kind"]: c for c in _l2_cards(p)}
+    assert set(kinds) == {"GOAL_DATE_BREACH", "GOAL_DATE_DURATION"}
+    _assert_neutral_duration_card(kinds["GOAL_DATE_DURATION"])
+
+
+def test_l2_duration_action_does_not_suppress_the_goals_lower_layers(conn: Any) -> None:
+    _long_duration_goal(conn)
+    p = _payload(conn)
+    duration = next(c for c in _l2_cards(p) if c["kind"] == "GOAL_DATE_DURATION")
+    assert not [s for s in p["suppressed"] if s["suppressed_by"] == duration["card_id"]]
 
 
 # ------------------------------------------------------------------------------------------- python-reviewer-3

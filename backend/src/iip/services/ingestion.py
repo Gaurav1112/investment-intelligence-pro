@@ -1,7 +1,9 @@
 """Ingestion pipeline: registry → fetch → parse → validate → normalised store, with a run ledger (ADR-0004).
 
 Data minimisation (AMFI ToU: personal use; do not store a "significant portion"):
-* latest NAV is kept only for Direct-plan Growth-option open-ended schemes, plus anything held or watched;
+* local: latest NAV is kept only for Direct-plan Growth-option open-ended schemes, plus anything held or watched;
+* hosted (``ingest_navall_resumable``, U-01): ONLY held and watched schemes, no name heuristic
+  (:data:`HOSTED_NAVALL_SCOPE`);
 * NAV history is backfilled only on explicit request for individual schemes, keeping just that scheme's rows;
 * raw payloads are hashed and recorded in the run ledger, not archived;
 * the core universe U1 (``rules/core_universe.yaml``, roles only) is tracked automatically ONLY after the user confirms
@@ -93,6 +95,31 @@ def sync_sources(conn: sqlite3.Connection) -> None:
                     spec.freshness.stale_max,
                 ),
             )
+
+
+def record_failed_run(
+    conn: sqlite3.Connection, source_id: str, now: datetime, error: str, *, once: bool = False
+) -> bool:
+    """Record a failure that happened BEFORE a run could start (e.g. a scheduled job's fetch or a missing poll step),
+    so Data health's last run and the "ingestion run failed" alert show it. ``error`` is a code, never a value
+    (C-13). ``once``: skip when the newest run of the source already failed with the same error (a standing gap,
+    such as a step that is not built, is reported once, not daily). Nothing is written for a source that is not in
+    the stored registry yet. True when a row was written."""
+    if once:
+        last = conn.execute(
+            "SELECT status, error FROM ingestion_runs WHERE source_id=? ORDER BY started_at DESC, run_id DESC LIMIT 1",
+            (source_id,),
+        ).fetchone()
+        if last is not None and last["status"] == "failed" and last["error"] == error:
+            return False
+    run_id = f"run_{now.strftime('%Y%m%dT%H%M%SZ')}_{secrets.token_hex(4)}"
+    with write_tx(conn):
+        cur = conn.execute(
+            "INSERT INTO ingestion_runs(run_id, source_id, started_at, finished_at, status, error)"
+            " SELECT ?, ?, ?, ?, 'failed', ? WHERE EXISTS (SELECT 1 FROM sources WHERE source_id=?)",
+            (run_id, source_id, now.isoformat(), now.isoformat(), error, source_id),
+        )
+    return int(cur.rowcount) == 1
 
 
 def _start_run(conn: sqlite3.Connection, source_id: str, now: datetime) -> str:
@@ -736,6 +763,9 @@ def run_batch_backfill_locally(
             return out
 
 
+# U-01 (PLAN §8): the hosted NAVAll path stores rows for held and watched schemes only. The scheduled jobs (cron
+# J1/J2/J4) store NAVAll hosted only while this says so (cron.default_hooks).
+HOSTED_NAVALL_SCOPE = "held_watched"
 NAVALL_JOB = "navall"
 NAVALL_STAGE = "navall:stage:"  # job_progress keys of the staged blocks: navall:stage:0000, navall:stage:0001, …
 NAVALL_CHUNK = 100  # schemes per block: one transaction of ~8 statements on a remote database (ADR-0013)
@@ -755,9 +785,10 @@ def _clear_navall(conn: sqlite3.Connection) -> None:
 def _stage_navall(
     conn: sqlite3.Connection, fetcher: Fetcher, now: Callable[[], datetime], chunk: int
 ) -> dict[str, object]:
-    """First call of a hosted run: fetch NAVAll ONCE, keep only the minimised scope (the same schemes and validated
-    observations :func:`ingest_navall` would store) and stage it in blocks of ``chunk`` schemes, with the progress
-    row, in one transaction. Continuations read the staged blocks and never fetch again. Returns the progress state,
+    """First call of a hosted run: fetch NAVAll ONCE, keep only the HOSTED scope - held and watched schemes, nothing
+    else (U-01; the local Direct-Growth name heuristic does not apply hosted) - with the same validated observations
+    :func:`ingest_navall` would store for them, and stage it in blocks of ``chunk`` schemes, with the progress row,
+    in one transaction. Continuations read the staged blocks and never fetch again. Returns the progress state,
     or the final result if the fetch or parse failed."""
     run_id = _start_run(conn, "amfi.navall", now())
     try:
@@ -769,7 +800,7 @@ def _stage_navall(
         return {"done": True, "phase": "complete", "schemes_done": 0, "schemes_total": 0, **summary.__dict__}
     with _failing_run(conn, run_id, now):
         tracked = tracked_scheme_codes(conn)
-        records = {r.scheme_code: r for r in result.records if in_minimised_scope(r, tracked)}
+        records = {r.scheme_code: r for r in result.records if r.scheme_code in tracked}  # U-01: held/watched only
         scope = sorted(records)
         rows: dict[int, list[list[object]]] = {}
         for o in _validated(result):
@@ -796,8 +827,8 @@ def ingest_navall_resumable(
     conn: sqlite3.Connection, fetcher: Fetcher, now: Callable[[], datetime], remaining: Callable[[], float],
     monotonic: Callable[[], float] = time.monotonic, chunk: int = NAVALL_CHUNK,
 ) -> dict[str, object]:  # fmt: skip
-    """Hosted NAVAll ingestion in bounded steps (ADR-0013): the same scope, validation and storage as
-    :func:`ingest_navall`, in blocks of ``chunk`` schemes.
+    """Hosted NAVAll ingestion in bounded steps (ADR-0013): the same validation and storage as
+    :func:`ingest_navall`, in blocks of ``chunk`` schemes, for held and watched schemes ONLY (U-01).
 
     * The first call fetches and stages the minimised scope (:func:`_stage_navall`); continuations make NO request.
     * Before EVERY block, the first included, the step stops unless ``remaining()`` seconds cover the block at the
@@ -859,7 +890,7 @@ def ingest_navall_resumable(
     rows_ok, rows_rejected = int(str(state["rows_ok"])), int(str(state["rows_rejected"]))
     status = "ok" if rows_rejected == 0 else "partial"
     _finish_run(conn, run_id, now(), status, rows_ok, rows_rejected, str(state["sha256"]), "")
-    detail = f"{total} schemes in the minimised scope; {pruned} older NAVs of untracked schemes pruned"
+    detail = f"{total} held or watched schemes stored; {pruned} older NAVs of untracked schemes pruned"
     summary = RunSummary(run_id, "amfi.navall", status, rows_ok, rows_rejected, int(str(state["stored"])), detail)
     return {"done": True, "phase": "complete", "schemes_done": total, "schemes_total": total,
             "seconds_per_scheme": state["seconds_per_scheme"], **summary.__dict__}  # fmt: skip

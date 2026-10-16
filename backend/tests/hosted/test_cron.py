@@ -31,7 +31,7 @@ from tests.data.conftest import load_fixture
 from tests.data.test_fetch import PUBLIC_IP
 from tests.services.test_portfolio import nav
 
-from .conftest import ORIGIN, TOKEN, hosted_settings, make_client, state
+from .conftest import ORIGIN, TOKEN, hosted_settings, make_client, navall_codes, state, watch_schemes
 
 NAVALL = load_fixture("amfi_navall_excerpt.txt")  # synthetic; newest NAV date 14-Oct-2026
 HISTORY = load_fixture("amfi_navhistory_excerpt.txt")  # synthetic; 13/14-Oct-2026, fictional "Halcyon Mutual Fund"
@@ -118,6 +118,9 @@ def open_conn(path: Path, driver: str) -> sqlite3.Connection:
     c = connect_libsql(str(path), hosted=True) if driver == "libsql" else connect(path)
     migrate(c, J1_TIME.isoformat())
     ing.sync_sources(c)
+    # U-01: hosted NAVAll stores held and watched schemes only, so the fixture watches the excerpt's Direct-Growth
+    # schemes (the set the local heuristic keeps) for J1/J2/J4 to have something to store.
+    watch_schemes(c, navall_codes(), J1_TIME)
     return c
 
 
@@ -568,9 +571,18 @@ def test_route_runs_j1_with_the_app_fetcher(cron_client: TestClient) -> None:
     assert r.status_code == 200 and r.json()["code"] == "STORED"
 
 
-def test_route_default_hooks_fail_closed_until_other_packages_land(cron_client: TestClient) -> None:
+def test_route_default_hooks_store_only_held_and_watched_schemes(cron_client: TestClient) -> None:
+    """security-reviewer-1 / silent-failure-hunter-02: with the production hooks J1 runs (the U-01 scope is enforced
+    by the ingestion service) and stores the watched scheme only - not the rest of the file."""
+    st = state(cron_client)
+    st.fetcher_factory = make_fetcher(Amfi())
+    st.clock = lambda: J1_TIME
+    watched = navall_codes()[0]
+    watch_schemes(st.conn, [watched], J1_TIME)
     r = cron_client.get("/api/cron/navall", headers=BEARER)
-    assert r.status_code == 500 and r.json()["code"] == "U01_SCOPE_NOT_ENFORCED"
+    assert r.status_code == 200 and r.json()["code"] == "STORED", r.text
+    series = {str(x[0]) for x in st.conn.execute("SELECT DISTINCT series_id FROM observations WHERE kind='nav'")}
+    assert series == {f"nav:{watched}"}
 
 
 @pytest.mark.parametrize("path", ["/api/cron/unknown", "/api/cron/navall-continuex"])

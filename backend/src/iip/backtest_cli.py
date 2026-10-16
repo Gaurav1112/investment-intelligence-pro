@@ -34,6 +34,7 @@ from iip.engine.determinism import content_hash
 from iip.engine.tax import Verification
 from iip.rules.loader import load_tax_rules
 from iip.services.backtest_runner import RunContext, load_registered_specs, run_backtest, verify_bundle
+from iip.services.signal_registry import register_committed_specs
 from iip.store.db import connect, ensure_schema
 from iip.store.ledger import role_bindings
 from iip.store.observations import current_series
@@ -163,6 +164,9 @@ def _cmd_run(args: argparse.Namespace, environ: Mapping[str, str]) -> int:
     conn = connect(db_path)
     try:
         ensure_schema(conn, created_at)
+        # Every committed spec is registered (idempotent, append-only), so the registry is complete even when this
+        # run is refused below for missing configuration (SIG-2).
+        register_committed_specs(conn, now=created_at)
         panel, prov = load_panel(conn, spec.role_keys())
         ctx = RunContext(
             panel=panel,

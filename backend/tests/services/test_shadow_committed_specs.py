@@ -49,6 +49,7 @@ def _bind_every_committed_role(conn: Any) -> None:
 
 
 def _register_committed(conn: Any) -> dict[str, Any]:
+    """Explicit registration of the committed text (run_shadow's own J4 registration then finds them present)."""
     specs = load_registered_specs()
     for spec, text in specs.values():
         fx.register_s_rule(conn, spec.id, text, version=spec.version)
@@ -87,6 +88,6 @@ def test_unbound_committed_roles_abstain_with_role_unbound_not_a_spec_field(conn
 
 def test_a_spec_that_fails_the_committed_schema_abstains_with_spec_invalid(conn: Any) -> None:
     fx.register_s_rule(conn, "S-Z", "id: S-Z\nversion: 1\nfamily: trend_timing\nroles: {in: x.y, out: x.z}\n")
-    shadow.run_shadow(conn, as_of=fx.AS_OF, snapshot_id="a" * 64, now=fx.NOW)
+    shadow.run_shadow(conn, specs_dir=None, as_of=fx.AS_OF, snapshot_id="a" * 64, now=fx.NOW)
     row = conn.execute("SELECT condition_met, payload_json FROM rule_evaluations").fetchone()
     assert row["condition_met"] is None and json.loads(row["payload_json"])["reason"] == "spec_invalid"

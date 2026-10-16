@@ -1,10 +1,11 @@
 """The daily shadow forward ledger (design-judgement.md §2.1 graft 1; PLAN.md wave 2, package B02).
 
-Job J4 evaluates EVERY registered signal (class ``S``) rule once per data date, whatever its registry state
-(``PRE_REGISTERED``, ``ABSTAIN``, ``NO_SIGNAL``, …; ``RETIRED`` rules are no longer evaluated), and appends one
-``rule_evaluations`` row per (rule, version, as-of date, scope). The row is evidence only: it is **never** turned into
-an action card, and the Today payload carries none of it (``iip.services.risk_snapshot`` never reads this ledger).
-Outcomes are scored later, at each rule's horizon (:mod:`iip.services.outcomes`).
+Job J4 first registers the committed specs (:mod:`iip.services.signal_registry`; append-only, idempotent, so a
+fresh install has a registry), then evaluates EVERY registered signal (class ``S``) rule once per data date, whatever
+its registry state (``PRE_REGISTERED``, ``ABSTAIN``, ``NO_SIGNAL``, …; ``RETIRED`` rules are no longer evaluated), and
+appends one ``rule_evaluations`` row per (rule, version, as-of date, scope). The row is evidence only: it is **never**
+turned into an action card, and the Today payload carries none of it (``iip.services.risk_snapshot`` never reads this
+ledger). Outcomes are scored later, at each rule's horizon (:mod:`iip.services.outcomes`).
 
 Evaluators are deterministic functions of month-end NAVs from ``series_grid`` for the instruments the user bound to
 the spec's roles (``rule_role_bindings``; the public spec names roles only, never schemes). Only COMPLETED months
@@ -35,13 +36,15 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import yaml
 
 from iip.engine.determinism import canonical_json, content_hash
 from iip.engine.money import engine_context
-from iip.services.backtest_runner import SignalSpec, SpecError, spec_from_text
+from iip.services import signal_registry
+from iip.services.backtest_runner import SIGNALS_DIR, SignalSpec, SpecError, spec_from_text
 from iip.store import ledger
 
 SHADOW_VERSION = "shadow.evaluate@1"
@@ -255,16 +258,24 @@ class ShadowRun:
     already_recorded: int
     evaluated: int
     abstained: int
+    registered: int = 0  # committed specs newly registered by this run (SIG-2)
+    registry_conflicts: tuple[str, ...] = ()  # committed id@version whose text differs from the registered row
+    registry_rejected: tuple[str, ...] = ()  # committed files that fail the spec schema
 
 
-def run_shadow(conn: sqlite3.Connection, *, as_of: date, snapshot_id: str, now: str) -> ShadowRun:
-    """Evaluate every registered S rule for ``as_of`` and append the rows. Idempotent: a key already recorded is
-    left as it is (the ledger is append-only; the first write for a data date stands). Statements: rules, role
-    bindings, the month-end grid (chunked), then the append (ONE chunked existing-key read and the batched insert;
-    run_shadow does not read the keys a second time itself)."""
+def run_shadow(
+    conn: sqlite3.Connection, *, as_of: date, snapshot_id: str, now: str, specs_dir: Path | None = SIGNALS_DIR
+) -> ShadowRun:
+    """Register the committed specs in ``specs_dir`` (idempotent, append-only; None skips it), then evaluate every
+    registered S rule for ``as_of`` and append the rows. Idempotent: a key already recorded is left as it is (the
+    ledger is append-only; the first write for a data date stands). Statements: the registry key read and insert,
+    rules, role bindings, the month-end grid (chunked), then the append (ONE chunked existing-key read and the
+    batched insert; run_shadow does not read the keys a second time itself)."""
+    reg = signal_registry.register_committed_specs(conn, now=now, directory=specs_dir) if specs_dir else None
+    extra = (reg.registered, reg.conflicts, reg.rejected) if reg else (0, (), ())
     rules = load_s_rules(conn)
     if not rules:
-        return ShadowRun(0, 0, 0, 0, 0)
+        return ShadowRun(0, 0, 0, 0, 0, *extra)
     bindings = ledger.role_bindings(conn)
     grid = ledger.series_grid(conn, sorted(set(bindings.values())))
     rows = []
@@ -273,7 +284,7 @@ def run_shadow(conn: sqlite3.Connection, *, as_of: date, snapshot_id: str, now: 
         rows.append(build_row(rule, ev, as_of, snapshot_id, now))
     written = ledger.append_rule_evaluations(conn, rows, keep_existing=True)
     evaluated = sum(1 for r in rows if r.condition_met is not None)
-    return ShadowRun(len(rules), written, len(rows) - written, evaluated, len(rows) - evaluated)
+    return ShadowRun(len(rules), written, len(rows) - written, evaluated, len(rows) - evaluated, *extra)
 
 
 def payload(row: Mapping[str, Any]) -> dict[str, Any]:

@@ -265,7 +265,7 @@ def test_run_shadow_reads_the_existing_keys_once(conn: Any) -> None:
     fx.register_s_rule(conn, "S-X", TREND)
     seen: list[str] = []
     conn.set_trace_callback(seen.append)
-    first = shadow.run_shadow(conn, as_of=fx.AS_OF, snapshot_id="a" * 64, now=fx.NOW)
+    first = shadow.run_shadow(conn, specs_dir=None, as_of=fx.AS_OF, snapshot_id="a" * 64, now=fx.NOW)
     conn.set_trace_callback(None)
     reads = [s for s in seen if s.lstrip().upper().startswith("SELECT") and "FROM rule_evaluations" in s]
     assert len(reads) == 1, reads
@@ -274,11 +274,13 @@ def test_run_shadow_reads_the_existing_keys_once(conn: Any) -> None:
 
 def test_run_shadow_rerun_keeps_the_first_write_even_when_inputs_changed(conn: Any) -> None:
     fx.register_s_rule(conn, "S-X", TREND)
-    shadow.run_shadow(conn, as_of=fx.AS_OF, snapshot_id="a" * 64, now=fx.NOW)
+    shadow.run_shadow(conn, specs_dir=None, as_of=fx.AS_OF, snapshot_id="a" * 64, now=fx.NOW)
     before = conn.execute("SELECT input_hash FROM rule_evaluations").fetchone()[0]
     fx.add_scheme(conn, "mf:971001", "971001", "Fictional Index Fund", "Equity Scheme - Large Cap Fund")
     ledger.bind_roles(conn, [ledger.RoleBinding("index_fund.fictional.direct", "mf:971001", "fixture", fx.NOW)])
-    again = shadow.run_shadow(conn, as_of=fx.AS_OF, snapshot_id="b" * 64, now=fx.NOW)  # content differs now
+    again = shadow.run_shadow(
+        conn, specs_dir=None, as_of=fx.AS_OF, snapshot_id="b" * 64, now=fx.NOW
+    )  # content differs now
     assert again.written == 0 and again.already_recorded == 1
     assert conn.execute("SELECT input_hash FROM rule_evaluations").fetchone()[0] == before
 

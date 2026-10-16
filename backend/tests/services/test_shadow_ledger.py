@@ -21,7 +21,7 @@ from iip.engine.money import engine_context
 from iip.services import outcomes as oc
 from iip.services import risk_snapshot as rs
 from iip.services import shadow
-from iip.services.backtest_runner import SIGNALS_DIR
+from iip.services.backtest_runner import SIGNALS_DIR, load_registered_specs
 from iip.store import ledger
 from tests.services import _snapshot_fixtures as fx
 
@@ -90,7 +90,7 @@ def test_every_registered_s_rule_gets_a_daily_row(conn: Any) -> None:
     fx.register_s_rule(conn, "S-Y", MOMENTUM, state="ABSTAIN")
     fx.register_s_rule(conn, "S-Z", UNKNOWN)
     fx.register_s_rule(conn, "S-R", TREND.replace("S-X", "S-R"), state="RETIRED")
-    run = shadow.run_shadow(conn, as_of=fx.AS_OF, snapshot_id="a" * 64, now=fx.NOW)
+    run = shadow.run_shadow(conn, specs_dir=None, as_of=fx.AS_OF, snapshot_id="a" * 64, now=fx.NOW)
     assert (run.rules, run.written) == (3, 3)
     rows = {r["rule_id"]: r for r in _rows(conn)}
     assert set(rows) == {"S-X", "S-Y", "S-Z"}  # RETIRED is no longer evaluated
@@ -99,16 +99,18 @@ def test_every_registered_s_rule_gets_a_daily_row(conn: Any) -> None:
     assert rows["S-Z"]["condition_met"] is None and z["reason"] == "family_not_implemented"
     assert all(json.loads(r["payload_json"])["shown_as_action"] is False for r in rows.values())
 
-    again = shadow.run_shadow(conn, as_of=fx.AS_OF, snapshot_id="a" * 64, now="2026-10-16T09:00:00+00:00")
+    again = shadow.run_shadow(
+        conn, specs_dir=None, as_of=fx.AS_OF, snapshot_id="a" * 64, now="2026-10-16T09:00:00+00:00"
+    )
     assert (again.written, again.already_recorded) == (0, 3)
-    nxt = shadow.run_shadow(conn, as_of=date(2026, 10, 16), snapshot_id="b" * 64, now=fx.NOW)
+    nxt = shadow.run_shadow(conn, specs_dir=None, as_of=date(2026, 10, 16), snapshot_id="b" * 64, now=fx.NOW)
     assert nxt.written == 3 and len(_rows(conn)) == 6
 
 
 def test_trend_condition_uses_completed_months_only(conn: Any) -> None:
     fx.register_s_rule(conn, "S-X", TREND)
     _grid(conn, EQ, {"2026-10": "1"})  # a part-month point for the as-of month must be ignored
-    shadow.run_shadow(conn, as_of=fx.AS_OF, snapshot_id="a" * 64, now=fx.NOW)
+    shadow.run_shadow(conn, specs_dir=None, as_of=fx.AS_OF, snapshot_id="a" * 64, now=fx.NOW)
     row = _rows(conn)[0]
     p = json.loads(row["payload_json"])
     assert p["observation_month"] == "2026-09" and p["months_used"] == ["2026-07", "2026-08", "2026-09"]
@@ -119,13 +121,13 @@ def test_trend_condition_uses_completed_months_only(conn: Any) -> None:
 def test_trend_condition_not_met(conn: Any) -> None:
     fx.register_s_rule(conn, "S-X", TREND)
     _grid(conn, EQ, {"2026-09": "90"})  # 90 < mean(110, 120, 90)
-    shadow.run_shadow(conn, as_of=fx.AS_OF, snapshot_id="a" * 64, now=fx.NOW)
+    shadow.run_shadow(conn, specs_dir=None, as_of=fx.AS_OF, snapshot_id="a" * 64, now=fx.NOW)
     assert _rows(conn)[0]["condition_met"] == 0
 
 
 def test_momentum_vs_liquid_hurdle(conn: Any) -> None:
     fx.register_s_rule(conn, "S-Y", MOMENTUM)
-    shadow.run_shadow(conn, as_of=fx.AS_OF, snapshot_id="a" * 64, now=fx.NOW)
+    shadow.run_shadow(conn, specs_dir=None, as_of=fx.AS_OF, snapshot_id="a" * 64, now=fx.NOW)
     row = _rows(conn)[0]
     # 12-1 style with L=3, S=1: R = C(2026-08)/C(2026-06) − 1 → equity 0.20 > liquid 0.02
     assert json.loads(row["payload_json"])["months_used"] == ["2026-06", "2026-08"]
@@ -135,7 +137,7 @@ def test_momentum_vs_liquid_hurdle(conn: Any) -> None:
 def test_unbound_role_and_short_history_abstain_with_a_row(conn: Any) -> None:
     fx.register_s_rule(conn, "S-X", TREND.replace("liquid_fund.fictional.direct", "liquid_fund.unbound"))
     fx.register_s_rule(conn, "S-Q", TREND.replace("S-X", "S-Q").replace("lookback_months: 3", "lookback_months: 9"))
-    shadow.run_shadow(conn, as_of=fx.AS_OF, snapshot_id="a" * 64, now=fx.NOW)
+    shadow.run_shadow(conn, specs_dir=None, as_of=fx.AS_OF, snapshot_id="a" * 64, now=fx.NOW)
     rows = {r["rule_id"]: json.loads(r["payload_json"]) for r in _rows(conn)}
     assert rows["S-X"]["reason"] == "role_unbound:liquid_fund.unbound"
     assert rows["S-Q"]["reason"] == "insufficient_history"
@@ -145,8 +147,9 @@ def test_s_rules_are_never_shown_as_actions(conn: Any) -> None:
     fx.seed_two_goals(conn)
     fx.register_s_rule(conn, "S-X", TREND)
     daily = rs.run_daily(conn, as_of=fx.AS_OF, now=fx.NOW, stress_table=fx.stress_table(), templates=fx.TEMPLATES)
-    assert daily.shadow.written == 1
-    row = _rows(conn)[0]
+    committed = len(load_registered_specs())  # J4 also registers and evaluates the committed specs (SIG-2)
+    assert daily.shadow.written == 1 + committed and daily.shadow.registered == committed
+    row = conn.execute("SELECT * FROM rule_evaluations WHERE rule_id = 'S-X'").fetchone()
     assert row["condition_met"] == 1 and row["snapshot_id"] == daily.snapshot.snapshot_id
     today = rs.read_today(conn)
     blob = json.dumps(today)
@@ -159,13 +162,13 @@ def test_s_rules_are_never_shown_as_actions(conn: Any) -> None:
 
 def _evaluate(conn: Any, spec: str = TREND, rule: str = "S-X") -> None:
     fx.register_s_rule(conn, rule, spec)
-    shadow.run_shadow(conn, as_of=fx.AS_OF, snapshot_id="a" * 64, now=fx.NOW)
+    shadow.run_shadow(conn, specs_dir=None, as_of=fx.AS_OF, snapshot_id="a" * 64, now=fx.NOW)
 
 
 def test_outcome_waits_for_the_horizon_then_scores_once(conn: Any) -> None:
     fx.register_s_rule(conn, "S-X", TREND)
     _grid(conn, EQ, {"2026-09": "90"})  # condition not met → the rule holds the liquid fund
-    shadow.run_shadow(conn, as_of=fx.AS_OF, snapshot_id="a" * 64, now=fx.NOW)
+    shadow.run_shadow(conn, specs_dir=None, as_of=fx.AS_OF, snapshot_id="a" * 64, now=fx.NOW)
     before = oc.score_outcomes(conn, as_of=date(2026, 10, 31), now=fx.NOW, basis=BASIS)
     assert before.not_yet_due == 0 and before.waiting_for_data == 1  # horizon reached, Oct month-end not in grid yet
     early = oc.score_outcomes(conn, as_of=date(2026, 10, 20), now=fx.NOW, basis=BASIS)

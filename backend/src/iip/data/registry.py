@@ -5,12 +5,16 @@
   below (``navall_request`` …), whose parameters are dates and integers.
 * ``SourceRequest`` re-validates its URL on construction (https, port 443, exact host allowlist for that source).
 * mfapi.in is registered but DISABLED. NSE, BSE and yfinance are deliberately absent; FBIL is absent (licence).
+* Every entry carries a ``licence_class`` and a ``status`` (VERIFIED / NOT VERIFIED / REQUIRES CONFIGURATION /
+  BLOCKED) for its automated retrieval path, with ``status_ref`` naming the evidence.
+* RBI pages may not be deep-linked without RBI's permission (RBI disclaimer; audit-automation.md §2.3), so their
+  citations are shown as plain text: ``citation_display`` returns no ``href`` for ``NO_DEEP_LINK_HOSTS``.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from enum import StrEnum
 from types import MappingProxyType
 from urllib.parse import urlsplit
@@ -34,6 +38,15 @@ class LicenceClass(StrEnum):
     PUBLIC_GOVT = "PUBLIC_GOVT"
     LICENSED = "LICENSED"
     UNKNOWN = "UNKNOWN"
+
+
+class SourceStatus(StrEnum):
+    """Status of a source's automated retrieval path (wave-1 status labels)."""
+
+    VERIFIED = "VERIFIED"  # the live endpoint was probed and its layout parsed
+    NOT_VERIFIED = "NOT VERIFIED"  # implemented or proposed, not yet proven against the live source
+    REQUIRES_CONFIGURATION = "REQUIRES CONFIGURATION"  # values come from the user (manual entry or own documents)
+    BLOCKED = "BLOCKED"  # terms or access controls forbid automation
 
 
 class FreshnessBasis(StrEnum):
@@ -75,6 +88,8 @@ class SourceSpec:
     licence_class: LicenceClass
     licence_note: str
     freshness: FreshnessSLO
+    status: SourceStatus
+    status_ref: str
     max_bytes: int = 0
     content_types: frozenset[str] = frozenset()
     unit: str | None = None
@@ -83,6 +98,8 @@ class SourceSpec:
     requires_configuration: bool = False
     # Bytes that identify the source's normal "nothing for this query" HTML page (fetch.NoData, not a failure).
     no_data_marker: bytes | None = None
+    # False: citations to this source are shown as plain text, never as a hyperlink (RBI disclaimer).
+    citation_links: bool = True
 
 
 _NAV_SLO = FreshnessSLO(
@@ -97,6 +114,13 @@ _AMFI_TERMS = "https://www.amfiindia.com/terms-of-use"
 _AMFI_LICENCE = (
     "AMFI ToU: personal, non-commercial use only; do not store a significant portion; no redistribution. "
     "Keep only held/watched schemes; any hosted/commercial use needs written permission."
+)
+
+_RBI_HOST = "www.rbi.org.in"
+_RBI_DISCLAIMER = "https://www.rbi.org.in/Scripts/Disclaimer.aspx"
+_RBI_LICENCE = (
+    "RBI disclaimer: caching, framing and deep links need RBI's permission. Store only the extracted figures plus a "
+    "plain-text citation, never the HTML; citations are not rendered as links."
 )
 
 _SOURCES: tuple[SourceSpec, ...] = (
@@ -114,6 +138,8 @@ _SOURCES: tuple[SourceSpec, ...] = (
         freshness=_NAV_SLO,
         max_bytes=32 * MiB,
         content_types=frozenset({"text/plain"}),
+        status=SourceStatus.VERIFIED,
+        status_ref="probe 2026-10-15, docs/data/probes/README.md",
         unit="INR_per_unit",
         currency="INR",
         convention="NAV_PER_UNIT_AS_PUBLISHED",
@@ -131,6 +157,8 @@ _SOURCES: tuple[SourceSpec, ...] = (
         freshness=_NAV_SLO,
         max_bytes=32 * MiB,
         content_types=frozenset({"text/plain"}),
+        status=SourceStatus.VERIFIED,
+        status_ref="probe 2026-10-15, docs/data/probes/README.md",
         no_data_marker=b"View/Download NAV History",
         unit="INR_per_unit",
         currency="INR",
@@ -147,6 +175,8 @@ _SOURCES: tuple[SourceSpec, ...] = (
         licence_class=LicenceClass.PERSONAL_USE_ONLY,
         licence_note=_AMFI_LICENCE,
         freshness=FreshnessSLO(FreshnessBasis.RETRIEVAL_CALENDAR_DAYS, fresh_max=7, stale_max=30),
+        status=SourceStatus.VERIFIED,
+        status_ref="probe 2026-10-15, docs/data/probes/README.md",
         max_bytes=32 * MiB,
         content_types=frozenset({"text/csv"}),
     ),
@@ -159,13 +189,14 @@ _SOURCES: tuple[SourceSpec, ...] = (
         allowed_hosts=frozenset({"api.mospi.gov.in"}),
         terms_url=None,
         licence_class=LicenceClass.PUBLIC_GOVT,
-        licence_note="No data-licence text found (NOT VERIFIED); personal use with citation. Base 2012 and 2024 "
-        "series are stored separately and never spliced.",
+        licence_note="No data-licence text found (NOT VERIFIED); personal use with citation. Filtered single-record "
+        "queries need no login. Base 2012 and 2024 series are stored separately and never spliced.",
         freshness=_custom("Monthly, 12th at 16:00 IST; latest month M-1 after the 12th, else M-2"),
+        status=SourceStatus.VERIFIED,
+        status_ref="filtered no-login queries probed, docs/research/wave1/audit-automation.md §3.1",
         max_bytes=8 * MiB,
         content_types=frozenset({"application/json", "text/csv"}),
         unit="index_points",
-        requires_configuration=True,
     ),
     SourceSpec(
         id="mfapi.in",
@@ -180,6 +211,8 @@ _SOURCES: tuple[SourceSpec, ...] = (
         freshness=_NAV_SLO,
         max_bytes=8 * MiB,
         content_types=frozenset({"application/json"}),
+        status=SourceStatus.BLOCKED,
+        status_ref="unofficial mirror; disabled by policy (source-registry.md)",
         unit="INR_per_unit",
         currency="INR",
         convention="NAV_PER_UNIT_MIRROR_5DP",
@@ -196,6 +229,8 @@ _SOURCES: tuple[SourceSpec, ...] = (
         licence_class=LicenceClass.PERSONAL_USE_ONLY,
         licence_note=_AMFI_LICENCE,
         freshness=_custom("Current or previous month fresh; 2 months stale; > 3 months expired"),
+        status=SourceStatus.REQUIRES_CONFIGURATION,
+        status_ref="manual entry; no download link (audit-automation.md §3.3)",
         unit="percent_pa",
     ),
     SourceSpec(
@@ -209,6 +244,8 @@ _SOURCES: tuple[SourceSpec, ...] = (
         licence_class=LicenceClass.PERSONAL_USE_ONLY,
         licence_note=_AMFI_LICENCE,
         freshness=FreshnessSLO(FreshnessBasis.OBSERVATION_CALENDAR_DAYS, fresh_max=45, stale_max=75),
+        status=SourceStatus.BLOCKED,
+        status_ref="crawling blocked by AMC terms; user-supplied file only (audit-automation.md #5)",
     ),
     SourceSpec(
         id="rbi.home.rates",
@@ -217,25 +254,54 @@ _SOURCES: tuple[SourceSpec, ...] = (
         official=True,
         mode=SourceMode.MANUAL,
         allowed_hosts=frozenset(),
-        terms_url="https://www.rbi.org.in/Scripts/Disclaimer.aspx",
+        terms_url=_RBI_DISCLAIMER,
         licence_class=LicenceClass.PUBLIC_GOVT,
         licence_note="RBI disclaimer prohibits caching/framing; WAF blocks scripts (HTTP 418). Manual entry only.",
         freshness=_custom("Verified after the last MPC date; expired > 70 days since verification"),
+        status=SourceStatus.BLOCKED,
+        status_ref="RBI disclaimer and WAF; manual entry (audit-automation.md §2.4)",
         unit="percent_pa",
+        citation_links=False,
     ),
     SourceSpec(
         id="rbi.pr.tbill",
-        name="RBI T-bill auction result press releases",
+        name="RBI T-bill auction result press releases (cut-off yields)",
         owner="RBI",
         official=True,
-        mode=SourceMode.MANUAL,  # user-triggered single fetch is not implemented in v1 (manual entry)
-        allowed_hosts=frozenset(),
-        terms_url="https://www.rbi.org.in/Scripts/Disclaimer.aspx",
+        # LIVE only for the single linked release page, fetched at most once per new feed item when the feed item's
+        # description lacks the cut-off table (audit-automation.md §3.2). Values may also be entered by hand.
+        mode=SourceMode.LIVE,
+        allowed_hosts=frozenset({_RBI_HOST}),
+        terms_url=_RBI_DISCLAIMER,
         licence_class=LicenceClass.PUBLIC_GOVT,
-        licence_note="Store only extracted figures plus citation, never the HTML.",
+        licence_note=_RBI_LICENCE,
         freshness=FreshnessSLO(FreshnessBasis.OBSERVATION_CALENDAR_DAYS, fresh_max=7, stale_max=21),
+        status=SourceStatus.NOT_VERIFIED,
+        status_ref="release page and formula probed (audit-automation.md §3.2); a cut-off item's feed description "
+        "carrying the table is NOT VERIFIED",
+        max_bytes=2 * MiB,
+        content_types=frozenset({"text/html"}),
         unit="percent_pa",
         convention="RBI_TBILL_IMPLICIT_YIELD_AS_PUBLISHED",
+        citation_links=False,
+    ),
+    SourceSpec(
+        id="rbi.rss.pressreleases",
+        name="RBI press releases RSS feed",
+        owner="RBI",
+        official=True,
+        mode=SourceMode.LIVE,
+        allowed_hosts=frozenset({_RBI_HOST}),
+        terms_url=_RBI_DISCLAIMER,
+        licence_class=LicenceClass.PUBLIC_GOVT,
+        licence_note="RBI offers the feed to 'receive automatic site updates'. Read as a feed with an honest "
+        "user-agent; stop on HTTP 418. " + _RBI_LICENCE,
+        freshness=FreshnessSLO(FreshnessBasis.RETRIEVAL_CALENDAR_DAYS, fresh_max=1, stale_max=3),
+        status=SourceStatus.VERIFIED,
+        status_ref="feed answered HTTP 200 text/xml to an honest user-agent (audit-automation.md §2.4, §3.2)",
+        max_bytes=2 * MiB,
+        content_types=frozenset({"text/xml", "application/xml", "application/rss+xml"}),
+        citation_links=False,
     ),
     SourceSpec(
         id="rbi.dbie",
@@ -248,6 +314,9 @@ _SOURCES: tuple[SourceSpec, ...] = (
         licence_class=LicenceClass.PUBLIC_GOVT,
         licence_note="No documented API; manual downloads only; third-party mirrors not allowed.",
         freshness=_custom("Series-dependent"),
+        status=SourceStatus.NOT_VERIFIED,
+        status_ref="no documented API; licence NOT VERIFIED (audit-automation.md §3.2)",
+        citation_links=False,
     ),
     SourceSpec(
         id="rbi.wadtdr",
@@ -256,11 +325,14 @@ _SOURCES: tuple[SourceSpec, ...] = (
         official=True,
         mode=SourceMode.MANUAL,
         allowed_hosts=frozenset(),
-        terms_url="https://www.rbi.org.in/Scripts/Disclaimer.aspx",
+        terms_url=_RBI_DISCLAIMER,
         licence_class=LicenceClass.PUBLIC_GOVT,
         licence_note="Manual reference series with citation.",
         freshness=_custom("<= 2 months fresh; 3 months stale; > 4 months expired"),
+        status=SourceStatus.REQUIRES_CONFIGURATION,
+        status_ref="manual reference series; RSS parser not built (audit-automation.md §3.2)",
         unit="percent_pa",
+        citation_links=False,
     ),
     SourceSpec(
         id="ccil.marketwatch",
@@ -274,6 +346,8 @@ _SOURCES: tuple[SourceSpec, ...] = (
         licence_note="Data Sharing Policy: non-commercial use; extraction discouraged. "
         "User enters values with citation.",
         freshness=_custom("Per entry"),
+        status=SourceStatus.REQUIRES_CONFIGURATION,
+        status_ref="user enters values with citation",
     ),
     SourceSpec(
         id="bond.quote",
@@ -286,6 +360,8 @@ _SOURCES: tuple[SourceSpec, ...] = (
         licence_class=LicenceClass.PERSONAL_USE_ONLY,
         licence_note="NSE/BSE/CCIL/FBIL terms restrict automated use; user enters the quote, page URL and date.",
         freshness=_custom("<= 7 calendar days, else STALE_DATA (bond excluded)"),
+        status=SourceStatus.REQUIRES_CONFIGURATION,
+        status_ref="user enters quote, page URL and date",
     ),
     SourceSpec(
         id="cra.ratings",
@@ -298,6 +374,8 @@ _SOURCES: tuple[SourceSpec, ...] = (
         licence_class=LicenceClass.UNKNOWN,
         licence_note="No scraping; user enters rating, agency, action date and rationale URL.",
         freshness=_custom("Per rating action"),
+        status=SourceStatus.BLOCKED,
+        status_ref="CRISIL forbids copying; others NOT VERIFIED (audit-automation.md #14)",
     ),
     SourceSpec(
         id="dicgc",
@@ -310,6 +388,8 @@ _SOURCES: tuple[SourceSpec, ...] = (
         licence_class=LicenceClass.PUBLIC_GOVT,
         licence_note="Curated constant with citation.",
         freshness=FreshnessSLO(FreshnessBasis.RETRIEVAL_CALENDAR_DAYS, fresh_max=180, stale_max=365),
+        status=SourceStatus.REQUIRES_CONFIGURATION,
+        status_ref="curated constant with citation",
         unit="INR",
         currency="INR",
     ),
@@ -324,6 +404,8 @@ _SOURCES: tuple[SourceSpec, ...] = (
         licence_class=LicenceClass.UNKNOWN,
         licence_note="User enters own FD terms; aggregator sites are not used.",
         freshness=_custom("Per deposit"),
+        status=SourceStatus.REQUIRES_CONFIGURATION,
+        status_ref="user enters own FD terms",
         unit="percent_pa",
     ),
     SourceSpec(
@@ -338,6 +420,8 @@ _SOURCES: tuple[SourceSpec, ...] = (
         licence_note="User enters duration, YTM, expense ratio and credit profile from the scheme's own factsheet, "
         "with its URL. Factsheets are never scraped.",
         freshness=FreshnessSLO(FreshnessBasis.OBSERVATION_CALENDAR_DAYS, fresh_max=45, stale_max=45),
+        status=SourceStatus.BLOCKED,
+        status_ref="AMC terms forbid crawling; user-supplied PDF only (audit-automation.md #6)",
     ),
     SourceSpec(
         id="mof.smallsavings",
@@ -350,6 +434,8 @@ _SOURCES: tuple[SourceSpec, ...] = (
         licence_class=LicenceClass.PUBLIC_GOVT,
         licence_note="Curated table with OM citation; scanned PDFs are never auto-parsed.",
         freshness=_custom("Fresh while valid_to >= today; expired once the quarter rolls over"),
+        status=SourceStatus.REQUIRES_CONFIGURATION,
+        status_ref="curated table with OM citation",
         unit="percent_pa",
     ),
     SourceSpec(
@@ -363,6 +449,8 @@ _SOURCES: tuple[SourceSpec, ...] = (
         licence_class=LicenceClass.PUBLIC_GOVT,
         licence_note="Curated, versioned rule set with section citations.",
         freshness=_custom("A rule set must exist for the current tax year"),
+        status=SourceStatus.REQUIRES_CONFIGURATION,
+        status_ref="curated, versioned rule set",
     ),
     SourceSpec(
         id="sebi.regs",
@@ -375,6 +463,8 @@ _SOURCES: tuple[SourceSpec, ...] = (
         licence_class=LicenceClass.PUBLIC_GOVT,
         licence_note="Citations only; documents are not mirrored.",
         freshness=_custom("Ad hoc"),
+        status=SourceStatus.REQUIRES_CONFIGURATION,
+        status_ref="citations only",
     ),
     SourceSpec(
         id="calendar.trading",
@@ -387,6 +477,8 @@ _SOURCES: tuple[SourceSpec, ...] = (
         licence_class=LicenceClass.PUBLIC_GOVT,
         licence_note="Entered by hand from official circulars; NSE JSON is never automated.",
         freshness=_custom("Current calendar year curated"),
+        status=SourceStatus.REQUIRES_CONFIGURATION,
+        status_ref="curated by hand from official circulars",
     ),
 )
 
@@ -438,8 +530,9 @@ def check_url(url: str, allowed_hosts: frozenset[str]) -> str:
 class SourceRequest:
     """A validated request for one registered source. Build it with the typed builders below.
 
-    ``method``/``body``/``bearer_token`` exist only for sources that REQUIRE CONFIGURATION (user credentials, e.g.
-    MoSPI): every other source is a plain anonymous GET. Credentials are never part of ``repr``.
+    ``method``/``body``/``bearer_token`` exist only for sources that REQUIRE CONFIGURATION (user credentials): every
+    other source is a plain anonymous GET. No registered source needs credentials today (MoSPI's filtered queries do
+    not). Credentials are never part of ``repr``. ``if_modified_since`` makes an anonymous GET conditional.
     """
 
     source: SourceSpec
@@ -447,6 +540,7 @@ class SourceRequest:
     method: str = "GET"
     body: bytes | None = field(default=None, repr=False)
     bearer_token: str | None = field(default=None, repr=False)
+    if_modified_since: datetime | None = None
 
     def __post_init__(self) -> None:
         if self.source.mode is not SourceMode.LIVE:
@@ -461,6 +555,11 @@ class SourceRequest:
             not self.bearer_token or any(c.isspace() or ord(c) < 0x21 or ord(c) > 0x7E for c in self.bearer_token)
         ):
             raise FetchRefused("bearer token contains characters that cannot appear in a header")
+        if self.if_modified_since is not None:
+            if authenticated:
+                raise FetchRefused("conditional requests are anonymous GETs only")
+            if not isinstance(self.if_modified_since, datetime) or self.if_modified_since.utcoffset() is None:
+                raise FetchRefused("if_modified_since must be a timezone-aware datetime")
 
     @property
     def authenticated(self) -> bool:
@@ -509,15 +608,16 @@ def navhistory_request(*, mf_id: int, tp: int, from_date: date, to_date: date) -
 
 
 MOSPI_BASE_URL = "https://api.mospi.gov.in"
+MOSPI_SERIES = ("Current", "Back")
 
 
-def mospi_login_request(body: bytes) -> SourceRequest:
-    """POST /api/login with the user's MoSPI credentials (JSON body built by ``iip.data.mospi``)."""
-    return SourceRequest(get_source("mospi.cpi"), f"{MOSPI_BASE_URL}/api/login", method="POST", body=body)
+def mospi_cpi_request(*, base_year: int, year: int, month: int, series: str = "Current") -> SourceRequest:
+    """One All-India / Combined / general-index CPI record for one reference month. Anonymous: no login is needed.
 
-
-def mospi_cpi_request(*, base_year: int, year: int, month: int, bearer_token: str | None) -> SourceRequest:
-    """All-India CPI index records for one reference month (source-registry §2.12 Swagger parameters)."""
+    The filters make the API return exactly one record, well under its unauthenticated 10-record page cap
+    (audit-automation.md §3.1). Base 2024 is served by ``getCPIData`` (All India = state 1, division "CPI (General)"
+    = 0); base 2012 by ``getCPIIndex`` (All India = state 99, group General = 0). Sector 3 = Combined for both.
+    """
     base_year = _strict_int("base_year", base_year)
     year = _strict_int("year", year)
     month = _strict_int("month", month)
@@ -525,8 +625,71 @@ def mospi_cpi_request(*, base_year: int, year: int, month: int, bearer_token: st
         raise ValueError("base_year must be 2012 or 2024")
     if not 2013 <= year <= 2100 or not 1 <= month <= 12:
         raise ValueError("year/month out of range")
-    url = (
-        f"{MOSPI_BASE_URL}/api/cpi/getCPIIndex?base_year={base_year}&series=Current&year={year}"
-        f"&month_code={month}&state_code=99&Format=JSON&limit=100"
+    if series not in MOSPI_SERIES or (series == "Back" and base_year != 2024):
+        raise ValueError("series must be 'Current', or 'Back' for base 2024 only")
+    if base_year == 2024:
+        url = (
+            f"{MOSPI_BASE_URL}/api/cpi/getCPIData?base_year=2024&series={series}&year={year}&month_code={month}"
+            "&state_code=1&sector_code=3&division_code=0&Format=JSON"
+        )
+    else:
+        url = (
+            f"{MOSPI_BASE_URL}/api/cpi/getCPIIndex?base_year=2012&series=Current&year={year}&month_code={month}"
+            "&state_code=99&sector_code=3&group_code=0&Format=JSON"
+        )
+    return SourceRequest(get_source("mospi.cpi"), url)
+
+
+RBI_BASE_URL = f"https://{_RBI_HOST}"
+RBI_PRESS_RELEASE_PATH = "/scripts/BS_PressReleaseDisplay.aspx"
+
+
+def rbi_press_releases_rss_request(*, if_modified_since: datetime | None = None) -> SourceRequest:
+    """RBI's press-release RSS feed (the latest ~10 items). Conditional when ``if_modified_since`` is given."""
+    return SourceRequest(
+        get_source("rbi.rss.pressreleases"),
+        f"{RBI_BASE_URL}/pressreleases_rss.xml",
+        if_modified_since=if_modified_since,
     )
-    return SourceRequest(get_source("mospi.cpi"), url, bearer_token=bearer_token)
+
+
+def rbi_press_release_request(*, prid: int) -> SourceRequest:
+    """One RBI press-release page by its numeric id. Used at most once per new feed item (rbi_tbill adapter)."""
+    prid = _strict_int("prid", prid)
+    if not 1 <= prid <= 99_999_999:
+        raise ValueError("prid must be a positive press-release id")
+    return SourceRequest(get_source("rbi.pr.tbill"), f"{RBI_BASE_URL}{RBI_PRESS_RELEASE_PATH}?prid={prid}")
+
+
+# --- citation display ----------------------------------------------------------------------------------------------
+
+#: Hosts whose pages may not be deep-linked without the owner's permission. RBI disclaimer
+#: (https://www.rbi.org.in/Scripts/Disclaimer.aspx, read 2026-10-15): users must "secure permission from RBI prior to
+#: hyper-linking to, or framing, this Web Site or any of the contents" (audit-automation.md §2.3).
+NO_DEEP_LINK_HOSTS: frozenset[str] = frozenset({"rbi.org.in", "www.rbi.org.in", "m.rbi.org.in", "rbidocs.rbi.org.in"})
+
+
+@dataclass(frozen=True, slots=True)
+class CitationDisplay:
+    """How a citation is shown: ``text`` always; ``href`` only when the cited host may be hyperlinked."""
+
+    text: str
+    href: str | None
+
+
+def citation_link_allowed(url: str) -> bool:
+    """False for any URL on a no-deep-link host (case-insensitive) and for anything that is not http(s)."""
+    try:
+        parts = urlsplit(url.strip())
+    except ValueError:
+        return False
+    host = (parts.hostname or "").rstrip(".").lower()
+    if parts.scheme not in ("http", "https") or not host:
+        return False
+    return host not in NO_DEEP_LINK_HOSTS
+
+
+def citation_display(url: str, label: str | None = None) -> CitationDisplay:
+    """Plain text for RBI (copyable, still traceable); a link otherwise. ``label`` defaults to the URL itself."""
+    text = label if label else url
+    return CitationDisplay(text=text, href=url if citation_link_allowed(url) else None)

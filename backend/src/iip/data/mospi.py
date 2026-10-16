@@ -1,15 +1,19 @@
-"""MoSPI CPI adapter (source ``mospi.cpi``; source-registry.md §2.12). REQUIRES CONFIGURATION.
+"""MoSPI CPI adapter (source ``mospi.cpi``; source-registry.md §2.12; audit-automation.md §3.1). No credentials.
 
-The API needs the user's own MoSPI account. Configuration comes from the environment, never from a request:
+MoSPI's eSankhyiki API answers *filtered* queries without a login: one (base, year, month) query filtered to All
+India, Combined and the general index returns exactly one record, under the unauthenticated 10-record page cap.
 
-* ``IIP_MOSPI_TOKEN`` — a bearer token the user obtained (tokens expire after about 15 minutes), or
-* ``IIP_MOSPI_USER`` + ``IIP_MOSPI_PASSWORD`` — the adapter logs in (``POST /api/login``) for a token.
+* Base 2024 uses ``/api/cpi/getCPIData`` (All India = state 1, division ``"CPI (General)"``); its rows carry
+  ``base_year`` and **no** provisional/final ``status`` field.
+* Base 2012 uses ``/api/cpi/getCPIIndex`` (All India = state 99, group ``"General"``); its rows carry ``baseyear``
+  and ``status`` ``P``/``F``.
 
-Unconfigured, the adapter returns ``REQUIRES_CONFIGURATION`` and makes no request. It never fabricates data: an
-unauthenticated response capped at 10 records, an unrecognised login response, a payload without exactly one
-All-India Combined general-index record, or any schema surprise is refused. Status: IMPLEMENTED, NOT VERIFIED — no
-authenticated call has been made (the login body field names and the general-index labels are taken from the public
-manual/Swagger and could not be confirmed; base-2024 retrieval is unverified, registry §2.12).
+The parser never fabricates: a response that is not ``statusCode: true`` with ``meta_data.totalRecords == 1`` and
+exactly one matching row, or any schema surprise, is refused and nothing is stored. The two bases are separate
+series and are never spliced. A provisional flag is never invented: base-2024 rows have no status, so
+``status_flag`` is ``None`` and ``provisional`` is ``True`` ("not confirmed final by the source"; a later revision
+appends). Status: endpoints and record shapes VERIFIED by probe (audit-automation.md §3.1, re-probed 2026-10-16);
+the adapter's own live run is NOT VERIFIED until the first scheduled fetch.
 """
 
 from __future__ import annotations
@@ -17,63 +21,62 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
 from iip.data.fetch import Fetcher
 from iip.data.models import RawPayload, SchemaChanged
-from iip.data.registry import mospi_cpi_request, mospi_login_request
+from iip.data.registry import mospi_cpi_request
 
-ENV_TOKEN = "IIP_MOSPI_TOKEN"  # noqa: S105 - the NAME of an environment variable, not a secret
-ENV_USER = "IIP_MOSPI_USER"
-ENV_PASSWORD = "IIP_MOSPI_PASSWORD"  # noqa: S105 - the NAME of an environment variable, not a secret
-ADAPTER_ID = "mospi.cpi@0.1.0"
+ADAPTER_ID = "mospi.cpi@0.2.0"
 UNAUTH_RECORD_CAP = 10
-_GENERAL_LABELS = frozenset({"general", "general index", "all groups", "general index (all groups)"})
+#: Environment variables the pre-0.2 adapter read. They are no longer used; ``status`` says so if they are set.
+LEGACY_ENV_VARS = ("IIP_MOSPI_TOKEN", "IIP_MOSPI_USER", "IIP_MOSPI_PASSWORD")
+
+#: The general-index label for each base, compared case-insensitively (probe 2026-10-16).
+GENERAL_LABELS: Mapping[int, frozenset[str]] = {
+    2012: frozenset({"general", "general index", "all groups", "general index (all groups)"}),
+    2024: frozenset({"cpi (general)"}),
+}
+_LABEL_FIELD = {2012: "group", 2024: "division"}
+_MONTHS = (
+    "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november",
+    "december",
+)  # fmt: skip
 
 
 @dataclass(frozen=True)
 class MospiConfig:
-    method: Literal["token", "password"] | None
-    token: str | None = field(default=None, repr=False)
-    user: str | None = field(default=None, repr=False)
-    password: str | None = field(default=None, repr=False)
+    """Kept for API compatibility. The adapter is always anonymous; ``ignored_env`` lists legacy variables set."""
+
+    method: Literal["anonymous"] = "anonymous"
+    ignored_env: tuple[str, ...] = ()
 
 
 def config_from_env(environ: Mapping[str, str] | None = None) -> MospiConfig:
     env = os.environ if environ is None else environ
-    token = env.get(ENV_TOKEN, "").strip()
-    user = env.get(ENV_USER, "").strip()
-    password = env.get(ENV_PASSWORD, "")
-    if token:
-        return MospiConfig("token", token=token)
-    if user and password:
-        return MospiConfig("password", user=user, password=password)
-    return MospiConfig(None)
+    return MospiConfig(ignored_env=tuple(v for v in LEGACY_ENV_VARS if env.get(v, "").strip()))
 
 
 def status(config: MospiConfig) -> dict[str, Any]:
-    """Configuration status for the UI. Never includes a credential."""
-    common = {"source_id": "mospi.cpi", "env_vars": [ENV_TOKEN, ENV_USER, ENV_PASSWORD], "verified": False}
-    if config.method is None:
-        return {
-            **common,
-            "status": "REQUIRES_CONFIGURATION",
-            "method": None,
-            "message": (
-                f"MoSPI's CPI API needs your own account. Set {ENV_TOKEN}, or {ENV_USER} and {ENV_PASSWORD}, in the "
-                "environment that starts the app. Until then, enter CPI values by hand with a citation."
-            ),
-        }
+    """Status for the UI. Never includes a credential value (only the names of ignored variables)."""
+    message = (
+        "MoSPI's CPI API answers filtered single-record queries without a login, so nothing needs configuring. "
+        "The endpoints were checked by probe; check the first fetched values against the MoSPI release."
+    )
+    if config.ignored_env:
+        message += f" Ignored (no longer used): {', '.join(config.ignored_env)}."
     return {
-        **common,
+        "source_id": "mospi.cpi",
+        # "CONFIGURED" keeps the existing UI contract (frontend MospiStatus): ready to fetch, nothing to set up.
         "status": "CONFIGURED",
         "method": config.method,
-        "message": (
-            "Credentials found in the environment. The adapter is NOT VERIFIED against an authenticated call; "
-            "check fetched values against the MoSPI release before relying on them."
-        ),
+        "requires_configuration": False,
+        "env_vars": [],
+        "ignored_env_vars": list(config.ignored_env),
+        "verified": False,
+        "message": message,
     }
 
 
@@ -91,90 +94,89 @@ class CpiRecord:
     month: int
     index: Decimal
     yoy_pct: Decimal | None  # as published (percent)
-    provisional: bool
+    provisional: bool  # True unless the source marks the month final ("F")
     raw: RawPayload
+    status_flag: Literal["P", "F"] | None = None  # as published; None when the source has no status field
+    convention: str = ""
 
 
-def _token_from_login(payload: RawPayload) -> str:
-    try:
-        doc = json.loads(payload.content)
-    except ValueError as exc:
-        raise MospiError("LOGIN_RESPONSE_UNRECOGNISED", "login response is not JSON") from exc
-    candidates: list[Any] = []
-    if isinstance(doc, dict):
-        candidates += [doc.get(k) for k in ("access_token", "accessToken", "token")]
-        data = doc.get("data")
-        if isinstance(data, dict):
-            candidates += [data.get(k) for k in ("access_token", "accessToken", "token")]
-    for c in candidates:
-        if isinstance(c, str) and c.strip():
-            return c.strip()
-    raise MospiError("LOGIN_RESPONSE_UNRECOGNISED", "no access token found in the login response")
-
-
-def _token(config: MospiConfig, fetcher: Fetcher) -> str:
-    if config.method == "token" and config.token:
-        return config.token
-    if config.method == "password" and config.user and config.password:
-        body = json.dumps({"username": config.user, "password": config.password}).encode()
-        return _token_from_login(fetcher.fetch(mospi_login_request(body)))
-    raise MospiError("REQUIRES_CONFIGURATION", "MoSPI credentials are not configured")
-
-
-def _month_name(month: int) -> str:
-    return (
-        "January", "February", "March", "April", "May", "June", "July", "August", "September", "October",
-        "November", "December",
-    )[month - 1]  # fmt: skip
+def _text(value: object) -> str:
+    return "" if value is None else str(value).strip()
 
 
 def parse_cpi_month(payload: RawPayload, *, base_year: int, year: int, month: int) -> CpiRecord:
     """Exactly one All-India / Combined general-index record for the requested month, or refuse."""
+    if base_year not in GENERAL_LABELS:
+        raise ValueError("base_year must be 2012 or 2024")
     try:
         doc = json.loads(payload.content)
     except ValueError as exc:
         raise SchemaChanged("MoSPI CPI response is not JSON") from exc
     if not isinstance(doc, dict) or not isinstance(doc.get("data"), list):
         raise SchemaChanged("MoSPI CPI response has no 'data' list")
+    meta = doc.get("meta_data")
+    total = meta.get("totalRecords") if isinstance(meta, dict) else None
+    if isinstance(total, bool) or not isinstance(total, int):
+        raise SchemaChanged("MoSPI CPI response has no integer meta_data.totalRecords")
     rows = [r for r in doc["data"] if isinstance(r, dict)]
-    if len(rows) == UNAUTH_RECORD_CAP:
+    if len(rows) != len(doc["data"]):
+        raise SchemaChanged("MoSPI CPI 'data' holds a non-object row")
+    if total > len(rows):
         raise MospiError(
-            "UNAUTHENTICATED_CAP",
-            "exactly 10 records returned — the unauthenticated cap; the token was not accepted, so nothing is stored",
+            "TRUNCATED_RESPONSE",
+            f"{len(rows)} of {total} records returned (page cap {UNAUTH_RECORD_CAP}); the query was not filtered "
+            "to one record, so nothing is stored",
         )
-    matches = []
-    for r in rows:
-        label = str(r.get("group") or r.get("division") or "").strip().lower()
-        sub = str(r.get("subgroup") or "").strip().lower()
-        if (
-            str(r.get("state", "")).strip().lower() == "all india"
-            and str(r.get("sector", "")).strip().lower() == "combined"
-            and (label in _GENERAL_LABELS or sub in _GENERAL_LABELS)
-            and str(r.get("baseyear", "")) == str(base_year)
-            and str(r.get("year", "")) == str(year)
-            and str(r.get("month", "")).strip().lower() == _month_name(month).lower()
-        ):
-            matches.append(r)
-    if len(matches) != 1:
+    if doc.get("statusCode") is not True:
+        raise MospiError("SOURCE_ERROR", f"MoSPI answered statusCode={doc.get('statusCode')!r}; nothing stored")
+    if total != 1 or len(rows) != 1:
+        raise MospiError("NO_MATCHING_RECORD", f"expected exactly one record, totalRecords={total}; nothing stored")
+    r = rows[0]
+    published_base = _text(r.get("base_year") if "base_year" in r else r.get("baseyear"))
+    if not (
+        published_base == str(base_year)
+        and _text(r.get("state")).lower() == "all india"
+        and _text(r.get("sector")).lower() == "combined"
+        and _text(r.get(_LABEL_FIELD[base_year])).lower() in GENERAL_LABELS[base_year]
+        and _text(r.get("year")) == str(year)
+        and _text(r.get("month")).lower() == _MONTHS[month - 1]
+        and _text(r.get("series") or "Current").lower() == "current"
+    ):
         raise MospiError(
             "NO_MATCHING_RECORD",
-            f"expected exactly one All-India Combined general-index record, found {len(matches)}; nothing stored",
+            "the record is not the All-India Combined general index for the requested base and month; nothing stored",
         )
-    r = matches[0]
     try:
-        index = Decimal(str(r["index"]))
-        yoy = None if r.get("inflation") in (None, "") else Decimal(str(r["inflation"]))
-    except (KeyError, InvalidOperation) as exc:
+        index = Decimal(_text(r.get("index")))
+        raw_yoy = r.get("inflation")
+        yoy = None if raw_yoy in (None, "") else Decimal(_text(raw_yoy))
+    except InvalidOperation as exc:
         raise SchemaChanged("index/inflation is not a decimal") from exc
     if not index.is_finite() or index <= 0:
-        raise SchemaChanged("index must be positive")
-    status_flag = str(r.get("status", "")).strip().upper()
-    return CpiRecord(str(base_year), year, month, index, yoy, status_flag == "P", payload)
+        raise SchemaChanged("index must be a positive finite number")
+    if yoy is not None and not yoy.is_finite():
+        raise SchemaChanged("inflation must be finite")
+    flag_text = _text(r.get("status")).upper()
+    if "status" in r and flag_text not in ("P", "F"):
+        raise SchemaChanged(f"unrecognised status flag {flag_text!r}")
+    flag: Literal["P", "F"] | None = "P" if flag_text == "P" else "F" if flag_text == "F" else None
+    return CpiRecord(
+        base_year=str(base_year),
+        year=year,
+        month=month,
+        index=index,
+        yoy_pct=yoy,
+        provisional=flag != "F",
+        raw=payload,
+        status_flag=flag,
+        convention=f"CPI_COMBINED_GENERAL_INDEX_BASE{base_year}",
+    )
 
 
-def fetch_cpi_month(config: MospiConfig, fetcher: Fetcher, *, base_year: int, year: int, month: int) -> CpiRecord:
-    if config.method is None:
-        raise MospiError("REQUIRES_CONFIGURATION", "MoSPI credentials are not configured")
-    token = _token(config, fetcher)
-    payload = fetcher.fetch(mospi_cpi_request(base_year=base_year, year=year, month=month, bearer_token=token))
+def fetch_cpi_month(
+    config: MospiConfig | None, fetcher: Fetcher, *, base_year: int, year: int, month: int
+) -> CpiRecord:
+    """Anonymous filtered GET, then ``parse_cpi_month``. ``config`` is accepted for API compatibility only."""
+    del config  # no credentials are ever sent
+    payload = fetcher.fetch(mospi_cpi_request(base_year=base_year, year=year, month=month))
     return parse_cpi_month(payload, base_year=base_year, year=year, month=month)

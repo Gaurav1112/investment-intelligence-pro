@@ -25,6 +25,7 @@ import pytest
 from iip.services import outcomes as oc
 from iip.services import risk_snapshot as rs
 from iip.services import shadow
+from iip.services.backtest_runner import SIGNALS_DIR
 from iip.services.today_view import today_response
 from iip.store import goals_repo, ledger
 from tests.services import _snapshot_fixtures as fx
@@ -249,13 +250,15 @@ def test_not_yet_due_rows_are_counted_but_not_read(conn: Any) -> None:
 
 # ------------------------------------------------------------------------------------------ database-reviewer-08
 
-TREND = """id: S-X
-version: 1
-family: trend_timing
-roles: {in: index_fund.fictional.direct, out: liquid_fund.fictional.direct}
-params: {lookback_months: 3}
-horizon_months: 1
-"""
+# The committed S-E spec (the one schema the shadow evaluator reads), re-keyed to a fictional role and id.
+TREND = (
+    (SIGNALS_DIR / "S-E@1.yaml")
+    .read_text(encoding="utf-8")
+    .replace("id: S-E", "id: S-X", 1)
+    .replace("index_fund.nifty50.direct", "index_fund.fictional.direct")
+    .replace("liquid_fund.direct", "liquid_fund.fictional.direct")
+    .replace("params: {lookback_months: 10}", "params: {lookback_months: 3}", 1)
+)
 
 
 def test_run_shadow_reads_the_existing_keys_once(conn: Any) -> None:

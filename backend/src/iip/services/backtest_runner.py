@@ -62,6 +62,7 @@ __all__ = [
     "load_signal_spec",
     "rerun_manifest",
     "run_backtest",
+    "spec_from_text",
     "verify_bundle",
 ]
 
@@ -265,7 +266,7 @@ class SignalSpec(_Strict):
         )
 
 
-def _spec_from_text(text: str, name: str) -> SignalSpec:
+def spec_from_text(text: str, name: str) -> SignalSpec:
     data = yaml.safe_load(text)
     if not isinstance(data, dict):
         raise SpecError(f"{name}: not a mapping")
@@ -279,10 +280,13 @@ def _spec_from_text(text: str, name: str) -> SignalSpec:
     return spec
 
 
+_spec_from_text = spec_from_text  # the earlier private name (kept for existing callers)
+
+
 def load_signal_spec(path: Path) -> tuple[SignalSpec, str]:
     """(spec, spec text). The text is what is hashed and registered."""
     text = path.read_text(encoding="utf-8")
-    return _spec_from_text(text, path.name), text
+    return spec_from_text(text, path.name), text
 
 
 def load_registered_specs(directory: Path = SIGNALS_DIR) -> dict[str, tuple[SignalSpec, str]]:

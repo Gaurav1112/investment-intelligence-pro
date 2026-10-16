@@ -21,27 +21,30 @@ from iip.engine.money import engine_context
 from iip.services import outcomes as oc
 from iip.services import risk_snapshot as rs
 from iip.services import shadow
+from iip.services.backtest_runner import SIGNALS_DIR
 from iip.store import ledger
 from tests.services import _snapshot_fixtures as fx
 
-TREND = """id: S-X
-version: 1
-family: trend_timing
-roles: {in: index_fund.fictional.direct, out: liquid_fund.fictional.direct}
-params: {lookback_months: 3}
-horizon_months: 1
-"""
-MOMENTUM = """id: S-Y
-version: 1
-family: absolute_momentum
-roles: {in: index_fund.fictional.direct, hurdle: liquid_fund.fictional.direct}
-params: {lookback_months: 3, skip_months: 1}
-horizon_months: 1
-"""
-UNKNOWN = """id: S-Z
-version: 1
-family: dual_momentum
-"""
+
+def _committed(file: str, rule_id: str, params: tuple[str, str] | None = None) -> str:
+    """A committed spec (``rules/signals``, the one schema shadow reads) re-keyed to fictional roles and short
+    lookbacks for synthetic data. Only the id, role names and the rule's params line change."""
+    text = (SIGNALS_DIR / file).read_text(encoding="utf-8")
+    text = text.replace("id: " + file.split("@", maxsplit=1)[0], "id: " + rule_id, 1)
+    if params is not None:
+        text = text.replace(*params, 1)
+    return text.replace("index_fund.nifty50.direct", "index_fund.fictional.direct").replace(
+        "liquid_fund.direct", "liquid_fund.fictional.direct"
+    )
+
+
+TREND = _committed("S-E@1.yaml", "S-X", ("params: {lookback_months: 10}", "params: {lookback_months: 3}"))
+MOMENTUM = _committed(
+    "S-D@1.yaml",
+    "S-Y",
+    ("params: {lookback_months: 12, skip_months: 1}", "params: {lookback_months: 3, skip_months: 1}"),
+)
+UNKNOWN = _committed("S-F@1.yaml", "S-Z")  # dual_momentum: not implemented by the shadow evaluator
 EQ, LIQ = "mf:971001", "mf:971002"
 
 # Fictional rates, chosen for easy arithmetic (not a claim about any real rate).
@@ -93,7 +96,7 @@ def test_every_registered_s_rule_gets_a_daily_row(conn: Any) -> None:
     assert set(rows) == {"S-X", "S-Y", "S-Z"}  # RETIRED is no longer evaluated
     assert rows["S-X"]["state"] == "PRE_REGISTERED" and rows["S-Y"]["state"] == "ABSTAIN"
     z = json.loads(rows["S-Z"]["payload_json"])
-    assert rows["S-Z"]["condition_met"] is None and z["reason"] == "evaluator_not_implemented"
+    assert rows["S-Z"]["condition_met"] is None and z["reason"] == "family_not_implemented"
     assert all(json.loads(r["payload_json"])["shown_as_action"] is False for r in rows.values())
 
     again = shadow.run_shadow(conn, as_of=fx.AS_OF, snapshot_id="a" * 64, now="2026-10-16T09:00:00+00:00")

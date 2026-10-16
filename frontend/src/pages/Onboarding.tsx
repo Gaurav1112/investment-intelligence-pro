@@ -13,11 +13,11 @@ import {
   recoveryText,
   stressBasis,
   rupeesTimesFraction,
+  setupClearList,
   yearsToMonths,
-  type GoalIn,
-  type GoalObjective,
-  type GoalsView,
   type SetupAnswers,
+  type SetupAnswersIn,
+  type SetupGoalIn,
   type SetupState,
   type StressHistory,
 } from "../lib/types-goals";
@@ -474,28 +474,25 @@ function toForm(a: SetupAnswers): Form {
 const optMoney = (t: string) => (t.trim() === "" ? null : money(t));
 const optInt = (t: string) => (t.trim() === "" ? null : Number.parseInt(t, 10));
 
-/** A saved goal's fields that setup does not edit but the server's write REPLACES (services/goals.py _to_goal), keyed by
- * goal_id, read from GET /api/goals. Setup sends them back unchanged so saving setup never erases them. */
-type StoredGoalFields = ReadonlyMap<string, { objective: GoalObjective | null; h_safe_years: string | null }>;
-
-function storedGoalFields(view: GoalsView): StoredGoalFields {
-  return new Map(view.goals.map((g) => [g.goal_id, { objective: g.objective ?? null, h_safe_years: g.h_safe_years ?? null }]));
-}
-
-function toAnswers(f: Form, stored: StoredGoalFields): SetupAnswers {
+/** The PUT body. Goals merge on the server (GOAL-1): only the fields setup edits are sent, so a saved goal's objective
+ * and safe-horizon years are kept. A profile answer sent as null KEEPS its stored value (GOAL-2), so each stored answer
+ * the user emptied is named in `clear` instead; `stored` is the server's last answers. */
+function toAnswers(f: Form, stored: SetupAnswers): SetupAnswersIn {
   const conservative = f.taxChoice === "conservative";
   const slab = conservative ? null : pctToFraction(f.slab);
+  const emergency = {
+    essential_monthly_expenses: optMoney(f.expenses),
+    months: f.monthsChoice === null ? null : f.monthsChoice === "other" ? optInt(f.monthsOther) : Number(f.monthsChoice),
+  };
+  const extras = { ltcg_used_inr: optMoney(f.ltcg), savings_balance: optMoney(f.savings), sweep_fd_balance: optMoney(f.sweep) };
   return {
     tax: {
       use_conservative: conservative,
       regime: f.taxChoice === "new" || f.taxChoice === "old" ? f.taxChoice : null,
       slab_rate: slab === "invalid" ? null : slab,
     },
-    emergency: {
-      essential_monthly_expenses: optMoney(f.expenses),
-      months: f.monthsChoice === null ? null : f.monthsChoice === "other" ? optInt(f.monthsOther) : Number(f.monthsChoice),
-    },
-    goals: f.goals.map<GoalIn>((g, i) => ({
+    emergency,
+    goals: f.goals.map<SetupGoalIn>((g, i) => ({
       goal_id: g.goal_id,
       name: g.name.trim(),
       priority: i + 1,
@@ -503,15 +500,16 @@ function toAnswers(f: Form, stored: StoredGoalFields): SetupAnswers {
       target_date: g.date || null,
       loss_budget_inr: optMoney(g.loss),
       recovery_months: optInt(g.recovery),
-      ...(g.goal_id === null ? {} : stored.get(g.goal_id)),
     })),
-    extras: { ltcg_used_inr: optMoney(f.ltcg), savings_balance: optMoney(f.savings), sweep_fd_balance: optMoney(f.sweep) },
+    extras,
+    clear: setupClearList(stored, { emergency, extras }),
   };
 }
 
-/** Answers the user cleared (sent as null) that the server kept: its setup write merges, so a null leaves a stored
- * value in place. Named after the save instead of being reported as saved. */
-function notCleared(sent: SetupAnswers, got: SetupAnswers): string[] {
+/** Answers the user emptied (sent as null) that the server still holds after the save: the tax answers and the LTCG
+ * figure have no `clear` entry, so a null keeps them; a clearable answer would show here only if the server kept it
+ * anyway. Named after the save instead of being reported as saved. */
+function notCleared(sent: SetupAnswersIn, got: SetupAnswers): string[] {
   const pairs: [string, unknown, unknown][] = [
     ["Income-tax regime", sent.tax.regime, got.tax.regime],
     ["Marginal income-tax slab", sent.tax.slab_rate, got.tax.slab_rate],
@@ -643,9 +641,9 @@ function inrOrNotGiven(v: string) {
 
 function Setup() {
   const state = useApi<SetupState>("/api/goals/setup");
-  // Only for the fields setup must send back unchanged (StoredGoalFields); never shown.
-  const overview = useApi<GoalsView>("/api/goals");
   const [f, setF] = useState<Form>(() => toForm(EMPTY_ANSWERS));
+  // The server's last answers (on load, then after each save): the baseline for the `clear` list.
+  const [stored, setStored] = useState<SetupAnswers>(EMPTY_ANSWERS);
   const [loaded, setLoaded] = useState(false);
   const [step, setStep] = useState(0);
   const [casDone, setCasDone] = useState(false);
@@ -657,11 +655,12 @@ function Setup() {
   const summaryRef = useRef<HTMLDivElement>(null);
   const stepTitle = useRef<HTMLHeadingElement>(null);
   const shownStep = useRef(step);
-  const save = useMutation<SetupAnswers, SetupState>("PUT", "/api/goals/setup");
+  const save = useMutation<SetupAnswersIn, SetupState>("PUT", "/api/goals/setup");
 
   useEffect(() => {
     if (state.data && !loaded) {
       setF(toForm(state.data.answers));
+      setStored(state.data.answers);
       setLoaded(true);
     }
   }, [state.data, loaded]);
@@ -684,8 +683,6 @@ function Setup() {
 
   if (state.loading) return <Loading label="Loading your setup" />;
   if (state.error || !state.data) return <ErrorState error={state.error} retry={state.reload} />;
-  // Without the stored goal fields a save could erase them: abstain from offering it rather than guess.
-  if (overview.error) return <ErrorState error={overview.error} retry={overview.reload} />;
   const history = state.data.stress_history;
 
   const errors = validate(f);
@@ -742,9 +739,8 @@ function Setup() {
       setSummaryKey((k) => k + 1);
       return;
     }
-    if (!overview.data) return; // the Save button is disabled until the stored goal fields are known
     setSummaryKey(0);
-    const sent = toAnswers(f, storedGoalFields(overview.data));
+    const sent = toAnswers(f, stored);
     const out = await save.run(sent);
     if (out) {
       setResult(out);
@@ -752,7 +748,7 @@ function Setup() {
       // Rebuild the form from what the server stored: new goals now carry their server-assigned goal_id, so a second
       // Save updates them instead of creating them again, and a kept answer shows its stored value.
       setF(toForm(out.answers));
-      overview.reload();
+      setStored(out.answers);
     }
   }
 
@@ -1033,8 +1029,8 @@ function Setup() {
             </p>
             {kept.length ? (
               <p>
-                Not cleared: {kept.join("; ")}. A saved answer cannot be cleared here yet, so each keeps its stored value
-                (shown again in its step).
+                Not cleared: {kept.join("; ")}. These saved answers cannot be cleared here, so each keeps its stored
+                value (shown again in its step).
               </p>
             ) : null}
             <p>
@@ -1051,7 +1047,7 @@ function Setup() {
               Next
             </button>
           ) : null}
-          <button type="submit" form="su-form" className="btn btn--primary" disabled={save.pending || !overview.data}>
+          <button type="submit" form="su-form" className="btn btn--primary" disabled={save.pending}>
             {save.pending ? "Saving…" : "Save setup"}
           </button>
         </div>

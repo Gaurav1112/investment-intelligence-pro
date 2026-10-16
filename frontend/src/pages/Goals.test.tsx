@@ -125,10 +125,11 @@ describe("Goals page (C02)", () => {
     await waitFor(() => expect(calls.some((c) => c.method === "PUT")).toBe(true));
     const put = calls.find((c) => c.method === "PUT")!;
     expect(put.url).toBe("/api/goals/g1");
-    // The id travels in the path only: B01's GoalIn rejects unknown fields (extra="forbid").
+    // The id travels in the path only (GoalPatchIn rejects unknown fields). The PUT is a merge (GOAL-1): only the fields
+    // this editor shows are sent; priority, objective and safe-horizon years are not, so the server keeps them.
     expect(put.body).toEqual({
-      name: "Long-term growth", priority: 1, target_amount: "1000000", target_date: "2036-03-31",
-      loss_budget_inr: "300000", recovery_months: 60, objective: null, h_safe_years: null,
+      name: "Long-term growth", target_amount: "1000000", target_date: "2036-03-31",
+      loss_budget_inr: "300000", recovery_months: 60,
     });
   });
 
@@ -184,7 +185,7 @@ describe("Goals page (C02)", () => {
     expect(await screen.findByRole("link", { name: "Run setup" })).toHaveAttribute("href", "/onboarding");
   });
 
-  it("editing a goal sends back its stored objective and safe-horizon years, so a rename does not erase them (typescript-reviewer-2)", async () => {
+  it("editing a goal never sends objective, safe-horizon years or priority: the merge keeps them (FE-1, GOAL-1)", async () => {
     const withExtras = { ...GOALS, goals: [{ ...GOALS.goals[0]!, objective: "D_growth", h_safe_years: "3" }, GOALS.goals[1]!] };
     const calls = stub(withExtras);
     renderAt();
@@ -196,22 +197,36 @@ describe("Goals page (C02)", () => {
     await userEvent.click(within(card).getByRole("button", { name: "Save goal" }));
     await waitFor(() => expect(calls.some((c) => c.method === "PUT")).toBe(true));
     expect(calls.find((c) => c.method === "PUT")!.body).toEqual({
-      name: "Retirement", priority: 1, target_amount: "1000000", target_date: "2036-03-31", objective: "D_growth",
-      loss_budget_inr: "250000", recovery_months: 60, h_safe_years: "3",
+      name: "Retirement", target_amount: "1000000", target_date: "2036-03-31", loss_budget_inr: "250000", recovery_months: 60,
     });
+  });
+
+  it("emptying a field sends an explicit null, which clears it (FE-1, GOAL-1)", async () => {
+    const calls = stub();
+    renderAt();
+    const card = await screen.findByRole("region", { name: "Long-term growth" });
+    await userEvent.click(within(card).getByRole("button", { name: "Edit" }));
+    await userEvent.clear(within(card).getByLabelText(/Largest fall in ₹/));
+    await userEvent.clear(within(card).getByLabelText(/Longest you would wait/));
+    await userEvent.click(within(card).getByRole("button", { name: "Save goal" }));
+    await waitFor(() => expect(calls.some((c) => c.method === "PUT")).toBe(true));
+    expect(calls.find((c) => c.method === "PUT")!.body).toMatchObject({ loss_budget_inr: null, recovery_months: null });
   });
 });
 
-describe("Goals editor never erases fields it was not given (verifier round close)", () => {
-  it("a goal view missing objective or h_safe_years is not saved: nothing is sent and the page says why", async () => {
+describe("Goals editor saves through the merge (FE-1; replaces the earlier save-refusal guard)", () => {
+  it("a goal view without objective or h_safe_years still saves, and the body does not carry them", async () => {
     const { objective: _o, h_safe_years: _h, ...partial } = GOALS.goals[0]!;
     const calls = stub({ ...GOALS, goals: [partial, GOALS.goals[1]!] });
     renderAt();
     const card = await screen.findByRole("region", { name: "Long-term growth" });
     await userEvent.click(within(card).getByRole("button", { name: "Edit" }));
     await userEvent.click(within(card).getByRole("button", { name: "Save goal" }));
-    expect(await within(card).findByText(/Not saved: this goal was loaded without/)).toBeInTheDocument();
-    expect(calls.some((c) => c.method === "PUT")).toBe(false);
+    await waitFor(() => expect(calls.some((c) => c.method === "PUT")).toBe(true));
+    const body = calls.find((c) => c.method === "PUT")!.body as Record<string, unknown>;
+    expect(body).not.toHaveProperty("objective");
+    expect(body).not.toHaveProperty("h_safe_years");
+    expect(within(card).queryByText(/Not saved/)).not.toBeInTheDocument();
   });
 });
 

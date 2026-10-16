@@ -28,7 +28,7 @@ export async function login(token: string): Promise<void> {
     body: JSON.stringify({ token }),
     credentials: "same-origin",
   });
-  if (!res.ok) throw new ApiError(res.status, (await safeJson(res))?.code ?? "LOGIN_FAILED");
+  if (!res.ok) throw new ApiError(res.status, errorCode(await safeJson(res), "LOGIN_FAILED"));
   csrf = ((await res.json()) as { csrf: string }).csrf;
   clearApiCache(); // a new session never sees data cached under the previous one
 }
@@ -42,12 +42,27 @@ export async function restoreSession(): Promise<boolean> {
   return true;
 }
 
-async function safeJson(res: Response): Promise<{ code?: string } | null> {
+async function safeJson(res: Response): Promise<unknown> {
   try {
-    return (await res.json()) as { code?: string };
+    return (await res.json()) as unknown;
   } catch {
     return null;
   }
+}
+
+function stringCode(v: unknown): string | null {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return null;
+  const code = (v as { code?: unknown }).code;
+  return typeof code === "string" && code !== "" ? code : null;
+}
+
+/** The server's error code: a top-level `{code}` or FastAPI's `{detail: {code, message}}` (HTTPException with a dict,
+ * as routes_today / routes_signals / routes_settings raise). Anything else (a validation list, HTML) → `fallback`. */
+export function errorCode(body: unknown, fallback: string): string {
+  const top = stringCode(body);
+  if (top !== null) return top;
+  if (typeof body === "object" && body !== null) return stringCode((body as { detail?: unknown }).detail) ?? fallback;
+  return fallback;
 }
 
 export async function api<T>(path: string, init: { method?: string; body?: unknown; signal?: AbortSignal } = {}): Promise<T> {
@@ -71,7 +86,7 @@ export async function api<T>(path: string, init: { method?: string; body?: unkno
       clearApiCache();
       window.dispatchEvent(new Event(UNAUTHORIZED_EVENT)); // session gone → lock the app; never show stale data
     }
-    throw new ApiError(res.status, body?.code ?? "REQUEST_FAILED", body);
+    throw new ApiError(res.status, errorCode(body, "REQUEST_FAILED"), body);
   }
   const out = (await res.json()) as T;
   if (method !== "GET") clearApiCache(); // any write may change any cached read: drop them all (simple and safe)
@@ -91,7 +106,7 @@ export async function apiUpload<T>(path: string, form: FormData, init: { signal?
       clearApiCache();
       window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
     }
-    throw new ApiError(res.status, body?.code ?? "REQUEST_FAILED", body);
+    throw new ApiError(res.status, errorCode(body, "REQUEST_FAILED"), body);
   }
   const out = (await res.json()) as T;
   clearApiCache();

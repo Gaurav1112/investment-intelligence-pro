@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import type { InstrumentDetailResponse, InstrumentList, InstrumentListItem } from "../lib/types";
-import FixedIncome, { navLabel, ratePct } from "./FixedIncome";
+import FixedIncome, { hasListFacts, navLabel, ratePct, type FiListItem } from "./FixedIncome";
 
 type Call = { url: string; method: string; body: unknown };
 const json = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { "Content-Type": "application/json" } });
@@ -268,5 +268,66 @@ describe("FixedIncome — fixed deposits and bonds", () => {
     await userEvent.click(await screen.findByRole("tab", { name: "G-secs & bonds" }));
     expect(await screen.findByText(/No G-secs, SDLs or corporate bonds stored yet/)).toBeInTheDocument();
     expect(screen.queryByText(/not yet supported/)).not.toBeInTheDocument();
+  });
+});
+
+// ------------------------------------------------------------------ one request per table (A06)
+
+describe("FixedIncome — one request per table (A06)", () => {
+  const TB_FACTS: FiListItem = {
+    ...TB_MANUAL,
+    maturity_date: "2027-04-15",
+    latest: { observation_date: "2026-10-14", value: "0.0654", source_url: "https://synthetic.example.invalid/tbill" },
+  };
+  const TB_EMPTY: FiListItem = { ...TB_FIXTURE, maturity_date: null, latest: null };
+  const FD_FACTS: FiListItem = { ...FD_MANUAL, deposit_terms: FD_DETAIL.deposit_terms! };
+
+  function listOnly(url: string, method: string): Response {
+    if (method !== "GET") return json({ instrument_id: "x" });
+    if (url === "/api/instruments?kind=tbill") return json({ items: [TB_FACTS, TB_EMPTY], truncated: false });
+    if (url === "/api/instruments?kind=fd") return json({ items: [FD_FACTS], truncated: false });
+    return json({ detail: "per-row request: must not happen" }, 500);
+  }
+
+  it("the T-bill table renders every row from the list response alone: exactly 1 GET", async () => {
+    const calls = stubFetch(listOnly);
+    renderPage();
+    const row = (await screen.findByRole("link", { name: TB_MANUAL.name })).closest("tr")!;
+    expect(within(row).getByText("6.54 %")).toBeInTheDocument();
+    expect(within(row).getByText("15-Apr-2027")).toBeInTheDocument();
+    expect(within(row).getByText("1 day old")).toBeInTheDocument();
+    expect(within(row).getByRole("link", { name: "synthetic.example.invalid" })).toBeInTheDocument();
+    const empty = screen.getByRole("link", { name: TB_FIXTURE.name }).closest("tr")!;
+    expect(within(empty).getByText("no yield stored")).toBeInTheDocument();
+    expect(calls.filter((c) => c.method === "GET").map((c) => c.url)).toEqual(["/api/instruments?kind=tbill"]);
+  });
+
+  it("the FD table renders every row from the list response alone: exactly 1 GET", async () => {
+    const calls = stubFetch(listOnly);
+    renderPage();
+    await userEvent.click(screen.getByRole("tab", { name: "Fixed deposits" }));
+    const row = (await screen.findByRole("link", { name: FD_MANUAL.name })).closest("tr")!;
+    expect(within(row).getByText("7.25 %")).toBeInTheDocument();
+    expect(within(row).getByText("365 days")).toBeInTheDocument();
+    const instrumentGets = calls.filter((c) => c.method === "GET" && c.url.startsWith("/api/instruments"));
+    expect(instrumentGets.map((c) => c.url)).toEqual(["/api/instruments?kind=tbill", "/api/instruments?kind=fd"]);
+  });
+
+  it("an FD whose list entry says no terms are stored shows that, without a per-row request", async () => {
+    const calls = stubFetch((url, method) =>
+      url === "/api/instruments?kind=fd" ? json({ items: [{ ...FD_MANUAL, deposit_terms: null }], truncated: false }) : listOnly(url, method),
+    );
+    renderPage();
+    await userEvent.click(screen.getByRole("tab", { name: "Fixed deposits" }));
+    const row = (await screen.findByRole("link", { name: FD_MANUAL.name })).closest("tr")!;
+    expect(within(row).getByText("No deposit terms stored.")).toBeInTheDocument();
+    expect(calls.some((c) => /^\/api\/instruments\/[^?]+$/.test(c.url))).toBe(false);
+  });
+
+  it("hasListFacts: absent fields mean an older backend (fallback), null means looked and found nothing", () => {
+    expect(hasListFacts(TB_MANUAL)).toBe(false);
+    expect(hasListFacts(TB_EMPTY)).toBe(true);
+    expect(hasListFacts(FD_MANUAL)).toBe(false);
+    expect(hasListFacts({ ...FD_MANUAL, deposit_terms: null })).toBe(true);
   });
 });

@@ -9,7 +9,7 @@ import type {
   PortfolioSummary,
   TransactionList,
 } from "../lib/types";
-import Overview, { toExplained, unitsLabel } from "./Overview";
+import Overview, { START_HERE_PATHS, toExplained, unitsLabel } from "./Overview";
 
 // Shapes follow backend/src/iip/services/portfolio.py (portfolio_summary, preview_holdings_import, apply_holdings_import)
 // and the synthetic TEST instruments in backend/tests/services/test_portfolio.py.
@@ -456,10 +456,44 @@ describe("Overview — CAS import placement", () => {
     renderPage();
     await screen.findByText("ACTUAL holdings");
     expect(screen.getByRole("heading", { name: "Import holdings from a file" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Import CAS statement (PDF)" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Import CAS statement (PDF)" })).toBeInTheDocument(); // lazy-loaded panel
     await userEvent.upload(screen.getByLabelText("CAS statement (.pdf)"), new File(["%PDF-1.4"], "cas.pdf", { type: "application/pdf" }));
     await userEvent.click(screen.getByRole("button", { name: "Preview CAS import" }));
     expect(await screen.findByText(/The statement was refused; nothing was stored/)).toBeInTheDocument();
     expect((calls.find((c) => c.url === "/api/holdings/import-cas")!.body as FormData).get("portfolio_id")).toBe("pf_a1");
+  });
+});
+
+// ------------------------------------------------------------------ landing requests (A06)
+
+describe("Overview — parallel landing requests (A06)", () => {
+  it("starts the Start-here GETs together with the portfolio list, not after it, and sends each once", async () => {
+    let releasePortfolios: (() => void) | null = null;
+    const calls: { url: string; method: string }[] = [];
+    const answer = routes();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string, init?: RequestInit) => {
+        const method = init?.method ?? "GET";
+        calls.push({ url, method });
+        if (url === "/api/portfolios" && method === "GET")
+          return new Promise<Response>((resolve) => {
+            releasePortfolios = () => resolve(answer(url, method));
+          });
+        // Still in flight when Start here mounts: it must join this request, not send another.
+        if (url === "/api/data-health") return new Promise<Response>(() => undefined);
+        if (url.startsWith("/api/instruments?kind=")) return Promise.resolve(json({ items: [], truncated: false }));
+        return Promise.resolve(answer(url, method));
+      }),
+    );
+    renderPage();
+    // While /api/portfolios is still in flight, the Start-here requests are already out.
+    await waitFor(() => expect(calls.map((c) => c.url)).toEqual(expect.arrayContaining([...START_HERE_PATHS])));
+    expect(releasePortfolios).not.toBeNull();
+    releasePortfolios!();
+    await screen.findByText("ACTUAL holdings");
+    // StartHere mounted after the list and reused the in-flight / cached responses: one request per path.
+    for (const p of START_HERE_PATHS) expect(calls.filter((c) => c.url === p)).toHaveLength(1);
+    expect(calls.filter((c) => c.url === "/api/portfolios")).toHaveLength(1);
   });
 });

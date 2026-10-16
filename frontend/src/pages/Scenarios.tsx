@@ -31,7 +31,7 @@ import {
   useExplain,
   type OnExplain,
   type Picked,
-} from "./Compare";
+} from "../components/analysisCommon";
 
 type Tab = "lab" | "feasibility";
 

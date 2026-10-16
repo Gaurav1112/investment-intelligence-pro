@@ -20,6 +20,17 @@ Privacy (threat-model C-07, C-13, SEC-62):
 * The uploaded filename is not stored either (CAS filenames can carry identifiers); the ledger label is fixed.
 * ``casparser`` free-text ``parse_warnings`` can quote statement text, so only their COUNT is kept.
 
+CAS gaps handled here (PLAN.md row B06):
+
+* **Regular-plan, IDCW and reinvestment ISINs are accepted.** A held scheme outside the minimised NAV scope is looked
+  up by its exact ISIN in AMFI's current file (``resolve_isins``) and registered; held schemes are in scope (U-01).
+* **Exit loads charged are recorded as observed facts.** For a redemption or switch-out row the implied deduction is
+  ``units x price - amount`` (minus a same-day STT row, if any). It is shown and stored with the batch as NOT VERIFIED:
+  that the printed price is the NAV before load is an assumption no real statement has confirmed here.
+* **A new CAS confirms or contradicts "I did this" entries** (``decisions_log.cas_confirmed``, set once): a matching
+  transaction near the decision date confirms it; its absence contradicts it only when the statement covers the whole
+  window; otherwise nothing is written.
+
 Identification is by **exact ISIN** against the local ``instruments`` table (populated by AMFI ingestion). The
 ``isin_search`` hook casparser calls during parsing (casparser-isin: fuzzy scheme-name matching, scores ≥ 60) is
 replaced for the duration of the parse by a function that returns only the ISIN printed on the statement, so no
@@ -34,22 +45,24 @@ import json
 import logging
 import sqlite3
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import date, datetime
-from decimal import Decimal, InvalidOperation
-from typing import Any
+from datetime import date, datetime, timedelta
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from iip.data.imports import ImportRejected
 from iip.data.validators import validate_isin
+from iip.engine.actions.contracts import Step, Verb
 from iip.engine.determinism import canonical_json, sha256_hex
 from iip.engine.money import ZERO, engine_context
 from iip.services import portfolio as pf
 from iip.services.ingestion import IsinLookupFailed
 from iip.store.db import write_tx
+from iip.store.ledger import confirm_decisions_from_cas
 
 log = logging.getLogger("iip.cas")
 
@@ -389,6 +402,7 @@ def preview_cas_import(
 
     mapping = _map_statement(conn, statement, today, lookup_failed)
     will_store, rejected, ignored = mapping.will_store, mapping.rejected, mapping.ignored
+    exit_loads = mapping.exit_loads
     reconciliation = mapping.reconciliation
     blocking = _oversell_check(conn, portfolio_id, mapping.candidates)
     warnings = _warnings(conn, portfolio_id, statement, mapping)
@@ -418,6 +432,10 @@ def preview_cas_import(
             {k: item[k] for k in ("instrument_id", "txn_date", "txn_type", "units", "amount", "nav")}
             for item in will_store
         ],
+        # Kept after apply: the statement's coverage and its unit movements, to check "I did this" entries later.
+        "statement_period": {"from": statement.period_from, "to": statement.period_to},
+        "seen_moves": _seen_moves(will_store),
+        "observed_exit_loads": exit_loads,
     }
     with write_tx(conn):
         conn.execute(
@@ -442,6 +460,7 @@ def preview_cas_import(
         "ignored": ignored,
         "reconciliation": reconciliation,
         "reconciliation_ok": not mismatches,
+        "observed_exit_loads": exit_loads,
         "blocking": blocking,
         "warnings": warnings,
         "already_applied": already,
@@ -461,6 +480,7 @@ class _Mapping:
     schemes: list[dict[str, Any]] = field(default_factory=list)
     reconciliation: list[dict[str, Any]] = field(default_factory=list)
     candidates: dict[str, list[pf.Txn]] = field(default_factory=dict)
+    exit_loads: list[dict[str, Any]] = field(default_factory=list)
 
 
 _SWITCH_TYPES = frozenset({"SWITCH_IN", "SWITCH_IN_MERGER", "SWITCH_OUT", "SWITCH_OUT_MERGER"})
@@ -478,10 +498,15 @@ def _map_statement(
                 why = "ISIN_LOOKUP_FAILED"  # unknown because AMFI could not be reached, not because it is absent
             net_units = ZERO
             moved_rows_not_stored = 0
+            stt = _stt_by_date(s)
             for t in s.txns:
                 row += 1
                 m = map_txn(t, today)
                 base = {"row": row, "scheme": s.block, "cas_type": t.cas_type, "txn_date": _iso(t.txn_date)}
+                if iid is not None and m.action == "store" and m.txn_type == "sell":
+                    seen = observe_exit_load(t, stt.get(t.txn_date) if t.txn_date else None)
+                    if seen is not None:
+                        out.exit_loads.append({**base, "instrument_id": iid, **seen})
                 if m.action == "ignore":
                     out.ignored.append({**base, "reason": m.reason})
                     continue
@@ -510,6 +535,179 @@ def _map_statement(
             )  # fmt: skip
             out.reconciliation.append(_reconcile(s, iid, net_units, moved_rows_not_stored))
     return out
+
+
+# ----------------------------------------------------------------------------- observed exit loads (CAS gap)
+
+EXIT_LOAD_FORMULA = "cas_exit_load_implied@1"
+EXIT_LOAD_TOLERANCE = Decimal("0.01")  # PARAMETER: the printed amount is rounded to paise
+PAISE = Decimal("0.01")
+RATE_DP = Decimal("0.000001")
+
+
+def _stt_by_date(s: CasScheme) -> dict[date, Decimal]:
+    out: dict[date, Decimal] = {}
+    for t in s.txns:
+        if t.cas_type == "STT_TAX" and t.txn_date is not None and t.amount is not None:
+            out[t.txn_date] = out.get(t.txn_date, ZERO) + abs(t.amount)
+    return out
+
+
+def observe_exit_load(t: CasTxn, stt_same_day: Decimal | None) -> dict[str, Any] | None:
+    """The exit load a redemption/switch-out row implies, as an OBSERVED fact (never an assumed one).
+
+    ``deduction = |units| x price - |amount|``; minus a same-day STT row when the statement has one. Within the paise
+    tolerance -> NO_LOAD_OBSERVED; a positive remainder -> LOAD_OBSERVED with its rate on the gross; an amount above
+    units x price -> INCONSISTENT (nothing is inferred). ``None`` when units, price or amount is missing. Always NOT
+    VERIFIED, flagged PRICE_ASSUMED_NAV_BEFORE_LOAD (and STT_SEPARATION_NOT_VERIFIED when an STT row was used)."""
+    if t.units is None or t.nav is None or t.amount is None or t.nav <= 0 or t.units == 0:
+        return None
+    with engine_context():
+        gross = abs(t.units) * t.nav
+        deduction = gross - abs(t.amount)
+        stt = stt_same_day or ZERO
+        load = deduction - stt
+        flags = ["PRICE_ASSUMED_NAV_BEFORE_LOAD"] + (["STT_SEPARATION_NOT_VERIFIED"] if stt_same_day else [])
+        if deduction < -EXIT_LOAD_TOLERANCE or load < -EXIT_LOAD_TOLERANCE:
+            observation, load_inr, rate = "INCONSISTENT", None, None
+        elif load <= EXIT_LOAD_TOLERANCE:
+            observation, load_inr, rate = "NO_LOAD_OBSERVED", ZERO, ZERO
+        else:
+            observation = "LOAD_OBSERVED"
+            load_inr = load.quantize(PAISE, rounding=ROUND_HALF_UP)
+            rate = (load / gross).quantize(RATE_DP, rounding=ROUND_HALF_UP)
+    return {
+        "units": _s(abs(t.units)), "price": _s(t.nav), "amount": _s(abs(t.amount)),
+        "gross": _s(gross.quantize(PAISE, rounding=ROUND_HALF_UP)), "stt_same_day": _s(stt_same_day),
+        "observation": observation, "exit_load_inr": _s(load_inr), "implied_rate": _s(rate),
+        "formula_id": EXIT_LOAD_FORMULA, "status": "NOT VERIFIED", "flags": flags,
+    }  # fmt: skip
+
+
+def observed_exit_loads(conn: sqlite3.Connection, instrument_id: str | None = None) -> list[dict[str, Any]]:
+    """Exit loads observed in APPLIED CAS imports (one statement), newest statement first."""
+    out: list[dict[str, Any]] = []
+    rows = conn.execute("SELECT key, value_json FROM settings WHERE key LIKE ?", (pf.IMPORT_KEY + "%",)).fetchall()
+    for r in rows:
+        rec = json.loads(r["value_json"])
+        if rec.get("kind") != BATCH_KIND or rec.get("status") != "applied":
+            continue
+        for item in rec.get("observed_exit_loads") or []:
+            if instrument_id is None or item["instrument_id"] == instrument_id:
+                out.append({**item, "batch_id": r["key"].removeprefix(pf.IMPORT_KEY),
+                            "applied_at": rec.get("applied_at")})  # fmt: skip
+    return sorted(out, key=lambda x: (str(x["applied_at"]), str(x["txn_date"])), reverse=True)
+
+
+# ----------------------------------------------------------------------------- "I did this" vs the next CAS
+
+CONFIRM_WINDOW_DAYS = 10  # PARAMETER (design-user-first.md §11): absent 10 days after the click -> contradicted
+CONFIRM_LOOKBACK_DAYS = 7  # PARAMETER: a transaction up to 7 days before the click still counts (allotment lag)
+
+
+@dataclass(frozen=True)
+class ExpectedMove:
+    instrument_id: str
+    direction: Literal["in", "out"]
+
+
+@dataclass(frozen=True)
+class DecisionCheck:
+    decision_id: int
+    decided_on: date
+    moves: tuple[ExpectedMove, ...]
+
+
+def moves_from_steps(steps: Sequence[Step]) -> tuple[ExpectedMove, ...]:
+    """The unit movements a card's steps imply: INVEST -> in, REDEEM and SWITCH -> out of the step's scheme.
+    REDIRECT_SIP, WAIT_UNTIL, REVIEW and an INVEST without a scheme cannot be seen in one statement (empty)."""
+    out: list[ExpectedMove] = []
+    for st in steps:
+        if st.instrument_id is None:
+            continue
+        if st.verb is Verb.INVEST:
+            out.append(ExpectedMove(st.instrument_id, "in"))
+        elif st.verb in (Verb.REDEEM, Verb.SWITCH):
+            out.append(ExpectedMove(st.instrument_id, "out"))
+    return tuple(dict.fromkeys(out))
+
+
+def _seen_moves(will_store: Sequence[dict[str, Any]]) -> list[list[str]]:
+    """[instrument_id, date, in|out] per stored unit movement. IDCW reinvestment is not a decision: left out."""
+    out = []
+    for item in will_store:
+        if item["txn_type"] not in ("buy", "sell") or "IDCW_REINVESTED_AS_BUY" in item.get("flags", []):
+            continue
+        out.append([item["instrument_id"], item["txn_date"], "in" if item["txn_type"] == "buy" else "out"])
+    return out
+
+
+def _period_date(text: str | None) -> date | None:
+    for fmt in ("%d-%b-%Y", "%Y-%m-%d", "%d-%B-%Y", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(str(text or "").strip(), fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def judge_decisions(
+    checks: Sequence[DecisionCheck], seen: Sequence[Sequence[str]], period_from: date | None, period_to: date | None
+) -> dict[int, str]:
+    """CONFIRMED when every expected movement appears within [decided - lookback, decided + window]; CONTRADICTED when
+    one does not and the statement covers that whole window; UNDETERMINED otherwise (no movement to look for, or a
+    statement that does not cover the window). Pure."""
+    moves = {(str(i), date.fromisoformat(str(d)), str(direction)) for i, d, direction in seen}
+    out: dict[int, str] = {}
+    for c in checks:
+        lo = c.decided_on - timedelta(days=CONFIRM_LOOKBACK_DAYS)
+        hi = c.decided_on + timedelta(days=CONFIRM_WINDOW_DAYS)
+        if not c.moves:
+            out[c.decision_id] = "UNDETERMINED"
+            continue
+        found = [any(i == m.instrument_id and dr == m.direction and lo <= d <= hi for i, d, dr in moves)
+                 for m in c.moves]  # fmt: skip
+        covered = period_from is not None and period_to is not None and period_from <= lo and period_to >= hi
+        out[c.decision_id] = "CONFIRMED" if all(found) else ("CONTRADICTED" if covered else "UNDETERMINED")
+    return out
+
+
+def _apply_decision_checks(
+    conn: sqlite3.Connection, batch_id: str, rec: dict[str, Any], checks: Sequence[DecisionCheck], now: datetime
+) -> dict[str, Any]:
+    period = rec.get("statement_period") or {}
+    verdicts = judge_decisions(checks, rec.get("seen_moves") or [], _period_date(period.get("from")),
+                               _period_date(period.get("to")))  # fmt: skip
+    results = [(d, v == "CONFIRMED") for d, v in sorted(verdicts.items()) if v != "UNDETERMINED"]
+    written = confirm_decisions_from_cas(conn, results, now.isoformat(), batch_id) if results else 0
+    return {
+        "confirmed": sorted(d for d, v in verdicts.items() if v == "CONFIRMED"),
+        "contradicted": sorted(d for d, v in verdicts.items() if v == "CONTRADICTED"),
+        "undetermined": sorted(d for d, v in verdicts.items() if v == "UNDETERMINED"),
+        "written": written,
+    }
+
+
+def pending_done_decisions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """'done' decisions no CAS has checked yet (one statement): the input B02 maps to :class:`DecisionCheck`."""
+    return conn.execute(
+        "SELECT decision_id, card_id, snapshot_id, goal_id, decided_at FROM decisions_log"
+        " WHERE decision = 'done' AND cas_confirmed IS NULL ORDER BY decision_id"
+    ).fetchall()
+
+
+def confirm_decisions_with_cas(
+    conn: sqlite3.Connection, batch_id: str, checks: Sequence[DecisionCheck], now: datetime
+) -> dict[str, Any]:
+    """Check "I did this" entries against an APPLIED CAS batch and record the verdicts once (one transaction)."""
+    row = conn.execute("SELECT value_json FROM settings WHERE key=?", (pf.IMPORT_KEY + batch_id,)).fetchone()
+    if row is None:
+        raise pf.PortfolioError("NOT_FOUND", "import batch not found", 404)
+    rec: dict[str, Any] = json.loads(row["value_json"])
+    if rec.get("kind") != BATCH_KIND or rec.get("status") != "applied":
+        raise pf.PortfolioError("NOT_APPLIED", "only an applied CAS import can confirm decisions", 409)
+    with write_tx(conn):
+        return _apply_decision_checks(conn, batch_id, rec, checks, now)
 
 
 def _warnings(conn: sqlite3.Connection, portfolio_id: str, statement: CasStatement, mapping: _Mapping) -> list[str]:
@@ -579,9 +777,11 @@ def apply_cas_import(
     now: datetime,
     *,
     pre_change: Callable[[], object] | None = None,
+    decisions: Sequence[DecisionCheck] | None = None,
 ) -> dict[str, Any]:
     """Apply a confirmed CAS preview in ONE transaction; ``pre_change`` (the backup) runs after every check and
-    before any write. An oversell anywhere in the resulting book rolls everything back."""
+    before any write. An oversell anywhere in the resulting book rolls everything back. ``decisions`` ("I did this"
+    entries not yet checked) are confirmed or contradicted by this statement in the same transaction."""
     key = pf.IMPORT_KEY + batch_id
     row = conn.execute("SELECT value_json FROM settings WHERE key=?", (key,)).fetchone()
     if row is None:
@@ -624,6 +824,7 @@ def apply_cas_import(
         rec.update(status="applied", applied_at=now.isoformat(), pending=None)
         conn.execute("UPDATE settings SET value_json=? WHERE key=?", (canonical_json(rec), key))
         pf._audit(conn, now, "import.apply", pid, f"batch={batch_id} kind={BATCH_KIND} rows={len(pending)}")
+        checked = _apply_decision_checks(conn, batch_id, rec, decisions, now) if decisions else None
     # Reaching this line means COMMIT succeeded; only now is the import reported as applied.
     log.info("cas import applied batch=%s rows=%d", batch_id, len(pending))
     return {
@@ -635,5 +836,7 @@ def apply_cas_import(
         "rows_rejected": rec["rows_rejected"],
         "rows_ignored": rec.get("rows_ignored", 0),
         "reconciliation_mismatches_accepted": rec["reconciliation_mismatches"],
+        "observed_exit_loads": len(rec.get("observed_exit_loads") or []),
+        "decisions": checked,
         "applied_at": now.isoformat(),
     }

@@ -1,0 +1,123 @@
+# Core universe U1: ROLES ONLY (PLAN.md row B06; decision U-07; design-evidence-first.md §2 "U1").
+#
+# What this file is: the list of broad exposures the app tracks automatically, one Direct-plan Growth-option scheme
+# per role. It never names a scheme, an AMFI code or an ISIN (the repo is public; research-regulation.md §8.1.7).
+# The binding role -> scheme is USER CONFIGURATION stored in the local database (table rule_role_bindings):
+#
+#   1. iip.services.ingestion.propose_core_universe ranks the stored schemes that match each role by a deterministic
+#      rule: longest stored NAV history, then lowest stored expense ratio, then lowest AMFI code (a stable tie-break,
+#      not a quality signal). The proposal stores nothing.
+#   2. The user confirms (iip.services.ingestion.confirm_core_universe). Nothing is tracked until then (U-07 default).
+#   3. Tracking is LOCAL-FIRST (U-01): confirmation and the automatic history gap fill refuse to run hosted, where
+#      only held and watched schemes are stored (AMFI terms: personal use, no "significant portion" stored).
+#
+# Matching: the scheme name and AMFI category are case-folded; every character other than a-z, 0-9 and "&" becomes a
+# space; the patterns are Python regular expressions SEARCHED in that text. A candidate must match one of
+# `category_any`, every pattern in `name_all` and none in `name_none`. A role with no candidate stays unbound
+# (NO_CANDIDATE): nothing is guessed.
+#
+# Status: NOT VERIFIED. The role list follows design-evidence-first.md §2 (U1 families); the name patterns are
+# matching aids checked only against SYNTHETIC names in backend/tests/services/test_core_universe.py, and the user
+# reviews every proposed binding before it is used.
+
+schema_version: 1
+universe_id: U1
+status: NOT VERIFIED
+source: docs/research/wave1/design-evidence-first.md §2 (U1); docs/research/wave1/PLAN.md §3 U-07 and §8 U-01
+max_schemes: 30            # PARAMETER (U-07 default: at most 30 schemes)
+history_floor: "2013-01-01" # PARAMETER: Direct plans exist from 1-Jan-2013 (amfi_navhistory.DIRECT_PLANS_START)
+selection_rule: longest_stored_history>lowest_expense_ratio>lowest_amfi_code
+plan: direct
+option: growth
+
+roles:
+  - role: index_fund.nifty50.direct
+    exposure: Nifty 50
+    asset_class: equity
+    category_any: ['\bindex funds?\b']
+    name_all: ['\bnifty ?50\b']
+    name_none: ['\bnext\b', '\bequal\b', '\bvalue\b', '\bmomentum\b', '\bquality\b', '\blow vol', '\balpha\b', '\barbitrage\b', '\bshariah\b']
+
+  - role: index_fund.niftynext50.direct
+    exposure: Nifty Next 50
+    asset_class: equity
+    category_any: ['\bindex funds?\b']
+    name_all: ['\bnifty next ?50\b']
+    name_none: ['\bequal\b', '\bvalue\b', '\bmomentum\b', '\bquality\b', '\blow vol']
+
+  - role: index_fund.nifty500.direct
+    exposure: Nifty 500 or Total Market
+    asset_class: equity
+    category_any: ['\bindex funds?\b']
+    name_all: ['\bnifty ?500\b|\btotal market\b']
+    name_none: ['\bequal\b', '\bvalue\b', '\bmomentum\b', '\bquality\b', '\blow vol', '\bmulticap\b', '\bshariah\b']
+
+  - role: index_fund.midcap150.direct
+    exposure: Nifty Midcap 150
+    asset_class: equity
+    category_any: ['\bindex funds?\b']
+    name_all: ['\bmidcap ?150\b']
+    name_none: ['\bmomentum\b', '\bquality\b', '\bvalue\b', '\blow vol', '\balpha\b']
+
+  - role: index_fund.smallcap250.direct
+    exposure: Nifty Smallcap 250
+    asset_class: equity
+    category_any: ['\bindex funds?\b']
+    name_all: ['\bsmallcap ?250\b']
+    name_none: ['\bmomentum\b', '\bquality\b', '\bvalue\b', '\blow vol']
+
+  - role: index_fund.nifty200_momentum30.direct
+    exposure: Nifty200 Momentum 30
+    asset_class: equity
+    category_any: ['\bindex funds?\b']
+    name_all: ['\bnifty ?200\b', '\bmomentum ?30\b']
+    name_none: []
+
+  - role: index_fund.midcap150_momentum50.direct
+    exposure: Nifty Midcap150 Momentum 50
+    asset_class: equity
+    category_any: ['\bindex funds?\b']
+    name_all: ['\bmidcap ?150\b', '\bmomentum ?50\b']
+    name_none: []
+
+  - role: index_fund.nifty200_quality30.direct
+    exposure: Nifty200 Quality 30
+    asset_class: equity
+    category_any: ['\bindex funds?\b']
+    name_all: ['\bnifty ?200\b', '\bquality ?30\b']
+    name_none: []
+
+  - role: index_fund.nifty100_lowvol30.direct
+    exposure: Nifty100 Low Volatility 30
+    asset_class: equity
+    category_any: ['\bindex funds?\b']
+    name_all: ['\bnifty ?100\b', '\blow vol(atility)? ?30\b']
+    name_none: []
+
+  - role: fof.gold.direct
+    exposure: Gold (ETF fund of funds)
+    asset_class: gold
+    category_any: ['\bfof\b', '\bfund of funds?\b']
+    name_all: ['\bgold\b']
+    name_none: ['\bsilver\b', '\bmulti\b', '\bglobal\b', '\bworld\b', '\bmining\b']
+
+  - role: debt.overnight.direct
+    exposure: Overnight fund
+    asset_class: debt
+    category_any: ['\bovernight\b']
+    name_all: ['\bovernight\b']
+    name_none: []
+
+  - role: debt.liquid.direct
+    exposure: Liquid fund
+    asset_class: debt
+    category_any: ['\bliquid\b']
+    name_all: ['\bliquid\b']
+    name_none: ['\bplus\b']
+
+  - role: debt.gilt_constant_maturity.direct
+    exposure: Gilt fund with 10-year constant duration
+    asset_class: debt
+    category_any: ['\bgilt\b.*\b(10 ?y|10 year|constant)']
+    name_all: ['\bgilt\b|\bconstant maturity\b|\bg ?sec\b']
+    name_none: []

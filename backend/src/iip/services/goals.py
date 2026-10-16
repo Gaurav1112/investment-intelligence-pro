@@ -878,6 +878,15 @@ def overview(conn: sqlite3.Connection, table: loader.StressTable, today: date) -
     )
 
 
+ProfileAnswer = Literal["essential_monthly_expenses", "emergency_months", "savings_balance", "sweep_fd_balance"]
+_PROFILE_ANSWERS: tuple[ProfileAnswer, ...] = (
+    "essential_monthly_expenses",
+    "emergency_months",
+    "savings_balance",
+    "sweep_fd_balance",
+)
+
+
 class SetupIn(BaseModel):
     """The about-six answers of onboarding (the CAS upload is its own route)."""
 
@@ -889,29 +898,29 @@ class SetupIn(BaseModel):
     tax: TaxIn | None = None
     savings_balance: Dec | None = Field(default=None, ge=0, le=MAX_INR)
     sweep_fd_balance: Dec | None = Field(default=None, ge=0, le=MAX_INR)
+    # GOAL-2: ``null`` keeps the stored answer; an answer named here is cleared instead.
+    clear: list[ProfileAnswer] = Field(default_factory=list, max_length=len(_PROFILE_ANSWERS))
+
+    @model_validator(mode="after")
+    def _clear_or_value(self) -> SetupIn:
+        both = sorted(k for k in set(self.clear) if getattr(self, k) is not None)
+        if both:
+            raise ValueError(f"an answer is either given or cleared, not both: {', '.join(both)}")
+        return self
 
 
 def setup(conn: sqlite3.Connection, body: SetupIn, fy: str, now: str) -> None:
-    """Store every answer in one transaction: all of it or nothing."""
+    """Store every answer in one transaction: all of it or nothing.
+
+    A risk-profile answer sent as ``null`` keeps its stored value; one named in ``body.clear`` is cleared (GOAL-2).
+    """
     with write_tx(conn):
-        if any(v is not None for v in (body.essential_monthly_expenses, body.emergency_months, body.savings_balance,
-                                        body.sweep_fd_balance)):  # fmt: skip
+        given = {k: getattr(body, k) for k in _PROFILE_ANSWERS if getattr(body, k) is not None}
+        if given or body.clear:
             current = repo.get_risk_profile(conn) or repo.RiskProfile()
-            merged = RiskProfileIn(
-                essential_monthly_expenses=(
-                    body.essential_monthly_expenses
-                    if body.essential_monthly_expenses is not None
-                    else current.essential_monthly_expenses
-                ),
-                emergency_months=body.emergency_months
-                if body.emergency_months is not None
-                else current.emergency_months,
-                savings_balance=body.savings_balance if body.savings_balance is not None else current.savings_balance,
-                sweep_fd_balance=(
-                    body.sweep_fd_balance if body.sweep_fd_balance is not None else current.sweep_fd_balance
-                ),
-            )
-            _write_risk_profile(conn, merged, now)
+            stored = {k: getattr(current, k) for k in _PROFILE_ANSWERS}
+            cleared = dict.fromkeys(body.clear)
+            _write_risk_profile(conn, RiskProfileIn(**{**stored, **cleared, **given}), now)
         for g in body.goals:
             _write_goal(conn, g.goal_id, g.given(), now)
         if body.tax is not None:
@@ -946,6 +955,17 @@ class WireExtras(BaseModel):
     sweep_fd_balance: Dec | None = Field(default=None, ge=0, le=MAX_INR)
 
 
+WireClearable = Literal[
+    "emergency.essential_monthly_expenses", "emergency.months", "extras.savings_balance", "extras.sweep_fd_balance"
+]
+_WIRE_CLEAR: dict[str, ProfileAnswer] = {
+    "emergency.essential_monthly_expenses": "essential_monthly_expenses",
+    "emergency.months": "emergency_months",
+    "extras.savings_balance": "savings_balance",
+    "extras.sweep_fd_balance": "sweep_fd_balance",
+}
+
+
 class SetupAnswersIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -953,6 +973,8 @@ class SetupAnswersIn(BaseModel):
     emergency: WireEmergency = Field(default_factory=WireEmergency)
     goals: list[SetupGoalIn] = Field(default_factory=list, max_length=MAX_GOALS_PER_SETUP)
     extras: WireExtras = Field(default_factory=WireExtras)
+    # GOAL-2: ``null`` keeps the stored answer; an answer named here is cleared instead.
+    clear: list[WireClearable] = Field(default_factory=list, max_length=len(_WIRE_CLEAR))
 
     def to_setup(self) -> SetupIn:
         t, x = self.tax, self.extras
@@ -970,6 +992,7 @@ class SetupAnswersIn(BaseModel):
             tax=tax,
             savings_balance=x.savings_balance,
             sweep_fd_balance=x.sweep_fd_balance,
+            clear=[_WIRE_CLEAR[c] for c in self.clear],
         )
 
 

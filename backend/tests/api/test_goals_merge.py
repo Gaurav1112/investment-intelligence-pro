@@ -122,3 +122,81 @@ def test_setup_new_goal_needs_a_name(api: Client) -> None:
     r = c.put("/api/goals/setup", json={"goals": [{"goal_id": None, "target_amount": "1000"}]}, headers=h)
     assert r.status_code == 422
     assert c.get("/api/goals/setup").json()["answers"]["goals"] == []
+
+
+# ---------------------------------------------------------------------------------------------- GOAL-2
+
+_ANSWERED = {
+    "emergency": {"essential_monthly_expenses": "40000", "months": 6},
+    "extras": {"savings_balance": "50000", "sweep_fd_balance": "10000"},
+}
+
+
+def _answered(api: Client) -> None:
+    c, h, _ = api
+    assert c.put("/api/goals/setup", json=_ANSWERED, headers=h).status_code == 200
+
+
+def test_put_setup_null_still_keeps_the_stored_answer(api: Client) -> None:
+    c, h, _ = api
+    _answered(api)
+    body = {"emergency": {"essential_monthly_expenses": None, "months": None}, "extras": {"savings_balance": None}}
+    a = c.put("/api/goals/setup", json=body, headers=h).json()["answers"]
+    assert a["emergency"] == {"essential_monthly_expenses": "40000", "months": 6}
+    assert a["extras"]["savings_balance"] == "50000"
+
+
+def test_put_setup_clear_list_clears_named_answers_only(api: Client) -> None:
+    c, h, _ = api
+    _answered(api)
+    body = {"clear": ["emergency.months", "extras.sweep_fd_balance"]}
+    r = c.put("/api/goals/setup", json=body, headers=h)
+    assert r.status_code == 200, r.text
+    a = r.json()["answers"]
+    assert a["emergency"] == {"essential_monthly_expenses": "40000", "months": None}
+    assert a["extras"]["sweep_fd_balance"] is None and a["extras"]["savings_balance"] == "50000"
+    assert "Emergency fund size in months" in r.json()["missing"]
+
+
+def test_put_setup_clear_every_profile_answer(api: Client) -> None:
+    c, h, _ = api
+    _answered(api)
+    every = ["emergency.essential_monthly_expenses", "emergency.months", "extras.savings_balance",
+             "extras.sweep_fd_balance"]  # fmt: skip
+    a = c.put("/api/goals/setup", json={"clear": every}, headers=h).json()["answers"]
+    assert a["emergency"] == {"essential_monthly_expenses": None, "months": None}
+    assert a["extras"]["savings_balance"] is None and a["extras"]["sweep_fd_balance"] is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"clear": ["emergency.months"], "emergency": {"months": 3}},  # a value and a clear for the same answer
+        {"clear": ["goals"]},  # not a clearable answer
+        {"clear": ["emergency_months"]},  # the POST name is not the wire name
+    ],
+)
+def test_put_setup_clear_is_refused_when_ambiguous_or_unknown(api: Client, body: dict[str, object]) -> None:
+    c, h, _ = api
+    _answered(api)
+    assert c.put("/api/goals/setup", json=body, headers=h).status_code == 422
+    assert c.get("/api/goals/setup").json()["answers"]["emergency"]["months"] == 6  # nothing written
+
+
+def test_post_setup_clear_list(api: Client) -> None:
+    c, h, _ = api
+    _answered(api)
+    r = c.post("/api/goals/setup", json={"clear": ["essential_monthly_expenses"]}, headers=h)
+    assert r.status_code == 200, r.text
+    rp = r.json()["risk_profile"]
+    assert rp["essential_monthly_expenses"] is None and rp["emergency_months"] == 6
+    bad = {"clear": ["emergency_months"], "emergency_months": 4}
+    assert c.post("/api/goals/setup", json=bad, headers=h).status_code == 422
+
+
+def test_put_setup_clear_needs_csrf(api: Client) -> None:
+    c, h, _ = api
+    _answered(api)
+    r = c.put("/api/goals/setup", json={"clear": ["emergency.months"]}, headers={"Origin": h["Origin"]})
+    assert r.status_code == 403
+    assert c.get("/api/goals/setup").json()["answers"]["emergency"]["months"] == 6

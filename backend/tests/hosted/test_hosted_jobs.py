@@ -20,14 +20,17 @@ from tests.data.conftest import NAVHISTORY_RETRIEVED, NAVHISTORY_URL, load_fixtu
 from tests.services.test_ingestion import amfi, fetcher
 from tests.services.test_portfolio import CSV_OK, make_pf, seed_market
 
-from .conftest import NOW, ORIGIN, login, make_client, state
+from .conftest import NOW, ORIGIN, login, make_client, navall_codes, state, watch_schemes
 
 HISTORY = load_fixture("amfi_navhistory_excerpt.txt")
 
 
 def _hosted_conn(db: Path) -> Any:
+    """U-01: hosted NAVAll stores held and watched schemes only, so the hosted side watches exactly the schemes the
+    local minimised scope keeps (the excerpt's Direct-Growth schemes): the parity checks compare like with like."""
     c = connect_libsql(str(db), hosted=True)
     migrate(c, NOW.isoformat())
+    watch_schemes(c, navall_codes())
     return c
 
 

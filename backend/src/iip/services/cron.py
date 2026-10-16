@@ -24,6 +24,13 @@ than :data:`OUTBOX_LEASE_S` as ``failed`` and never resends them (losing a ping 
 Steps owned by other packages are looked up by name (:func:`default_hooks`); a step that is not built yet fails closed
 with a ``*_NOT_IMPLEMENTED`` code and never invents data. Results carry codes and counts only - never amounts, names
 or holdings (C-13).
+
+No failure is silent (ECC silent-failure-hunter-02/06): a failure before a run could be claimed (fetch, parse, U-01
+scope, an internal error) is recorded in ``cron_runs`` under the run key ``attempt:<IST date>`` so J5 reports
+``JOB_FAILED``, and a NAVAll failure is also recorded as a failed ``ingestion_runs`` row, which Data health and the
+"ingestion run failed" alert show. A poll step that is not built makes J2 ``partial`` (never ``done``): its run is
+finished ``noop`` with ``POLLS_NOT_IMPLEMENTED`` (the poll is not retried until it exists), J5 reports
+``STEP_NOT_IMPLEMENTED``, and Data health shows the source's last run as failed ``NOT_IMPLEMENTED`` (once).
 """
 
 from __future__ import annotations
@@ -71,6 +78,10 @@ HISTORY_OPEN = "cron:history:open"  # {"run_key"} while a cron gap-fill batch is
 HISTORY_LAST = "cron:history:last"  # {"run_key"} of the last successful gap fill
 
 _NAV_QUALITY = "quality_status NOT IN ('rejected', 'fixture')"
+# The registry source each J2 poll refreshes: a poll that is not built is reported on that source's Data health row.
+POLL_SOURCES: Mapping[str, str] = {"rbi.tbill": "rbi.pr.tbill", "mospi.cpi": "mospi.cpi"}
+POLLS_NOT_IMPLEMENTED = "POLLS_NOT_IMPLEMENTED"
+NOT_IMPLEMENTED_RUN = "NOT_IMPLEMENTED: no automatic poll is built for this source yet (scheduled job J2)"
 
 
 class Lock(Protocol):
@@ -181,7 +192,7 @@ def default_hooks() -> CronHooks:
         ),
         channels=channels,
         sender=_optional("iip.services.notify", "send_ping") if channels else None,
-        navall_scope_enforced=getattr(ingestion, "HOSTED_NAVALL_SCOPE", None) == "held_watched",
+        navall_scope_enforced=ingestion.HOSTED_NAVALL_SCOPE == "held_watched",
     )
 
 
@@ -199,7 +210,28 @@ def run_job(ctx: CronContext, job: str) -> CronResult:
     except Exception as exc:  # the class only: messages can carry values (C-13)
         log.error("cron job failed job=%s type=%s", job, type(exc).__name__)
         _rollback(ctx.conn)
+        record_failure(ctx, job, "INTERNAL_ERROR")
         return CronResult(job, "failed", "INTERNAL_ERROR")
+
+
+def attempt_key(ctx: CronContext) -> str:
+    """Run key of failures that happened before a (job, data date) run could be claimed: one row per job and day."""
+    return f"attempt:{ctx.ist_today().isoformat()}"
+
+
+def record_failure(ctx: CronContext, job: str, code: str, source_id: str | None = None) -> None:
+    """Make a failure visible (silent-failure-hunter-02): a ``failed`` ``cron_runs`` row that J5 reports as
+    JOB_FAILED, plus, for a data source, a failed ``ingestion_runs`` row for Data health and the ingestion alert.
+    Best effort: a database error here is logged (class only) and never masks the job's own result."""
+    try:
+        key = attempt_key(ctx)
+        if _claim(ctx, job, key):
+            _finish(ctx, job, key, "failed", code)
+        if source_id is not None:
+            ingestion.record_failed_run(ctx.conn, source_id, ctx.now(), f"CRON_{job.upper()}: {code}"[:200])
+    except Exception as exc:  # any driver's error: recording is best effort, the job's own result stands
+        log.error("cron failure not recorded job=%s type=%s", job, type(exc).__name__)
+        _rollback(ctx.conn)
 
 
 def _rollback(conn: sqlite3.Connection) -> None:
@@ -341,8 +373,16 @@ def _store_navall(
     return CronResult(owner, "done", code, run_key, counts)
 
 
+def _navall_step(ctx: CronContext, owner: str, remaining: Callable[[], float]) -> CronResult:
+    """:func:`_navall_pass`, with every failure that has no claimed run of its own made visible."""
+    res = _navall_pass(ctx, owner, remaining)
+    if res.state == "failed" and res.code != "INGEST_FAILED":  # INGEST_FAILED: its runs are already recorded
+        record_failure(ctx, owner, res.code, "amfi.navall")
+    return res
+
+
 def _j1_navall(ctx: CronContext) -> CronResult:
-    return _navall_pass(ctx, "navall", ctx.remaining)
+    return _navall_step(ctx, "navall", ctx.remaining)
 
 
 # ----------------------------------------------------------------------------------------------------- J2
@@ -350,7 +390,7 @@ def _j1_navall(ctx: CronContext) -> CronResult:
 
 def _j2_continue(ctx: CronContext) -> CronResult:
     """Finish an open NAVAll run or catch up a missed J1; then the optional polls, once per NAV date."""
-    nav = _navall_pass(ctx, "navall-continue", ctx.remaining)
+    nav = _navall_step(ctx, "navall-continue", ctx.remaining)
     result = CronResult("navall-continue", nav.state, nav.code, nav.run_key, dict(nav.counts), {"navall": nav.code})
     if nav.state == "partial":
         return result  # the step is spent on NAVAll; the polls run once it is complete
@@ -364,9 +404,11 @@ def _j2_continue(ctx: CronContext) -> CronResult:
             result.state, result.code = "noop", "DUPLICATE"
         return result
     failed = nav.state == "failed"
+    missing: list[str] = []
     for name, step in ctx.hooks.polls:
         if step is None:
             result.steps[name] = "NOT_IMPLEMENTED"
+            missing.append(name)
             continue
         try:
             for k, v in step(ctx.conn, ctx.fetcher(), ctx.now).items():
@@ -378,14 +420,32 @@ def _j2_continue(ctx: CronContext) -> CronResult:
             result.steps[name] = "FAILED"
             failed = True
     detail = ";".join(f"{k}={v}" for k, v in sorted(result.steps.items()))
-    _finish(ctx, "navall-continue", run_key, "failed" if failed else "done", detail)
     if failed:
+        _finish(ctx, "navall-continue", run_key, "failed", detail)
         result.state = "failed"
         if nav.state != "failed":
             result.code = "POLL_FAILED"
-    elif nav.state == "noop":
-        result.state = "done"
+    elif missing:
+        # Never 'done' while a poll is not built (silent-failure-hunter-06). 'noop' keeps the run from being retaken
+        # (the polls that do exist ran once); J5 reads the code and Data health shows the source.
+        _finish(ctx, "navall-continue", run_key, "noop", f"{POLLS_NOT_IMPLEMENTED};{detail}")
+        result.state, result.code = "partial", POLLS_NOT_IMPLEMENTED
+        for name in missing:
+            if (source := POLL_SOURCES.get(name)) is not None:
+                _record_missing_poll(ctx, source)
+    else:
+        _finish(ctx, "navall-continue", run_key, "done", detail)
+        if nav.state == "noop":
+            result.state = "done"
     return result
+
+
+def _record_missing_poll(ctx: CronContext, source_id: str) -> None:
+    try:
+        ingestion.record_failed_run(ctx.conn, source_id, ctx.now(), NOT_IMPLEMENTED_RUN, once=True)
+    except Exception as exc:  # best effort, as in record_failure
+        log.error("missing poll not recorded source=%s type=%s", source_id, type(exc).__name__)
+        _rollback(ctx.conn)
 
 
 # ----------------------------------------------------------------------------------------------------- J3
@@ -582,7 +642,7 @@ def reap_and_drain(ctx: CronContext) -> dict[str, int]:
 
 def _j4_snapshot(ctx: CronContext) -> CronResult:
     late_deadline = ctx.monotonic() + max(0.0, ctx.remaining()) * LATE_NAV_SHARE
-    late = _navall_pass(ctx, "snapshot", lambda: late_deadline - ctx.monotonic())
+    late = _navall_step(ctx, "snapshot", lambda: late_deadline - ctx.monotonic())
     steps = {"late_navs": late.code}
     counts = reap_and_drain(ctx)
     run_key = newest_nav_date(ctx.conn)
@@ -650,6 +710,11 @@ def _j5_watchdog(ctx: CronContext) -> CronResult:
         "SELECT 1 FROM cron_runs WHERE state='failed' AND started_at >= ? AND job <> 'watchdog' LIMIT 1", (since,)
     ).fetchone():
         problems.append("JOB_FAILED")
+    if ctx.conn.execute(
+        "SELECT 1 FROM cron_runs WHERE detail_code LIKE ? AND started_at >= ? AND job <> 'watchdog' LIMIT 1",
+        (f"{POLLS_NOT_IMPLEMENTED}%", since),
+    ).fetchone():
+        problems.append("STEP_NOT_IMPLEMENTED")
     queued = 0
     if problems:
         for channel in ctx.hooks.channels:

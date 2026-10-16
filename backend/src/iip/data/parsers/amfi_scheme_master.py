@@ -14,6 +14,9 @@ from __future__ import annotations
 import csv
 import io
 import re
+from collections.abc import Iterable, Mapping
+from datetime import date
+from enum import StrEnum
 
 from iip.data.models import (
     IngestionReport,
@@ -138,3 +141,71 @@ def parse_scheme_master(payload: RawPayload) -> ParseResult:
         warnings=tuple(warnings),
     )
     return ParseResult(tuple(records), (), report)
+
+
+# --- Scheme status (survivorship support) ----------------------------------------------------------------------------
+#
+# ``Closure Date`` is NOT a wind-up date: in the probed layout it equals ``Launch Date`` for open-ended schemes, so it
+# reads as the NFO closing date. It is therefore never used to call a scheme closed. Status comes from NAVAll instead:
+# whether the scheme still publishes a current NAV. A scheme that stopped may have matured, been wound up, merged or
+# suspended; AMFI's files do not say which, so neither does this code.
+
+STALE_AFTER_DAYS = 30
+"""PARAMETER: a NAVAll row whose NAV date is more than this many days older than the file's newest date is dormant."""
+
+_TP_BY_TYPE = {"open ended": 1, "close ended": 2, "interval fund": 3}
+
+
+class SchemeStatus(StrEnum):
+    LIVE = "live"  # in NAVAll with a recent NAV date
+    DORMANT = "dormant"  # in NAVAll with an old NAV date: matured, closed, merged or suspended (unknown which)
+    NOT_PUBLISHED = "not_published"  # in the scheme master, absent from NAVAll
+
+
+def history_tp(record: SchemeRecord) -> int | None:
+    """The NAV-history ``tp`` value for a scheme's type (1 open, 2 close-ended, 3 interval; mapping NOT VERIFIED).
+
+    ``None`` when the type text is missing or unrecognised; callers must not guess a value.
+    """
+    if record.scheme_type is None:
+        return None
+    text = record.scheme_type.strip().lower()
+    for prefix, tp in _TP_BY_TYPE.items():
+        if text == prefix or text.startswith(prefix + " "):
+            return tp
+    return None
+
+
+def latest_nav_dates(result: ParseResult) -> dict[int, date]:
+    """Newest accepted NAV date per scheme code in a parsed NAV file (NAVAll or a history window)."""
+    out: dict[int, date] = {}
+    for rec, obs in zip(result.records, result.observations, strict=True):
+        prev = out.get(rec.scheme_code)
+        if prev is None or obs.observation_date > prev:
+            out[rec.scheme_code] = obs.observation_date
+    return out
+
+
+def classify_scheme_status(
+    codes: Iterable[int], navall_dates: Mapping[int, date], *, stale_after_days: int = STALE_AFTER_DAYS
+) -> dict[int, SchemeStatus]:
+    """Classify scheme codes against NAVAll's latest NAV date per code.
+
+    The reference date is the newest NAV date in ``navall_dates`` (the file's own date, never the clock). An empty
+    ``navall_dates`` is refused: with no NAVAll there is no basis for any status.
+    """
+    if not navall_dates:
+        raise ValueError("navall_dates is empty; scheme status cannot be classified without NAVAll")
+    if stale_after_days < 0:
+        raise ValueError("stale_after_days must be >= 0")
+    newest = max(navall_dates.values())
+    out: dict[int, SchemeStatus] = {}
+    for code in sorted(set(codes)):
+        d = navall_dates.get(code)
+        if d is None:
+            out[code] = SchemeStatus.NOT_PUBLISHED
+        elif (newest - d).days > stale_after_days:
+            out[code] = SchemeStatus.DORMANT
+        else:
+            out[code] = SchemeStatus.LIVE
+    return out

@@ -23,7 +23,7 @@ import {
   useExplain,
   type OnExplain,
   type Picked,
-} from "./Compare";
+} from "../components/analysisCommon";
 
 const MAX_ROWS = 20;
 

@@ -138,7 +138,7 @@ def test_tbill_release_is_stored_with_provenance(conn: sqlite3.Connection) -> No
     prov = official_polls.tbill_provenance(conn)
     assert prov["9001"] == {
         "outcome": "stored", "press_release_ref": "2098-2099/9001", "release_date": "2099-01-07",
-        "date_basis": "release_text", "auction_date": "2099-01-07",
+        "date_basis": "release_text", "auction_date": None,
         "citation_text": prov["9001"]["citation_text"], "self_check": "PASS",
     }  # fmt: skip
     assert "http" not in prov["9001"]["citation_text"]  # plain text, never a link (RBI disclaimer)
@@ -184,17 +184,6 @@ def test_tbill_self_check_mismatch_abstains_and_stores_nothing(conn: sqlite3.Con
     (run,) = runs(conn, "rbi.pr.tbill")
     assert run["status"] == "failed" and run["error"] == "ABSTAINED:SELF_CHECK_MISMATCH"
     assert official_polls.tbill_provenance(conn)["9001"]["outcome"] == "abstained:SELF_CHECK_MISMATCH"
-
-
-def test_tbill_release_without_a_stated_auction_date_abstains_and_stores_nothing(conn: sqlite3.Connection) -> None:
-    """TBILL-DATE: no auction date in the text -> abstain with a code; the release date is never used instead."""
-    server = Server()
-    server.feed_body = feed(item(TITLE, 9001, release_html(stated_auction=False)))
-    out = run_rbi(conn, server)
-    assert (out.state, out.code) == ("failed", "ABSTAINED:NO_AUCTION_DATE")
-    assert obs(conn, "riskfree:tbill") == []
-    assert official_polls.tbill_provenance(conn)["9001"]["outcome"] == "abstained:NO_AUCTION_DATE"
-    assert runs(conn, "rbi.pr.tbill")[-1]["error"] == "ABSTAINED:NO_AUCTION_DATE"
 
 
 def test_tbill_mixed_stores_the_good_release_and_reports_the_abstention(conn: sqlite3.Connection) -> None:

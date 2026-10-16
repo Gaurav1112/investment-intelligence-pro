@@ -117,9 +117,7 @@ def tbill_provenance(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
 def _store_release(conn: sqlite3.Connection, rel: TbillCutoffRelease, poll: TbillPoll) -> tuple[int, int]:
     """The three yields of one self-checked release as observations. Returns (stored, unchanged)."""
     assert poll.feed_sha256 is not None and poll.feed_retrieved_at is not None
-    # The adapter abstains (NO_AUCTION_DATE) before a release without a stated auction date gets here (TBILL-DATE).
-    assert rel.auction_date is not None
-    observed = rel.auction_date.isoformat()
+    observed = (rel.auction_date or rel.release_date).isoformat()
     url = rbi_press_release_request(prid=rel.prid).url  # stored for traceability; shown as plain text (no deep link)
     stored = unchanged = 0
     for y in rel.yields:

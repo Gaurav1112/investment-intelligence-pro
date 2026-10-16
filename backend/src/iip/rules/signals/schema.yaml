@@ -1,0 +1,61 @@
+# Signal specification schema (PLAN.md WP B05; design-risk-first.md §6.1 amended by design-judgement.md §2).
+#
+# A signal spec is a PRE-REGISTRATION: it is frozen (hashed, stored in signal_rules) before any data is seen. It names
+# ROLES only (e.g. index_fund.nifty50.direct). The role → scheme binding is user configuration in the database table
+# rule_role_bindings and never appears in this repository; neither does any backtest result.
+#
+# The loader (iip.services.backtest_runner.SignalSpec) enforces exactly these fields: unknown keys are refused, and
+# walk_forward.lag / purge / embargo / fill_rule have NO default (design-evidence-first.md §6.2).
+schema_version: 1
+required:
+  - id
+  - version
+  - class
+  - family
+  - status
+  - title
+  - universe_kind
+  - roles
+  - rule
+  - benchmark
+  - observation
+  - decision_every_months
+  - horizon_months
+  - capital
+  - walk_forward
+  - vault
+  - regimes
+  - neighbours
+  - cost_stress
+  - tilt_bounds
+  - variants_counted
+  - post_publication_from
+  - expected_outcome
+  - evidence
+  - gates
+fields:
+  id: "S-<letter>; the rule id"
+  version: "integer ≥ 1; any change to the spec is a new version (and a new trial)"
+  class: "S (seeded research rule)"
+  family: "multiple-testing family; G8 counts every trial logged in it"
+  status: "PRE_REGISTERED (the only status a committed spec may carry)"
+  title: "plain-English name"
+  universe_kind: "fixed_roles (single-instrument roles, passes G2) | cross_section (needs a survivorship probe)"
+  roles: "slot → {role: <role name>, tax_class: EQUITY | DEBT | OTHER}; role names only, never scheme names or codes"
+  rule: "{kind: trend_sma | abs_momentum | dual_momentum | drawdown_topup, params: {...}, slots: [...], formula: text}"
+  benchmark: "{kind: buy_and_hold | equal_weight | sip_schedule, params: {...}, slots: [...], description: text}"
+  observation: "month_end_nav"
+  decision_every_months: "integer ≥ 1"
+  horizon_months: "integer ≥ 1 (label horizon H)"
+  capital: "{initial_inr: decimal string, contribution_inr: decimal string} (fictional notional amounts)"
+  walk_forward: "{lag: int ≥ 0, purge: int ≥ 1, embargo: int ≥ 0, fill_rule: {name, nav_offset ≥ 1, switch_cash_gap ≥ 0}, hac_lag: int ≥ 0}"
+  vault: "{fraction: decimal string in (0, 1), min_months: int}; sealed until every other blocking gate passes"
+  regimes: "exactly three {id, start, end} sub-periods; only pre-vault periods are ever attributed"
+  neighbours: "list of parameter overrides (±1 grid step) for the G10 knife-edge check; each run is a logged trial"
+  cost_stress: "{cost_multiplier: '1.5', slippage_multiplier: '2'} for G7"
+  tilt_bounds: "{min, max} as decimal strings; a research rule may only REDUCE equity (max ≤ 0) unless accepted"
+  variants_counted: "variants known to have been tried in this project's history (adds to family N)"
+  post_publication_from: "date the source paper was published (OOS months after it are reported separately)"
+  expected_outcome: "the verdict stated in advance, with the reason"
+  evidence: "list of {doc, section} pointers into docs/research"
+  gates: "G1..G14"

@@ -11,8 +11,10 @@ from decimal import Decimal, InvalidOperation
 from typing import Annotated, Any, TypeVar
 
 from fastapi import APIRouter, HTTPException, Path, Query, Request
+from pydantic import ValidationError
 
 from iip.services import goals as svc
+from iip.store import goals_repo
 
 T = TypeVar("T")
 GoalId = Annotated[str, Path(pattern=svc.GOAL_ID_PATTERN)]
@@ -37,6 +39,14 @@ def _amount(raw: str | None) -> Decimal | None:
     return value
 
 
+def _valid_setup(body: svc.SetupAnswersIn) -> svc.SetupIn:
+    try:
+        return body.to_setup()
+    except ValidationError as exc:  # e.g. the conservative assumption together with an LTCG figure
+        msg = "; ".join(str(e.get("msg", "")) for e in exc.errors()) or "invalid setup answers"
+        raise HTTPException(422, {"code": "INVALID_INPUT", "message": msg}) from exc
+
+
 def router() -> APIRouter:
     r = APIRouter(prefix="/api/goals", tags=["goals"])
 
@@ -49,7 +59,13 @@ def router() -> APIRouter:
 
     def goal_view(request: Request, goal: Any) -> svc.GoalView:
         st = state(request)
-        return svc.goal_view(goal, svc.stress_history(svc.load_stress_rules(st.settings.data_dir)))
+        held = svc.goal_holdings(st.conn, [x for x in goals_repo.goal_map(st.conn) if x.goal_id == goal.goal_id])
+        return svc.goal_view(goal, svc.stress_history(svc.load_stress_rules(st.settings.data_dir)),
+                             held.get(goal.goal_id, ()))  # fmt: skip
+
+    def setup_state(request: Request) -> svc.SetupState:
+        st = state(request)
+        return svc.setup_state(st.conn, svc.load_stress_rules(st.settings.data_dir), st.clock().date())
 
     # ------------------------------------------------------------------------------------- overview and setup
 
@@ -63,6 +79,19 @@ def router() -> APIRouter:
         fy = svc.financial_year(st.clock().date())
         _guard(lambda: svc.setup(st.conn, body, fy, st.clock().isoformat()))
         return overview(request)
+
+    # The Setup page's shapes (C02): the same stores as POST /setup, arranged as SetupState / SetupAnswers.
+    @r.get("/setup")
+    def get_setup(request: Request) -> svc.SetupState:
+        return setup_state(request)
+
+    @r.put("/setup")
+    def put_setup(body: svc.SetupAnswersIn, request: Request) -> svc.SetupState:
+        st = state(request)
+        fy = svc.financial_year(st.clock().date())
+        setup_in = _valid_setup(body)
+        _guard(lambda: svc.setup(st.conn, setup_in, fy, st.clock().isoformat()))
+        return setup_state(request)
 
     @r.get("/stress-history")
     def get_stress_history(request: Request, amount: Annotated[str | None, Query(max_length=40)] = None

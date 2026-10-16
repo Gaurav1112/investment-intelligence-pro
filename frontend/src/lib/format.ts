@@ -81,8 +81,9 @@ export function inrCompact(value: string): string {
 /** Shift the decimal point by `k` places (negative = divide by 10^|k|), string-only. */
 function shift(value: string, k: number): string {
   const { neg, int, frac } = parts(value);
-  const digits = int + frac;
   const point = int.length + k;
+  // Pad with zeros when the point moves past the last digit: "0.5" shifted by 2 is "50", not "5".
+  const digits = (int + frac).padEnd(point, "0");
   const whole = point <= 0 ? "0" : digits.slice(0, point) || "0";
   const rest = point <= 0 ? "0".repeat(-point) + digits : digits.slice(point);
   return `${neg ? "-" : ""}${whole}.${rest || "0"}`;

@@ -1,4 +1,5 @@
-// Today page contract (wave-2 package C01). Typed stub of the B02 `routes_today.py` response, mirroring the frozen
+// Today page contract (wave-2 package C01). The B02 `routes_today.py` response, reshaped server-side from the stored
+// snapshot by backend/src/iip/services/today_view.py (wave-2 integration), mirroring the frozen
 // engine dataclasses in backend/src/iip/engine/actions/contracts.py (design-risk-first.md §7.1, amended by
 // design-judgement.md §2 grafts 7, 8, 9 and 11), ranking.py and needs.py.
 //
@@ -12,7 +13,8 @@
 import type { Explained } from "./types";
 
 export const TODAY_PATH = "/api/today";
-/** POST {card_id, snapshot_id} → DecisionLogged. Appends to `decisions_log` ("I did this"; graft 9). */
+/** POST {card_id, snapshot_id} → DecisionLogged. Appends to `decisions_log` ("I did this"; graft 9); a retry for the
+ * same card and snapshot returns the entry already logged (status "already_recorded") instead of logging twice. */
 export const DECISIONS_PATH = "/api/today/decisions";
 
 export type Layer = "L0" | "L1" | "L2" | "L3" | "L4" | "L5" | "L6" | "L7" | "L8";
@@ -172,6 +174,8 @@ export interface DecisionRequest {
 }
 
 export interface DecisionLogged {
+  status: "recorded" | "already_recorded";
+  snapshot_id: string;
   card_id: string;
-  decision: DecisionView;
+  decision: DecisionView & { decision: "done" | "not_now" | "disagree" };
 }

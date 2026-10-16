@@ -40,6 +40,9 @@ describe("page titles and route focus (A11Y-3)", () => {
     expect(pageTitle("/settings")).toBe("Settings");
     expect(pageTitle("/i/mf:900001")).toBe("Instrument detail");
     expect(pageTitle("/evidence/42")).toBe("Evidence");
+    expect(pageTitle("/goals")).toBe("Goals");
+    expect(pageTitle("/signals")).toBe("Signals");
+    expect(pageTitle("/signals/S-E/1")).toBe("Rule detail");
   });
 
   it("sets document.title per route and moves focus to the main landmark on navigation (not on first load)", async () => {
@@ -77,6 +80,8 @@ describe("App shell", () => {
   it("routes '/' to the Today page and '/overview' to Overview", () => {
     expect(ROUTES.find((r) => r.path === "/")?.name).toBe("Today");
     expect(ROUTES.find((r) => r.path === "/overview")?.name).toBe("Overview");
+    expect(ROUTES.find((r) => r.path === "/goals")?.name).toBe("Goals");
+    expect(ROUTES.find((r) => r.path === "/signals/:ruleId/:version")?.name).toBe("Rule detail");
   });
 
   it("has a skip link to the main landmark and labelled landmarks", () => {

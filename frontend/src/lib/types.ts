@@ -315,6 +315,10 @@ export interface SourceHealth {
   licence_note: string;
   terms_url: string | null;
   freshness: string;
+  /** registry.py SourceStatus of the automated retrieval path, with the evidence reference. Kept a plain string: the
+   * Data rights panel validates it and treats anything unrecognised as NOT VERIFIED. */
+  status?: string;
+  status_ref?: string;
   requires_configuration: boolean;
   last_run: Pick<IngestionRun, "status" | "finished_at" | "rows_ok" | "rows_rejected" | "error"> | null;
 }

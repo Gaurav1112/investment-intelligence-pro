@@ -5,12 +5,12 @@
 // Conventions shared with the rest of the API: money and fractions are decimal STRINGS (never JS numbers), dates are
 // ISO 'YYYY-MM-DD', and a value the user has not set is null (the engine abstains on it; nothing is filled in here).
 //
-// Endpoints this file describes (B01 owns them; C02 only calls them):
+// Endpoints this file describes (B01 owns them; C02 only calls them; reconciled at wave-2 integration):
 //   GET    /api/goals/setup          → SetupState   (stress_history comes FIRST: crash history before any return figure)
 //   PUT    /api/goals/setup          SetupAnswers → SetupState
-//   GET    /api/goals                → GoalsView
-//   PUT    /api/goals/{goal_id}      GoalIn → GoalView
-//   DELETE /api/goals/{goal_id}      → { deleted: boolean }
+//   GET    /api/goals                → GoalsView (B01 GoalsOverview: also answers, mapping, risk_profile, tax_context, policy)
+//   PUT    /api/goals/{goal_id}      GoalUpdate (GoalIn without goal_id; the id is in the path) → GoalView
+//   DELETE /api/goals/{goal_id}      → { status: "deleted", goal_id }
 // The return-target feasibility view uses the existing POST /api/feasibility (FeasibilityIn/FeasibilityResponse in
 // lib/types.ts); it is the only place an aspired return appears, as a historical frequency.
 
@@ -23,7 +23,17 @@ export type StatusLabel = "VERIFIED" | "NOT VERIFIED" | "REQUIRES CONFIGURATION"
 export type StressOutcome = "PASS" | "ABSTAIN";
 
 /** Risk classes of the L3 stress table (engine/risk/__init__.py RiskClass, table classes only). */
-export type StressClass = "EQ_LARGE" | "EQ_BROAD" | "EQ_MID" | "EQ_SMALL" | "EQ_FACTOR" | "EQ_SECTOR_THEMATIC" | "GOLD";
+export type StressClass =
+  | "EQ_LARGE"
+  | "EQ_BROAD"
+  | "EQ_MID"
+  | "EQ_SMALL"
+  | "EQ_FACTOR"
+  | "EQ_SECTOR_THEMATIC"
+  | "HYBRID"
+  | "GOLD"
+  | "DEBT_MTM"
+  | "CASH_LIKE";
 
 /** One row of the worst-observed-fall table (engine/risk/stress.py ClassStress, serialised). It is history, not a
  * forecast: "the worst fall in the available history of X was Y". Values per U-08 come from the user's local config
@@ -35,7 +45,7 @@ export interface StressHistoryRow {
   outcome: StressOutcome;
   /** Fraction of value lost, peak to trough, e.g. "0.5"; null when the row abstains. */
   stress: string | null;
-  chosen: "CITED" | "RECOMPUTED" | null;
+  chosen: "CITED" | "RECOMPUTED" | "DERIVED" | "FIXED" | "NONE" | null;
   cited_value: string | null;
   recomputed_value: string | null;
   /** Start / end of the AMFI series the recomputed drawdown was measured on. */
@@ -48,7 +58,7 @@ export interface StressHistoryRow {
   back_calculated: boolean;
   citation: string | null;
   fact_id: string | null;
-  formula_id: string;
+  formula_id: string | null;
   status: StatusLabel;
   flags: string[];
   /** Why the row abstains (e.g. "stress value for EQ_MID"), when it does. */
@@ -77,7 +87,7 @@ export interface TaxAnswer {
 
 export interface EmergencyAnswer {
   essential_monthly_expenses: string | null; // ₹ per month
-  months: number | null; // 0–60; 3–6 is US-regulator guidance, SEBI attribution NOT VERIFIED
+  months: number | null; // 1–60 (engine/risk/emergency.py rejects 0); 3–6 is US-regulator guidance, SEBI attribution NOT VERIFIED
 }
 
 /** A goal as the setup and the Goals page send it (store/goals_repo.py Goal). */
@@ -93,6 +103,9 @@ export interface GoalIn {
   /** T_g: the longest the user would wait for a recovery, in months. */
   recovery_months: number | null;
 }
+
+/** PUT /api/goals/{goal_id} body: the server rejects unknown fields, and the id travels in the path. */
+export type GoalUpdate = Omit<GoalIn, "goal_id">;
 
 export interface ExtrasAnswer {
   /** Equity LTCG already realised elsewhere this FY; null keeps the conservative "exemption already used". */
@@ -175,8 +188,8 @@ export function yearsToMonths(years: string | null): number | null {
   return Number((BigInt(i + f) * 12n) / 10n ** BigInt(f.length));
 }
 
-/** A fall shown as "−50.0 %" from a fraction string "0.5" (exact; one decimal, half-up). Uses `shiftPoint`, which pads
- * correctly: `format.pct` mis-shifts fractions with fewer than two decimals ("0.5" → "5.0 %"; reported to its owner). */
+/** A fall shown as "−50.0 %" from a fraction string "0.5" (exact; one decimal, half-up). Uses `shiftPoint` (exact, no sign
+ * logic). `format.pct` once mis-shifted fractions with fewer than two decimals; that was fixed at wave-2 integration. */
 export function fallLabel(fraction: string): string {
   return `−${roundHalfUp(shiftPoint(fraction, 2), 1)} %`;
 }

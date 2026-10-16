@@ -11,7 +11,7 @@ import {
   fallLabel,
   recoveryText,
   stressBasis,
-  type GoalIn,
+  type GoalUpdate,
   type GoalView,
   type GoalsView,
   type StressHistory,
@@ -89,8 +89,7 @@ function GoalEditor({ goal, onSaved, onCancel }: { goal: GoalView; onSaved: () =
       setProblem(`Not saved: ${problems.join(" ")}`);
       return;
     }
-    const body: GoalIn = {
-      goal_id: goal.goal_id,
+    const body: GoalUpdate = {
       name: name.trim(),
       priority: goal.priority,
       target_amount: amount.trim() ? money(amount) : null,

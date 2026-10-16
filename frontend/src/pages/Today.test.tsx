@@ -131,7 +131,7 @@ describe("Today page", () => {
     const fetchMock = vi.fn(async (url: string, _init?: RequestInit) =>
       url === "/api/today"
         ? json({ ...todayActions, cards: [shortfallCard, harvestCard] })
-        : json({ card_id: shortfallCard.card_id, decision: { decision_id: "d1", decided_at: "2026-10-16T04:00:00+00:00", cas_confirmed: null } }),
+        : json({ status: "recorded", snapshot_id: "s".repeat(64), card_id: shortfallCard.card_id, decision: { decision: "done", decision_id: "d1", decided_at: "2026-10-16T04:00:00+00:00", cas_confirmed: null } }),
     );
     vi.stubGlobal("fetch", fetchMock);
     render(

@@ -367,6 +367,7 @@ def router() -> APIRouter:  # noqa: PLR0915 - route table
                 "source_id": spec.id, "name": spec.name, "owner": spec.owner, "official": spec.official,
                 "mode": spec.mode.value, "licence": spec.licence_class.value, "licence_note": spec.licence_note,
                 "terms_url": spec.terms_url, "freshness": spec.freshness.description,
+                "status": spec.status.value, "status_ref": spec.status_ref,
                 "requires_configuration": spec.requires_configuration or spec.mode is SourceMode.LIVE,
                 "last_run": latest.get(spec.id),
             })  # fmt: skip

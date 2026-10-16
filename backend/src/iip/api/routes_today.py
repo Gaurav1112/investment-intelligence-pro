@@ -1,9 +1,12 @@
 """Today API (PLAN.md wave 2, package B02).
 
 * ``GET /api/today`` — the newest stored snapshot with the decisions already recorded against it, in ONE database
-  statement. The engine never runs on page load: with no snapshot yet the response is the ``NO_SNAPSHOT`` state.
+  statement, reshaped (pure, no IO) into the Today page's ``TodayResponse`` contract by
+  :mod:`iip.services.today_view`. The engine never runs on page load: with no snapshot yet the response is the
+  ``NO_SNAPSHOT`` state.
 * ``GET /api/today/needs`` — "Needs from you" from the same snapshot (one statement).
-* ``POST /api/today/decisions`` — "I did this" (``done``), "not now" or "disagree" for one action card.
+* ``POST /api/today/decisions`` — "I did this" (``done``), "not now" or "disagree" for one action card; idempotent
+  per (card, snapshot, decision). Returns ``{card_id, decision: {decision_id, decided_at, cas_confirmed, ...}}``.
 * ``POST /api/today/snapshot`` — an explicit, user-initiated recompute (local mode has no cron). Hosted mode
   normally gets its snapshot from job J4.
 
@@ -20,6 +23,7 @@ from pydantic import BaseModel, Field
 
 from iip.rules.loader import load_action_templates, load_stress_table, local_stress_values_path
 from iip.services import risk_snapshot as svc
+from iip.services.today_view import today_response
 from iip.store.db import write_tx
 
 
@@ -42,7 +46,7 @@ def router() -> APIRouter:
 
     @r.get("")
     def get_today(request: Request) -> dict[str, Any]:
-        return svc.read_today(request.app.state.iip.conn)
+        return today_response(svc.read_today(request.app.state.iip.conn))
 
     @r.get("/needs")
     def get_needs(request: Request) -> dict[str, Any]:

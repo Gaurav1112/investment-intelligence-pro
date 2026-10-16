@@ -125,8 +125,9 @@ describe("Goals page (C02)", () => {
     await waitFor(() => expect(calls.some((c) => c.method === "PUT")).toBe(true));
     const put = calls.find((c) => c.method === "PUT")!;
     expect(put.url).toBe("/api/goals/g1");
+    // The id travels in the path only: B01's GoalIn rejects unknown fields (extra="forbid").
     expect(put.body).toEqual({
-      goal_id: "g1", name: "Long-term growth", priority: 1, target_amount: "1000000", target_date: "2036-03-31",
+      name: "Long-term growth", priority: 1, target_amount: "1000000", target_date: "2036-03-31",
       loss_budget_inr: "300000", recovery_months: 60,
     });
   });

@@ -127,6 +127,11 @@ class StressRowView(BaseModel):
     formula: str | None  # DEBT_MTM: holding-specific, so no single value
     flags: list[str]
     abstentions: list[str]
+    # Wire fields for the Goals/Setup pages (C02 types-goals.ts StressHistoryRow); derived, nothing new is computed.
+    label: str = ""  # = description
+    citation: str | None = None  # = source_url of the rule-table row
+    fact_id: str | None = None  # = the rule-table row id the cited value comes from
+    abstain_reason: str | None = None  # the missing input, when the row abstains
 
 
 class StressHistory(BaseModel):
@@ -137,6 +142,7 @@ class StressHistory(BaseModel):
     amount: Decimal | None
     caveats: list[str]
     rows: list[StressRowView]
+    caveat: str = ""  # every caveat in one sentence block, shown verbatim (C02 wire field)
 
 
 def load_stress_rules(data_dir: Path) -> loader.StressTable:
@@ -187,6 +193,8 @@ def stress_history(
                     series_start=None, series_end=None, source_url=meta.source_url,
                     formula_id=meta.formula.formula_id, formula=meta.formula.expression,
                     flags=["PER_HOLDING_DURATION_NEEDED"], abstentions=["duration_missing"],
+                    label=meta.description, citation=meta.source_url, fact_id=meta.rule_id,
+                    abstain_reason="the duration of each debt holding",
                 )
             )  # fmt: skip
             continue
@@ -199,7 +207,9 @@ def stress_history(
                 chosen=cs.chosen, status=cs.status.value, cited_value=cs.cited_value,
                 recomputed_value=cs.recomputed_value, series_start=cs.series_start, series_end=cs.series_end,
                 source_url=meta.source_url, formula_id=cs.formula_id, formula=None, flags=list(cs.flags),
-                abstentions=[a.code for a in cs.abstentions],
+                abstentions=[a.code for a in cs.abstentions], label=meta.description, citation=meta.source_url,
+                fact_id=meta.rule_id,
+                abstain_reason=None if cs.outcome is Outcome.PASS else f"stress value for {rc.value}",
             )
         )  # fmt: skip
     return StressHistory(
@@ -209,6 +219,7 @@ def stress_history(
         amount=amount,
         caveats=list(STRESS_CAVEATS),
         rows=rows,
+        caveat=" ".join(STRESS_CAVEATS),
     )
 
 
@@ -253,6 +264,13 @@ class WorstFallLine(BaseModel):
     status: str
 
 
+class GoalHolding(BaseModel):
+    instrument_id: str
+    folio: str
+    name: str
+    fraction: Decimal
+
+
 class GoalView(BaseModel):
     # First: what the worst observed falls would have meant for this goal (no return figure anywhere).
     worst_fall_on_target: list[WorstFallLine]
@@ -270,6 +288,10 @@ class GoalView(BaseModel):
     h_safe_years: Decimal | None
     equity_status: Literal["INPUTS_COMPLETE", "ABSTAIN"]
     missing: list[str]
+    # Wire fields for the Goals page (C02 types-goals.ts GoalView).
+    holdings: list[GoalHolding] = Field(default_factory=list)
+    outcome: Literal["PASS", "ABSTAIN"] = "ABSTAIN"  # PASS = every input the equity layers need is present
+    abstentions: list[str] = Field(default_factory=list)  # = missing
 
 
 _OBJ_BY_LETTER = {o.value[0]: o for o in Objective}
@@ -284,7 +306,7 @@ def _fmt_years(months: int) -> str:
         return f"{(Decimal(months) / Decimal(12)).quantize(Decimal('0.1'))}"
 
 
-def goal_view(g: repo.Goal, history: StressHistory) -> GoalView:
+def goal_view(g: repo.Goal, history: StressHistory, holdings: Sequence[GoalHolding] = ()) -> GoalView:
     amount = g.target_amount
     lines: list[WorstFallLine] = []
     notes: list[str] = []
@@ -335,7 +357,29 @@ def goal_view(g: repo.Goal, history: StressHistory) -> GoalView:
         h_safe_years=g.h_safe_years,
         equity_status="ABSTAIN" if missing else "INPUTS_COMPLETE",
         missing=missing,
+        holdings=list(holdings),
+        outcome="ABSTAIN" if missing else "PASS",
+        abstentions=list(missing),
     )
+
+
+def goal_holdings(conn: sqlite3.Connection, links: Sequence[repo.GoalLink]) -> dict[str, list[GoalHolding]]:
+    """Each goal's mapped holdings with their instrument names (one statement, only when there are links)."""
+    names: dict[str, str] = {}
+    ids = sorted({link.instrument_id for link in links})
+    if ids:
+        rows = conn.execute(
+            "SELECT instrument_id, name FROM instruments WHERE instrument_id IN (SELECT value FROM json_each(?))",
+            (json.dumps(ids),),
+        ).fetchall()
+        names = {str(r["instrument_id"]): str(r["name"]) for r in rows}
+    out: dict[str, list[GoalHolding]] = {}
+    for link in links:
+        out.setdefault(link.goal_id, []).append(GoalHolding(
+            instrument_id=link.instrument_id, folio=link.folio, name=names.get(link.instrument_id, link.instrument_id),
+            fraction=link.fraction,
+        ))  # fmt: skip
+    return out
 
 
 def _audit(conn: sqlite3.Connection, now: str, action: str, subject: str, fields: Sequence[str]) -> None:
@@ -714,6 +758,10 @@ class GoalsOverview(BaseModel):
     risk_profile: RiskProfileView
     tax_context: TaxContextView
     policy: PolicyStatus
+    # Wire fields for the Goals page (C02 types-goals.ts GoalsView).
+    as_of: date | None = None
+    setup_complete: bool = False
+    missing: list[str] = Field(default_factory=list)
 
 
 _ANSWERS = (
@@ -744,14 +792,19 @@ def overview(conn: sqlite3.Connection, table: loader.StressTable, today: date) -
     fy = financial_year(today)
     ctx = repo.load_goal_context(conn, fy)
     history = stress_history(table)
+    held = goal_holdings(conn, ctx.links)
+    answers = _answers(ctx)
     return GoalsOverview(
         stress_history=history,
-        answers=_answers(ctx),
-        goals=[goal_view(g, history) for g in ctx.goals],
+        answers=answers,
+        goals=[goal_view(g, history, held.get(g.goal_id, ())) for g in ctx.goals],
         mapping=mapping_view(ctx.links),
         risk_profile=risk_profile_view(ctx.risk_profile),
         tax_context=tax_view(fy, ctx.tax_context),
         policy=policy_status(conn),
+        as_of=today,
+        setup_complete=answers.given == answers.of,
+        missing=list(answers.missing),
     )
 
 
@@ -764,12 +817,15 @@ class SetupIn(BaseModel):
     emergency_months: int | None = Field(default=None, ge=1, le=60)
     goals: list[SetupGoalIn] = Field(default_factory=list, max_length=MAX_GOALS_PER_SETUP)
     tax: TaxIn | None = None
+    savings_balance: Dec | None = Field(default=None, ge=0, le=MAX_INR)
+    sweep_fd_balance: Dec | None = Field(default=None, ge=0, le=MAX_INR)
 
 
 def setup(conn: sqlite3.Connection, body: SetupIn, fy: str, now: str) -> None:
     """Store every answer in one transaction: all of it or nothing."""
     with write_tx(conn):
-        if body.essential_monthly_expenses is not None or body.emergency_months is not None:
+        if any(v is not None for v in (body.essential_monthly_expenses, body.emergency_months, body.savings_balance,
+                                        body.sweep_fd_balance)):  # fmt: skip
             current = repo.get_risk_profile(conn) or repo.RiskProfile()
             merged = RiskProfileIn(
                 essential_monthly_expenses=(
@@ -780,8 +836,10 @@ def setup(conn: sqlite3.Connection, body: SetupIn, fy: str, now: str) -> None:
                 emergency_months=body.emergency_months
                 if body.emergency_months is not None
                 else current.emergency_months,
-                savings_balance=current.savings_balance,
-                sweep_fd_balance=current.sweep_fd_balance,
+                savings_balance=body.savings_balance if body.savings_balance is not None else current.savings_balance,
+                sweep_fd_balance=(
+                    body.sweep_fd_balance if body.sweep_fd_balance is not None else current.sweep_fd_balance
+                ),
             )
             _write_risk_profile(conn, merged, now)
         for g in body.goals:
@@ -789,6 +847,125 @@ def setup(conn: sqlite3.Connection, body: SetupIn, fy: str, now: str) -> None:
             _write_goal(conn, g.goal_id, GoalIn(**fields), now)
         if body.tax is not None:
             _write_tax(conn, fy, body.tax, now)
+
+
+# ================================================================================================ setup wire (C02)
+# GET/PUT /api/goals/setup speak the Setup page's shapes (frontend/src/lib/types-goals.ts SetupState/SetupAnswers).
+# They are a re-arrangement of the same stores the six-answer POST /api/goals/setup writes; nothing new is computed.
+
+
+class WireTax(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    use_conservative: bool = False
+    regime: Literal["new", "old"] | None = None
+    slab_rate: Dec | None = Field(default=None, ge=0, le=Decimal("0.5"))
+
+
+class WireEmergency(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    essential_monthly_expenses: Dec | None = Field(default=None, ge=0, le=MAX_INR)
+    months: int | None = Field(default=None, ge=1, le=60)  # engine/risk/emergency.py rejects 0
+
+
+class WireExtras(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ltcg_used_inr: Dec | None = Field(default=None, ge=0, le=MAX_INR)
+    savings_balance: Dec | None = Field(default=None, ge=0, le=MAX_INR)
+    sweep_fd_balance: Dec | None = Field(default=None, ge=0, le=MAX_INR)
+
+
+class SetupAnswersIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tax: WireTax = Field(default_factory=WireTax)
+    emergency: WireEmergency = Field(default_factory=WireEmergency)
+    goals: list[SetupGoalIn] = Field(default_factory=list, max_length=MAX_GOALS_PER_SETUP)
+    extras: WireExtras = Field(default_factory=WireExtras)
+
+    def to_setup(self) -> SetupIn:
+        t, x = self.tax, self.extras
+        answered = t.use_conservative or t.regime is not None or t.slab_rate is not None or x.ltcg_used_inr is not None
+        tax = (
+            TaxIn(use_conservative_assumption=t.use_conservative, regime=t.regime, slab_rate=t.slab_rate,
+                  ltcg_used_inr=x.ltcg_used_inr)
+            if answered
+            else None
+        )  # fmt: skip
+        return SetupIn(
+            essential_monthly_expenses=self.emergency.essential_monthly_expenses,
+            emergency_months=self.emergency.months,
+            goals=self.goals,
+            tax=tax,
+            savings_balance=x.savings_balance,
+            sweep_fd_balance=x.sweep_fd_balance,
+        )
+
+
+class SetupGoalOut(BaseModel):
+    goal_id: str
+    name: str
+    priority: int
+    target_amount: Decimal | None
+    target_date: date | None
+    loss_budget_inr: Decimal | None
+    recovery_months: int | None
+
+
+class SetupAnswersOut(BaseModel):
+    tax: dict[str, Any]
+    emergency: dict[str, Any]
+    goals: list[SetupGoalOut]
+    extras: dict[str, Any]
+
+
+class SetupState(BaseModel):
+    # Stress history first, before any answer (B01 acceptance; C02 relies on it).
+    stress_history: StressHistory
+    answers: SetupAnswersOut
+    cas_imported: bool
+    missing: list[str]
+    complete: bool
+
+
+def cas_imported(conn: sqlite3.Connection) -> bool:
+    """True once a CAS import batch has been APPLIED (the import ledger in ``settings``; one statement)."""
+    for r in conn.execute("SELECT value_json FROM settings WHERE key LIKE 'import.batch:%'").fetchall():
+        rec = json.loads(r["value_json"])
+        if rec.get("kind") == "cas_pdf" and rec.get("status") == "applied":
+            return True
+    return False
+
+
+def setup_state(conn: sqlite3.Connection, table: loader.StressTable, today: date) -> SetupState:
+    fy = financial_year(today)
+    ctx = repo.load_goal_context(conn, fy)
+    rp, tc = ctx.risk_profile or repo.RiskProfile(), ctx.tax_context
+    answers = _answers(ctx)
+    conservative = tc is not None and tc.regime is None and tc.slab_rate is None and tc.ltcg_used_inr is None
+    return SetupState(
+        stress_history=stress_history(table),
+        answers=SetupAnswersOut(
+            tax={"use_conservative": conservative, "regime": tc.regime if tc else None,
+                 "slab_rate": tc.slab_rate if tc else None},
+            emergency={"essential_monthly_expenses": rp.essential_monthly_expenses, "months": rp.emergency_months},
+            goals=[
+                SetupGoalOut(
+                    goal_id=g.goal_id, name=g.name, priority=g.priority, target_amount=g.target_amount,
+                    target_date=None if g.target_date is None else date.fromisoformat(g.target_date),
+                    loss_budget_inr=g.loss_budget_inr, recovery_months=g.recovery_months,
+                )
+                for g in ctx.goals
+            ],
+            extras={"ltcg_used_inr": tc.ltcg_used_inr if tc else None, "savings_balance": rp.savings_balance,
+                    "sweep_fd_balance": rp.sweep_fd_balance},
+        ),
+        cas_imported=cas_imported(conn),
+        missing=list(answers.missing),
+        complete=answers.given == answers.of,
+    )  # fmt: skip
 
 
 __all__ = [
@@ -805,7 +982,9 @@ __all__ = [
     "PolicyIn",
     "PolicyNotConfigured",
     "RiskProfileIn",
+    "SetupAnswersIn",
     "SetupIn",
+    "SetupState",
     "StressHistory",
     "TaxIn",
     "delete_goal",
@@ -820,5 +999,6 @@ __all__ = [
     "save_risk_profile",
     "save_tax",
     "setup",
+    "setup_state",
     "stress_history",
 ]

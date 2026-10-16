@@ -559,8 +559,9 @@ def reap_and_drain(ctx: CronContext) -> dict[str, int]:
     if sender is None:
         return counts
     rows = ctx.conn.execute(
-        "SELECT outbox_key, channel, kind, snapshot_id FROM notification_outbox WHERE state='pending'"
-        " ORDER BY created_at, outbox_key, channel LIMIT ?",
+        "SELECT o.outbox_key, o.channel, o.kind, o.snapshot_id, s.as_of_date FROM notification_outbox o"
+        " LEFT JOIN signal_snapshots s ON s.snapshot_id = o.snapshot_id WHERE o.state='pending'"
+        " ORDER BY o.created_at, o.outbox_key, o.channel LIMIT ?",
         (OUTBOX_DRAIN_LIMIT,),
     ).fetchall()
     for row in rows:

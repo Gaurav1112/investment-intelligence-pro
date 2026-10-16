@@ -99,6 +99,12 @@ def test_snapshot_then_today_in_one_statement(app: Any, monkeypatch: pytest.Monk
     assert today.status_code == 200 and len(counter.statements) == 1
     t = today.json()
     assert t["snapshot_id"] == body["snapshot_id"] and t["cards"][0]["kind"] == "LOSS_BUDGET_BREACH"
+    # C01 TodayResponse shape: string layers, top_n, and every number carries a display and an Explained.
+    assert t["top_n"] >= 1 and t["computed_at"] and t["cards"][0]["layer"] == "L3"
+    for card in t["cards"]:
+        for n in [*card["numbers"], *(x for s in card["steps"] for x in s["numbers"])]:
+            assert n["display"] and n["explain"]["display"] == n["display"]
+            assert n["fact_ids"] or n["formula_id"]
     counter.statements.clear()
     needs = c.get("/api/today/needs")
     assert needs.status_code == 200 and len(counter.statements) == 1 and needs.json()["needs"]
@@ -117,8 +123,21 @@ def test_i_did_this(app: Any) -> None:
     assert no_csrf.status_code == 403
 
     ok = c.post("/api/today/decisions", json={"snapshot_id": sid, "card_id": action["card_id"]}, headers=h)
-    assert ok.status_code == 200 and ok.json()["decision"] == "done"
-    assert c.get("/api/today").json()["decisions"][0]["card_id"] == action["card_id"]
+    assert ok.status_code == 200 and ok.json()["decision"]["decision"] == "done"
+    logged = ok.json()["decision"]
+    assert ok.json()["status"] == "recorded" and logged["decision_id"] and logged["cas_confirmed"] is None
+    today = c.get("/api/today").json()
+    assert today["decisions"][0]["card_id"] == action["card_id"]
+    # The Today view puts the logged 'done' on its card (C01 DecisionView).
+    card = next(x for x in today["cards"] if x["card_id"] == action["card_id"])
+    assert card["decision"] == {"decision_id": logged["decision_id"], "decided_at": logged["decided_at"],
+                                "cas_confirmed": None}  # fmt: skip
+
+    # A retry (e.g. after a network error) does not log twice.
+    again = c.post("/api/today/decisions", json={"snapshot_id": sid, "card_id": action["card_id"]}, headers=h)
+    assert again.status_code == 200 and again.json()["status"] == "already_recorded"
+    assert again.json()["decision"]["decision_id"] == logged["decision_id"]
+    assert len(c.get("/api/today").json()["decisions"]) == 1
 
     bad = c.post("/api/today/decisions", json={"snapshot_id": sid, "card_id": abstain["card_id"]}, headers=h)
     assert bad.status_code == 422 and bad.json()["detail"]["code"] == "NOT_AN_ACTION"

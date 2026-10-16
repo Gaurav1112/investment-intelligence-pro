@@ -507,8 +507,8 @@ function validate(f: Form): FieldError[] {
     else if (slab !== null && compareDecimals(slab, "0.5") > 0) out.push({ field: "su-slab", step: 1, message: "Income-tax slab: at most 50 %." });
   }
   if (badMoney(f.expenses)) out.push({ field: "su-expenses", step: 2, message: "Essential monthly expenses: digits only, for example 40000." });
-  if (f.monthsChoice === "other" && f.monthsOther.trim() !== "" && (!INT.test(f.monthsOther.trim()) || Number(f.monthsOther) > 60))
-    out.push({ field: "su-months-other", step: 2, message: "Emergency months: a whole number from 0 to 60." });
+  if (f.monthsChoice === "other" && f.monthsOther.trim() !== "" && (!INT.test(f.monthsOther.trim()) || Number(f.monthsOther) < 1 || Number(f.monthsOther) > 60))
+    out.push({ field: "su-months-other", step: 2, message: "Emergency months: a whole number from 1 to 60." });
   f.goals.forEach((g) => {
     const label = g.name.trim() || "unnamed goal";
     if (!g.name.trim() || g.name.trim().length > 120)
@@ -791,7 +791,7 @@ function Setup() {
               </label>
               {f.monthsChoice === "other" ? (
                 <div className="field">
-                  <label htmlFor="su-months-other">Months (0–60)</label>
+                  <label htmlFor="su-months-other">Months (1–60)</label>
                   <input inputMode="numeric" value={f.monthsOther} onChange={(e) => set("monthsOther", e.target.value)} {...a11y("su-months-other")} />
                   {err("su-months-other")}
                 </div>

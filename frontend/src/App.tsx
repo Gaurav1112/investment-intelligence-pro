@@ -10,6 +10,9 @@ import { useApi } from "./lib/useApi";
 
 const Onboarding = lazy(() => import("./pages/Onboarding"));
 const Today = lazy(() => import("./pages/Today"));
+const Goals = lazy(() => import("./pages/Goals"));
+const Signals = lazy(() => import("./pages/Signals"));
+const RuleDetail = lazy(() => import("./pages/RuleDetail"));
 const Discovery = lazy(() => import("./pages/Discovery"));
 const Overview = lazy(() => import("./pages/Overview"));
 const MfExplorer = lazy(() => import("./pages/MfExplorer"));
@@ -74,6 +77,7 @@ const NAV: { group: string; items: [string, string][] }[] = [
     group: "Decide",
     items: [
       ["/", "Today"],
+      ["/goals", "Goals"],
       ["/overview", "Overview"],
       ["/discover", "Discovery"],
       ["/compare", "Compare"],
@@ -102,12 +106,17 @@ const NAV: { group: string; items: [string, string][] }[] = [
 ];
 
 const APP_NAME = "Investment Intelligence Pro";
-const EXTRA_TITLES: [string, string][] = [["/settings", "Settings"]];
+// Signals is reachable by link only until GET /api/signals exists on the backend (wave-2 open item); then it joins NAV.
+const EXTRA_TITLES: [string, string][] = [
+  ["/settings", "Settings"],
+  ["/signals", "Signals"],
+];
 
 /** Page name for a path (WCAG 2.4.2): nav labels, plus pages reached by link only. */
 export function pageTitle(pathname: string): string {
   if (pathname.startsWith("/i/")) return "Instrument detail";
   if (pathname.startsWith("/evidence/")) return "Evidence";
+  if (pathname.startsWith("/signals/")) return "Rule detail";
   const all: [string, string][] = [...NAV.flatMap((g) => g.items), ...EXTRA_TITLES];
   return all.find(([to]) => to === pathname)?.[1] ?? "Page";
 }
@@ -241,6 +250,9 @@ export function Shell({ children }: { children: ReactNode }) {
 /** Every page route inside the shell. `/` is Today (C01); Overview moved to `/overview`. */
 export const ROUTES: { path: string; name: string; Component: ComponentType }[] = [
   { path: "/", name: "Today", Component: Today },
+  { path: "/goals", name: "Goals", Component: Goals },
+  { path: "/signals", name: "Signals", Component: Signals },
+  { path: "/signals/:ruleId/:version", name: "Rule detail", Component: RuleDetail },
   { path: "/overview", name: "Overview", Component: Overview },
   { path: "/discover", name: "Discovery", Component: Discovery },
   { path: "/mf", name: "Mutual funds", Component: MfExplorer },

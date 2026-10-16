@@ -30,9 +30,9 @@ import sqlite3
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from iip.engine.actions.cards import TemplateSet, render_card
 from iip.engine.actions.contracts import (
@@ -72,7 +72,7 @@ from iip.engine.risk.stress import (
 )
 from iip.engine.tax import financial_year_label
 from iip.rules.loader import RowStatus, RuleTableError, StressTable, ValueSource
-from iip.services import shadow
+from iip.services import notify, shadow
 from iip.services.portfolio import USABLE_QUALITY, PortfolioError, Txn, fifo_positions
 from iip.store import ledger
 from iip.store.db import write_tx
@@ -96,6 +96,11 @@ from iip.supervisor.manifest import (
     ScopeGate,
     evaluate_scope,
 )
+
+if TYPE_CHECKING:
+    from iip.services import cas as cas_types
+    from iip.services import cron as cron_types
+
 
 ENGINE_VERSION = "risk_snapshot@1"
 PAYLOAD_SCHEMA = "today_snapshot@1"
@@ -996,10 +1001,9 @@ def compute_snapshot(inputs: SnapshotInputs, templates: TemplateSet) -> Snapshot
     verdict = {TodayState.ACTIONS: VERDICT_ACTIONS, TodayState.NOTHING_NEEDED: VERDICT_NOTHING}.get(
         ranked.state, VERDICT_ABSTAIN
     )
-    action_set = sorted(
-        (card_identity(c) for c in ranked.ordered if c.is_action and c.layer <= Layer.L5), key=canonical_json
-    )
-    card_set_hash = content_hash(action_set)
+    # "Ping only on change" key (B04 notify.card_set_hash: snapshot-independent card keys, layers L1-L5), over the
+    # ACTION cards only, so abstentions and the empty state never ping.
+    card_set_hash = notify.card_set_hash(c for c in ranked.ordered if c.is_action)
     payload = {
         "schema": PAYLOAD_SCHEMA,
         "snapshot_id": sid,
@@ -1080,8 +1084,9 @@ def run_snapshot(
 # SQLite's JSON1 and in libSQL). Served by ix_signal_snapshots_latest. The engine never runs here.
 TODAY_SQL = (
     "SELECT s.snapshot_id, s.as_of_date, s.verdict, s.payload_json, s.created_at,"
-    " (SELECT json_group_array(json_object('card_id', d.card_id, 'decision', d.decision, 'decided_at', d.decided_at,"
-    " 'cas_confirmed', d.cas_confirmed)) FROM decisions_log d WHERE d.snapshot_id = s.snapshot_id) AS decisions"
+    " (SELECT json_group_array(json_object('decision_id', d.decision_id, 'card_id', d.card_id,"
+    " 'decision', d.decision, 'decided_at', d.decided_at, 'cas_confirmed', d.cas_confirmed))"
+    " FROM decisions_log d WHERE d.snapshot_id = s.snapshot_id) AS decisions"
     " FROM signal_snapshots s ORDER BY s.as_of_date DESC, s.created_at DESC LIMIT 1"
 )
 NO_SNAPSHOT = "NO_SNAPSHOT"
@@ -1095,7 +1100,9 @@ def read_today(conn: sqlite3.Connection) -> dict[str, Any]:
         return {"state": NO_SNAPSHOT, "verdict": None, "cards": [], "needs": [], "decisions": []}
     payload: dict[str, Any] = json.loads(row["payload_json"])
     decisions = json.loads(row["decisions"]) if row["decisions"] else []
-    payload["decisions"] = sorted(decisions, key=lambda d: (d["decided_at"], d["card_id"], d["decision"]))
+    payload["decisions"] = sorted(
+        decisions, key=lambda d: (d["decided_at"], d["card_id"], d["decision"], d.get("decision_id") or 0)
+    )
     payload["computed_at"] = row["created_at"]
     return payload
 
@@ -1109,6 +1116,12 @@ def read_needs(conn: sqlite3.Connection) -> dict[str, Any]:
         "as_of": today.get("as_of"),
         "needs": today.get("needs", []),
     }
+
+
+_DECISION_ROW_SQL = (
+    "SELECT decision_id, decided_at, cas_confirmed FROM decisions_log"
+    " WHERE card_id = ? AND snapshot_id = ? AND decision = ? ORDER BY decision_id LIMIT 1"
+)
 
 
 class DecisionRejected(ValueError):
@@ -1126,8 +1139,12 @@ def record_decision(
     note: str | None,
     now: str,
 ) -> dict[str, Any]:
-    """ "I did this" (or "not now" / "disagree") for one ACTION card of a stored snapshot. Two statements: the
-    snapshot read and the append-only insert. Abstain, empty-state and shadow-ledger entries cannot be acted on."""
+    """ "I did this" (or "not now" / "disagree") for one ACTION card of a stored snapshot. Abstain, empty-state and
+    shadow-ledger entries cannot be acted on.
+
+    Idempotent per (card_id, snapshot_id, decision): a retry after a network error returns the row already logged
+    (``status`` ``already_recorded``) instead of appending a second one. Statements: the snapshot read, the existing
+    row lookup, and (only when new) the append-only insert plus the read-back of its ``decision_id``."""
     if decision not in DECISIONS:
         raise DecisionRejected("BAD_DECISION", f"decision must be one of {DECISIONS}")
     row = conn.execute("SELECT payload_json FROM signal_snapshots WHERE snapshot_id = ?", (snapshot_id,)).fetchone()
@@ -1140,16 +1157,93 @@ def record_decision(
         raise DecisionRejected("UNKNOWN_CARD", "the card is not part of that snapshot")
     if not card.get("is_action"):
         raise DecisionRejected("NOT_AN_ACTION", "only action cards can be marked")
-    ledger.append_decisions(
-        conn,
-        [ledger.Decision(card_id=card_id, snapshot_id=snapshot_id, goal_id=card.get("goal_id"), decision=decision,
-                         note=note, decided_at=now)],
-    )  # fmt: skip
-    return {"status": "recorded", "snapshot_id": snapshot_id, "card_id": card_id, "decision": decision,
-            "decided_at": now}  # fmt: skip
+    existing = conn.execute(_DECISION_ROW_SQL, (card_id, snapshot_id, decision)).fetchone()
+    status = "already_recorded"
+    if existing is None:
+        ledger.append_decisions(
+            conn,
+            [ledger.Decision(card_id=card_id, snapshot_id=snapshot_id, goal_id=card.get("goal_id"), decision=decision,
+                             note=note, decided_at=now)],
+        )  # fmt: skip
+        existing = conn.execute(_DECISION_ROW_SQL, (card_id, snapshot_id, decision)).fetchone()
+        status = "recorded"
+    cas = existing["cas_confirmed"]
+    return {
+        "status": status, "snapshot_id": snapshot_id, "card_id": card_id,
+        "decision": {"decision_id": str(existing["decision_id"]), "decision": decision,
+                     "decided_at": existing["decided_at"], "cas_confirmed": None if cas is None else bool(cas)},
+    }  # fmt: skip
+
+
+# ------------------------------------------------------------------------------------------------ CAS confirmation
+
+_MOVE_OF_VERB = {"INVEST": "in", "REDEEM": "out", "SWITCH": "out"}
+
+
+def cas_decision_checks(conn: sqlite3.Connection) -> list[cas_types.DecisionCheck]:
+    """ "I did this" entries no CAS has checked yet, with the unit movements their card's steps imply (B06
+    :func:`iip.services.cas.moves_from_steps` rules, read from the stored snapshot payload). Two statements: the
+    pending decisions and their snapshots. A card whose steps name no scheme (e.g. REDIRECT_SIP) has no movement to
+    look for, so the CAS check leaves it UNDETERMINED."""
+    from iip.services import cas  # noqa: PLC0415 - cas pulls in the statement parser; only the CAS routes need it
+
+    pending = cas.pending_done_decisions(conn)
+    sids = sorted({str(r["snapshot_id"]) for r in pending if r["snapshot_id"]})
+    payloads: dict[str, dict[str, Any]] = {}
+    if sids:
+        for r in conn.execute(
+            "SELECT snapshot_id, payload_json FROM signal_snapshots"
+            " WHERE snapshot_id IN (SELECT value FROM json_each(?))",
+            (json.dumps(sids),),
+        ).fetchall():
+            payloads[str(r["snapshot_id"])] = json.loads(r["payload_json"])
+    checks: list[cas.DecisionCheck] = []
+    for r in pending:
+        payload = payloads.get(str(r["snapshot_id"]), {})
+        cards = [*payload.get("cards", []), *(x["card"] for x in payload.get("suppressed", []))]
+        card = next((c for c in cards if c.get("card_id") == r["card_id"]), None)
+        moves: list[cas.ExpectedMove] = []
+        for step in (card or {}).get("steps", []):
+            direction = _MOVE_OF_VERB.get(str(step.get("verb")))
+            if direction is not None and step.get("instrument_id"):
+                moves.append(cas.ExpectedMove(str(step["instrument_id"]), "in" if direction == "in" else "out"))
+        checks.append(cas.DecisionCheck(
+            decision_id=int(r["decision_id"]), decided_on=date.fromisoformat(str(r["decided_at"])[:10]),
+            moves=tuple(dict.fromkeys(moves)),
+        ))  # fmt: skip
+    return checks
 
 
 # ------------------------------------------------------------------------------------------------ J4 (one step)
+
+
+def cron_snapshot_step(conn: sqlite3.Connection, now: datetime) -> cron_types.SnapshotOutcome:
+    """Job J4's snapshot hook for :mod:`iip.services.cron` (resolved there by name): one :func:`run_daily`.
+
+    * ``as_of`` is the DATA date: the newest NAV among the user's holdings, else the newest stored NAV date; never
+      the wall clock. With no NAV at all the step refuses (cron reports the failure; nothing is invented).
+    * The stress table is the public rule table only. The user's cited stress values live in LOCAL config (U-08),
+      which a hosted deployment does not have, so those classes stay REQUIRES CONFIGURATION and their layers abstain.
+    * No cost/tax basis is loaded yet (no verified MF-redemption STT row), so shadow outcomes wait for one.
+
+    Returns an :class:`iip.services.cron.SnapshotOutcome` (identifiers and codes only)."""
+    from iip.rules.loader import load_action_templates, load_stress_table  # noqa: PLC0415 - keep import cost off J1-J3
+    from iip.services import cron  # noqa: PLC0415 - cron resolves this hook by name; avoid an import cycle
+
+    as_of = latest_data_date(conn)
+    if as_of is None:
+        newest = cron.newest_nav_date(conn)
+        if newest is None:
+            raise ValueError("no NAV data to compute a snapshot from")
+        as_of = date.fromisoformat(newest)
+    as_of = min(as_of, now.date())
+    daily = run_daily(conn, as_of=as_of, now=now.isoformat(), stress_table=load_stress_table(),
+                      templates=load_action_templates())  # fmt: skip
+    snap = daily.snapshot
+    return cron.SnapshotOutcome(
+        snapshot_id=snap.snapshot_id, as_of_date=snap.as_of.isoformat(), verdict=snap.verdict,
+        card_set_hash=snap.card_set_hash, written=snap.created,
+    )  # fmt: skip
 
 
 @dataclass(frozen=True)

@@ -110,7 +110,7 @@ describe("ActionCard", () => {
 
   it("'I did this' asks to confirm, then POSTs the card and snapshot once and shows the logged state", async () => {
     const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) =>
-      json({ card_id: shortfallCard.card_id, decision: { decision_id: "dec-1", decided_at: "2026-10-16T04:00:00+00:00", cas_confirmed: null } }),
+      json({ status: "recorded", snapshot_id: "s".repeat(64), card_id: shortfallCard.card_id, decision: { decision: "done", decision_id: "dec-1", decided_at: "2026-10-16T04:00:00+00:00", cas_confirmed: null } }),
     );
     vi.stubGlobal("fetch", fetchMock);
     show(shortfallCard);

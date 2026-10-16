@@ -259,12 +259,13 @@ def test_decisions_are_attached_to_today(conn: Any) -> None:
     snap, _ = rs.run_snapshot(conn, as_of=fx.AS_OF, now=fx.NOW, stress_table=fx.stress_table(),
                               templates=fx.TEMPLATES)  # fmt: skip
     card = next(c for c in snap.cards if c.is_action)
-    rs.record_decision(conn, snapshot_id=snap.snapshot_id, card_id=card.card_id, decision="done", note=None,
-                       now=fx.NOW)  # fmt: skip
+    logged = rs.record_decision(conn, snapshot_id=snap.snapshot_id, card_id=card.card_id, decision="done",
+                                note=None, now=fx.NOW)  # fmt: skip
     today = rs.read_today(conn)
     assert today["decisions"] == [
-        {"card_id": card.card_id, "decision": "done", "decided_at": fx.NOW, "cas_confirmed": None}
-    ]
+        {"decision_id": int(logged["decision"]["decision_id"]), "card_id": card.card_id, "decision": "done",
+         "decided_at": fx.NOW, "cas_confirmed": None}
+    ]  # fmt: skip
     abstain = next(c for c in snap.cards if not c.is_action)
     with pytest.raises(rs.DecisionRejected) as exc:
         rs.record_decision(conn, snapshot_id=snap.snapshot_id, card_id=abstain.card_id, decision="done", note=None,

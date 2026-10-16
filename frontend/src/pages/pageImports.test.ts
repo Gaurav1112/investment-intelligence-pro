@@ -9,7 +9,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const src = join(here, "..");
 
 /** Pages this package owns; every one of them must be free of static cross-page imports. */
-const CHECKED_PAGES = ["Risk", "Scenarios", "FixedIncome", "Overview", "Watchlist"];
+const CHECKED_PAGES = ["Risk", "Scenarios", "FixedIncome", "Overview", "Watchlist", "Today", "Settings", "Signals", "RuleDetail", "Goals"];
 /** Shared modules created to hold what pages used to export to each other: they must never import a page either. */
 const SHARED = ["components/analysisCommon.tsx", "components/fiCommon.tsx", "components/watchCommon.tsx", "lib/useApi.ts", "lib/api.ts"];
 

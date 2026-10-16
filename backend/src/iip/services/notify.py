@@ -20,10 +20,15 @@ What a notification may say is fixed here, not by the caller:
   allowlist, so a configured channel with no transport is REQUIRES CONFIGURATION and sends nothing.
 
 Callers pass ``now`` (ISO-8601 text); this module reads no clock.
+
+Cron hooks (job J4/J5 in :mod:`iip.services.cron`, resolved by name): :func:`enabled_channels` lists the channels that
+can actually deliver, which today is none (no transport), so cron writes no outbox row. :func:`send_ping` raises for a
+channel without a transport, so a row that somehow reaches it is never resent.
 """
 
 from __future__ import annotations
 
+import os
 import re
 import sqlite3
 from collections.abc import Iterable, Mapping
@@ -256,3 +261,32 @@ def _text_for(kind: str, as_of_date: object) -> str:
     if not isinstance(as_of_date, str):
         raise PingContentRefused("report ping without a stored snapshot date")
     return render_ping(ping_kind, date.fromisoformat(as_of_date))
+
+
+# ------------------------------------------------------------------------------------------------- cron hooks
+
+# Channel → transport. Empty on purpose: no push or Telegram host is on the fetch allowlist (user decision D7/J-9).
+TRANSPORTS: dict[Channel, PingTransport] = {}
+
+
+def enabled_channels(env: Mapping[str, str] | None = None) -> tuple[str, ...]:
+    """Channels cron may queue pings for: the configured ``IIP_NOTIFY`` channel, only if a transport can send it.
+    ``IIP_NOTIFY=off`` (the default) or a channel with no transport gives ``()``: no outbox row is written."""
+    config = NotifyConfig.from_env(os.environ if env is None else env)
+    if not config.enabled or config.channel not in TRANSPORTS:
+        return ()
+    return (str(config.channel),)
+
+
+def send_ping(row: sqlite3.Row) -> None:
+    """Send one claimed outbox row (columns ``channel``, ``kind`` and, for a report, ``as_of_date``). Raises when the
+    channel has no transport or the text is refused; cron then leaves the row for the reaper and never resends."""
+    channel = Channel(str(row["channel"]))
+    transport = TRANSPORTS.get(channel)
+    if transport is None:
+        raise PingContentRefused(f"REQUIRES CONFIGURATION: no transport for {channel}")
+    try:
+        as_of: object = row["as_of_date"]
+    except (IndexError, KeyError):
+        as_of = None
+    transport.send(_text_for(str(row["kind"]), as_of))

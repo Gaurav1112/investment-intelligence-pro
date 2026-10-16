@@ -93,6 +93,9 @@ def test_data_health_uses_at_most_three_statements(app: tuple[TestClient, dict[s
     assert len(counter.statements) <= 3, counter.statements
     assert counter.writes == []
     assert {s["source_id"] for s in body["sources"]} == set(REGISTRY)
+    # The registry's own status label and its evidence reference travel with each source (C04 DataRightsPanel).
+    assert all(s["status"] == REGISTRY[s["source_id"]].status.value for s in body["sources"])
+    assert all(s["status_ref"] == REGISTRY[s["source_id"]].status_ref for s in body["sources"])
 
 
 def test_data_health_last_run_matches_one_query_per_source(

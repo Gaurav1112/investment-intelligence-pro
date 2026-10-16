@@ -81,14 +81,15 @@ CREATE TABLE user_tax_context (
 CREATE TABLE policy_versions (
     policy_version_id   INTEGER PRIMARY KEY AUTOINCREMENT,
     policy_json         TEXT NOT NULL,  -- canonical JSON (sorted keys), Decimal values as strings
-    policy_hash         TEXT NOT NULL UNIQUE,  -- sha256 of policy_json
+    policy_hash         TEXT NOT NULL,  -- sha256 of policy_json. NOT unique: reverting to an earlier policy is a new
+                                        -- decision and appends a new version (dedupe is against the latest only)
     decided_at          TEXT NOT NULL,  -- the date the user made the decision
     created_at          TEXT NOT NULL
 );
 CREATE TRIGGER policy_versions_no_update BEFORE UPDATE ON policy_versions
 BEGIN SELECT RAISE(ABORT, 'append-only constraint: policy_versions'); END;
 CREATE TRIGGER policy_versions_no_replace BEFORE INSERT ON policy_versions
-WHEN EXISTS (SELECT 1 FROM policy_versions WHERE policy_version_id = NEW.policy_version_id OR policy_hash = NEW.policy_hash)
+WHEN EXISTS (SELECT 1 FROM policy_versions WHERE policy_version_id = NEW.policy_version_id)
 BEGIN SELECT RAISE(ABORT, 'append-only constraint: policy_versions row exists'); END;
 CREATE TRIGGER policy_versions_no_delete BEFORE DELETE ON policy_versions
 WHEN NOT EXISTS (SELECT 1 FROM ledger_erase_gate)
@@ -111,6 +112,9 @@ CREATE TABLE decisions_log (
     CHECK (cas_confirmed IS NULL OR decision = 'done')
 );
 CREATE INDEX ix_decisions_log_card ON decisions_log(card_id, decided_at);
+-- Today's one-statement read joins the decisions of ONE snapshot (risk_snapshot.TODAY_SQL): without this index the
+-- correlated subquery scans the whole (never pruned) log on every page load.
+CREATE INDEX ix_decisions_log_snapshot ON decisions_log(snapshot_id, card_id);
 CREATE TRIGGER decisions_log_no_update BEFORE UPDATE OF decision_id, card_id, snapshot_id, goal_id, decision, note,
     decided_at ON decisions_log
 BEGIN SELECT RAISE(ABORT, 'append-only constraint: decisions_log'); END;
@@ -132,7 +136,9 @@ CREATE TABLE series_grid (
     month               TEXT NOT NULL CHECK (month GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]'),
     nav_date            TEXT NOT NULL,  -- the last NAV date on or before month end
     nav                 TEXT NOT NULL,  -- Decimal string exactly as published
-    source_obs_id       INTEGER REFERENCES observations(obs_id),
+    -- SET NULL: the U-01 data-minimisation prune may delete the daily observation behind a point once its scheme is
+    -- no longer held or watched; nav_date and nav stay as the trace (the prune must never fail on this reference).
+    source_obs_id       INTEGER REFERENCES observations(obs_id) ON DELETE SET NULL,
     refreshed_at        TEXT NOT NULL,
     PRIMARY KEY (instrument_id, month),
     CHECK (substr(nav_date, 1, 7) = month)
@@ -175,7 +181,7 @@ CREATE TABLE cron_runs (
 );
 
 -- Engine output: immutable and content-addressed (snapshot_id = sha256 of engine version, rules version and input
--- manifest hash). ABSTAIN is stored too. Today reads the newest row in one statement (ix_signal_snapshots_latest).
+-- manifest hash). ABSTAIN is stored too. Today reads the snapshot of the newest snapshot_runs row in one statement.
 CREATE TABLE signal_snapshots (
     snapshot_id         TEXT PRIMARY KEY,
     as_of_date          TEXT NOT NULL,  -- newest observation date used, from the data
@@ -196,6 +202,25 @@ BEGIN SELECT RAISE(ABORT, 'append-only constraint: signal_snapshots row exists')
 CREATE TRIGGER signal_snapshots_no_delete BEFORE DELETE ON signal_snapshots
 WHEN NOT EXISTS (SELECT 1 FROM ledger_erase_gate)
 BEGIN SELECT RAISE(ABORT, 'append-only constraint: signal_snapshots'); END;
+
+-- One row per snapshot COMPUTATION (append-only). A snapshot row is content-addressed and written once, so its
+-- created_at is the FIRST time that content was computed: after inputs go A -> B -> A, A's row is older than B's.
+-- "Which snapshot is current" is therefore the newest run, never the newest snapshot row (Today, J4, J5).
+CREATE TABLE snapshot_runs (
+    run_id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    snapshot_id         TEXT NOT NULL REFERENCES signal_snapshots(snapshot_id),
+    as_of_date          TEXT NOT NULL,  -- the snapshot's data date (copied, so the latest-run index covers it)
+    computed_at         TEXT NOT NULL
+);
+CREATE INDEX ix_snapshot_runs_latest ON snapshot_runs(as_of_date, computed_at, run_id);
+CREATE TRIGGER snapshot_runs_no_update BEFORE UPDATE ON snapshot_runs
+BEGIN SELECT RAISE(ABORT, 'append-only constraint: snapshot_runs'); END;
+CREATE TRIGGER snapshot_runs_no_replace BEFORE INSERT ON snapshot_runs
+WHEN EXISTS (SELECT 1 FROM snapshot_runs WHERE run_id = NEW.run_id)
+BEGIN SELECT RAISE(ABORT, 'append-only constraint: snapshot_runs row exists'); END;
+CREATE TRIGGER snapshot_runs_no_delete BEFORE DELETE ON snapshot_runs
+WHEN NOT EXISTS (SELECT 1 FROM ledger_erase_gate)
+BEGIN SELECT RAISE(ABORT, 'append-only constraint: snapshot_runs'); END;
 
 -- Ping outbox: at most one send per (message, channel). A 'sending' row past its lease is reaped to 'failed' and
 -- never resent (losing a ping is the safe direction).

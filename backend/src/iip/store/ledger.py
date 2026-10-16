@@ -340,25 +340,40 @@ class SignalSnapshot:
 
 
 def put_snapshot(conn: sqlite3.Connection, snap: SignalSnapshot) -> bool:
-    """Content-addressed: the same id twice is a no-op (True only when a row was written). The same id with a
-    different payload means the id was not derived from the content: refused."""
+    """Content-addressed: the same id twice writes no second snapshot row (True only when a row was written). The
+    same id with a different payload means the id was not derived from the content: refused.
+
+    Every call ALSO appends a ``snapshot_runs`` row (computed_at = ``snap.created_at``), so the snapshot just
+    computed becomes the current one even when its content was first stored earlier (inputs A -> B -> A)."""
     cur = conn.execute(  # not ON CONFLICT DO NOTHING: the no-replace trigger would fire first (migration 0004)
         f"INSERT INTO signal_snapshots({','.join(_columns(SignalSnapshot))}) SELECT {','.join('?' * 9)}"  # noqa: S608
         " WHERE NOT EXISTS (SELECT 1 FROM signal_snapshots WHERE snapshot_id = ?)",
         (*_values(snap), snap.snapshot_id),
     )
-    if int(cur.rowcount) == 1:
-        return True
-    row = conn.execute("SELECT payload_json FROM signal_snapshots WHERE snapshot_id=?", (snap.snapshot_id,)).fetchone()
-    if row is not None and row["payload_json"] != snap.payload_json:
-        raise LedgerConflict(f"snapshot {snap.snapshot_id} already stored with a different payload")
-    return False
+    created = int(cur.rowcount) == 1
+    if not created:
+        row = conn.execute(
+            "SELECT payload_json FROM signal_snapshots WHERE snapshot_id=?", (snap.snapshot_id,)
+        ).fetchone()
+        if row is not None and row["payload_json"] != snap.payload_json:
+            raise LedgerConflict(f"snapshot {snap.snapshot_id} already stored with a different payload")
+    conn.execute(
+        "INSERT INTO snapshot_runs(snapshot_id, as_of_date, computed_at) VALUES (?, ?, ?)",
+        (snap.snapshot_id, snap.as_of_date, snap.created_at),
+    )
+    return created
+
+
+# The current snapshot = the one of the newest computation (snapshot_runs), never the newest snapshot row: a
+# content-addressed row keeps the created_at of its FIRST computation. Served by ix_snapshot_runs_latest.
+LATEST_RUN_ORDER = "r.as_of_date DESC, r.computed_at DESC, r.run_id DESC"
 
 
 def latest_snapshot(conn: sqlite3.Connection) -> sqlite3.Row | None:
-    """Today's read: ONE statement, served by ix_signal_snapshots_latest."""
+    """Today's read: ONE statement. Columns of ``signal_snapshots`` plus ``computed_at`` of the newest run."""
     row: sqlite3.Row | None = conn.execute(
-        "SELECT * FROM signal_snapshots ORDER BY as_of_date DESC, created_at DESC LIMIT 1"
+        "SELECT s.*, r.computed_at FROM snapshot_runs r JOIN signal_snapshots s ON s.snapshot_id = r.snapshot_id"
+        f" ORDER BY {LATEST_RUN_ORDER} LIMIT 1"  # noqa: S608 - module constant
     ).fetchone()
     return row
 
@@ -531,6 +546,7 @@ USER_TABLES_0004: tuple[str, ...] = (
     "backtest_runs",
     "backtest_trials",
     "notification_outbox",
+    "snapshot_runs",
     "signal_snapshots",
     "decisions_log",
     "holding_goal_map",

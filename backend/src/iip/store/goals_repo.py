@@ -235,8 +235,10 @@ class PolicyVersion:
 def append_policy_version(
     conn: sqlite3.Connection, policy: dict[str, Any], decided_at: str, now: str
 ) -> tuple[int, bool]:
-    """Store the user's policy as a new version. Content-addressed: an identical policy returns the existing
-    version. Returns ``(policy_version_id, created)``. Floats are refused (use Decimal or a string)."""
+    """Store the user's policy as a new version. Saving the policy that is ALREADY the latest version is a no-op
+    and returns that version; any other policy (including a return to an earlier one: A -> B -> A) appends a new
+    version, so the latest version is always the policy the user saved last. Returns ``(policy_version_id,
+    created)``. Floats are refused (use Decimal or a string)."""
 
     def no_float(o: object) -> None:
         if isinstance(o, float):
@@ -253,17 +255,24 @@ def append_policy_version(
     digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
     cur = conn.execute(
         "INSERT INTO policy_versions(policy_json, policy_hash, decided_at, created_at) SELECT ?, ?, ?, ?"
-        " WHERE NOT EXISTS (SELECT 1 FROM policy_versions WHERE policy_hash = ?)",  # see migration 0004 header
+        " WHERE NOT EXISTS (SELECT 1 FROM (SELECT policy_hash FROM policy_versions"  # noqa: S608 - module constant
+        f" ORDER BY {_LATEST_POLICY_ORDER} LIMIT 1) WHERE policy_hash = ?)",  # see migration 0004 header
         (body, digest, decided_at, now, digest),
     )
     created = int(cur.rowcount) == 1
-    row = conn.execute("SELECT policy_version_id FROM policy_versions WHERE policy_hash=?", (digest,)).fetchone()
+    row = conn.execute(
+        "SELECT policy_version_id FROM policy_versions WHERE policy_hash=? ORDER BY policy_version_id DESC LIMIT 1",
+        (digest,),
+    ).fetchone()
     return int(row["policy_version_id"]), created
+
+
+_LATEST_POLICY_ORDER = "decided_at DESC, policy_version_id DESC"
 
 
 def latest_policy_version(conn: sqlite3.Connection) -> PolicyVersion | None:
     r = conn.execute(
-        "SELECT * FROM policy_versions ORDER BY decided_at DESC, policy_version_id DESC LIMIT 1"
+        f"SELECT * FROM policy_versions ORDER BY {_LATEST_POLICY_ORDER} LIMIT 1"  # noqa: S608 - module constant
     ).fetchone()
     if r is None:
         return None

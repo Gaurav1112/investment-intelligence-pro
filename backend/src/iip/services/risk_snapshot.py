@@ -1046,12 +1046,12 @@ class SnapshotRun:
 
 
 def store_snapshot(conn: sqlite3.Connection, snap: Snapshot, now: str) -> SnapshotRun:
-    """Store a computed snapshot (content-addressed; idempotent). Two statements: the previous card-set hash and
-    the conditional insert (plus one more only when the id already exists, to verify the stored payload)."""
+    """Store a computed snapshot (content-addressed; idempotent) and record this computation as the current one.
+    Three statements: the current snapshot's card-set hash, the conditional insert and the run row (plus one more
+    only when the id already exists, to verify the stored payload)."""
     prev = conn.execute(
-        "SELECT card_set_hash FROM signal_snapshots WHERE snapshot_id <> ? ORDER BY as_of_date DESC, created_at DESC"
-        " LIMIT 1",
-        (snap.snapshot_id,),
+        "SELECT s.card_set_hash FROM snapshot_runs r JOIN signal_snapshots s ON s.snapshot_id = r.snapshot_id"
+        f" ORDER BY {ledger.LATEST_RUN_ORDER} LIMIT 1"  # noqa: S608 - module constant
     ).fetchone()
     created = ledger.put_snapshot(
         conn,
@@ -1080,14 +1080,16 @@ def run_snapshot(
 
 # ------------------------------------------------------------------------------------------------ Today (read side)
 
-# ONE statement: the newest snapshot plus the decisions already recorded against its cards (json_group_array is in
-# SQLite's JSON1 and in libSQL). Served by ix_signal_snapshots_latest. The engine never runs here.
+# ONE statement: the snapshot of the newest computation (snapshot_runs, so inputs reverted A -> B -> A show A again)
+# plus the decisions already recorded against its cards (json_group_array is in SQLite's JSON1 and in libSQL).
+# Served by ix_snapshot_runs_latest and ix_decisions_log_snapshot. The engine never runs here.
 TODAY_SQL = (
-    "SELECT s.snapshot_id, s.as_of_date, s.verdict, s.payload_json, s.created_at,"
+    "SELECT s.snapshot_id, s.as_of_date, s.verdict, s.payload_json, r.computed_at,"
     " (SELECT json_group_array(json_object('decision_id', d.decision_id, 'card_id', d.card_id,"
     " 'decision', d.decision, 'decided_at', d.decided_at, 'cas_confirmed', d.cas_confirmed))"
     " FROM decisions_log d WHERE d.snapshot_id = s.snapshot_id) AS decisions"
-    " FROM signal_snapshots s ORDER BY s.as_of_date DESC, s.created_at DESC LIMIT 1"
+    " FROM snapshot_runs r JOIN signal_snapshots s ON s.snapshot_id = r.snapshot_id"
+    f" ORDER BY {ledger.LATEST_RUN_ORDER} LIMIT 1"
 )
 NO_SNAPSHOT = "NO_SNAPSHOT"
 DECISIONS = ("done", "not_now", "disagree")
@@ -1103,7 +1105,7 @@ def read_today(conn: sqlite3.Connection) -> dict[str, Any]:
     payload["decisions"] = sorted(
         decisions, key=lambda d: (d["decided_at"], d["card_id"], d["decision"], d.get("decision_id") or 0)
     )
-    payload["computed_at"] = row["created_at"]
+    payload["computed_at"] = row["computed_at"]
     return payload
 
 

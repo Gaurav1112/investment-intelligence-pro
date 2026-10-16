@@ -173,16 +173,28 @@ def test_body_cap_still_applies() -> None:
     assert call(mw, "/api/cron/navall", method="POST", extra=too_big) == 413
 
 
-def test_wrong_secrets_are_rate_limited_and_lock_out_even_the_right_one() -> None:
+def test_wrong_secrets_are_rate_limited_but_never_lock_out_the_right_one() -> None:
+    """fastapi-reviewer-1 / security-reviewer-3: only wrong attempts are limited. The correct secret still runs the
+    job during a lockout (otherwise anyone could suppress the public cron schedule with junk bearers)."""
     clock = _Clock()
     mw, app = _mw(_cron(clock))
     for _ in range(CRON_RATE_LIMIT):
         assert call(mw, "/api/cron/navall", bearer="guess") == 401
     assert call(mw, "/api/cron/navall", bearer="guess") == 429
-    assert call(mw, "/api/cron/navall") == 429  # a correct guess during lockout learns nothing
-    assert app.calls == []
-    clock.t += 61
     assert call(mw, "/api/cron/navall") == 200
+    assert len(app.calls) == 1
+    clock.t += 61
+    assert call(mw, "/api/cron/navall", bearer="guess") == 401
+
+
+def test_junk_on_the_public_host_cannot_suppress_the_scheduled_jobs() -> None:
+    clock = _Clock()
+    mw, app = _mw(_cron(clock))
+    for _ in range(CRON_RATE_LIMIT + 3):
+        assert call(mw, "/api/cron/x", host=PUBLIC, bearer="junk") in (401, 429)
+    for job in ("navall", "navall-continue", "history", "snapshot", "watchdog"):
+        assert call(mw, f"/api/cron/{job}") == 200
+    assert len(app.calls) == 5
 
 
 def test_correct_secret_does_not_consume_the_limit() -> None:

@@ -298,3 +298,22 @@ def test_today_query_and_snapshot_work_on_libsql(tmp_path: Path) -> None:
     assert today["snapshot_id"] == snap.snapshot_id
     assert [d["decision"] for d in today["decisions"]] == ["not_now"]
     conn.close()
+
+
+def test_today_follows_inputs_reverted_on_the_same_data_date(conn: Any) -> None:
+    """python-reviewer-1 / database-reviewer-03: inputs A -> B -> A on one data date. The third run re-uses A's
+    content-addressed row; Today must show A again, not B (whose row is newer)."""
+    fx.seed_two_goals(conn)
+    kw: dict[str, Any] = {"as_of": fx.AS_OF, "stress_table": fx.stress_table(), "templates": fx.TEMPLATES}
+    a, run_a = rs.run_snapshot(conn, now="2026-10-16T05:00:00+00:00", **kw)
+    house = next(g for g in goals_repo.list_goals(conn) if g.goal_id == "g-house")
+    goals_repo.upsert_goals(conn, [replace(house, loss_budget_inr=Decimal("90000"))], fx.NOW)
+    b, _ = rs.run_snapshot(conn, now="2026-10-16T05:10:00+00:00", **kw)
+    goals_repo.upsert_goals(conn, [house], fx.NOW)
+    again, run_again = rs.run_snapshot(conn, now="2026-10-16T05:20:00+00:00", **kw)
+    assert a.snapshot_id != b.snapshot_id and again.snapshot_id == a.snapshot_id
+    assert run_a.created and not run_again.created
+    assert run_again.card_set_changed  # B -> A changes the action set back
+    today = rs.read_today(conn)
+    assert today["snapshot_id"] == a.snapshot_id
+    assert today["computed_at"] == "2026-10-16T05:20:00+00:00"

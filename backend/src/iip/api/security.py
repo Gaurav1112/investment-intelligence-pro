@@ -388,9 +388,10 @@ class SecurityMiddleware:
         if method not in CRON_METHODS:
             await self._deny(send, 405, "METHOD_NOT_ALLOWED")
             return
-        if await run_in_threadpool(cron.limiter.exhausted):
-            await self._deny(send, 429, "RATE_LIMITED")
-            return
+        # The bearer is checked FIRST (constant time) and a correct secret always passes: only wrong attempts count
+        # toward the shared limit and only they get 429. Locking out the correct secret would let anyone with no
+        # secret suppress every scheduled job (the schedule is public in vercel.json; Vercel does not retry a cron
+        # call), and it adds nothing against guessing: the secret has at least MIN_HOSTED_TOKEN_CHARS of entropy.
         auth = _header_values(scope, b"authorization")
         scheme, _, presented = (auth[0] if len(auth) == 1 else "").partition(" ")
         if not (scheme.lower() == "bearer" and hmac.compare_digest(presented.encode(), cron.secret.encode())):

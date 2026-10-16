@@ -24,7 +24,7 @@ from ._ledger_fixtures import DRIVERS, NOW, open_db
 PLAN_TABLES = {
     "goals", "holding_goal_map", "risk_profile", "user_tax_context", "policy_versions", "decisions_log",
     "series_grid", "cron_runs", "signal_snapshots", "notification_outbox", "signal_rules", "rule_role_bindings",
-    "backtest_trials", "backtest_runs", "rule_evaluations", "outcomes", "restatements",
+    "backtest_trials", "backtest_runs", "rule_evaluations", "outcomes", "restatements", "snapshot_runs",
 }  # fmt: skip
 
 APPEND_ONLY_TRIGGERS = {
@@ -37,10 +37,11 @@ APPEND_ONLY_TRIGGERS = {
     "backtest_runs_no_update", "backtest_runs_no_delete",
     "rule_evaluations_no_update", "rule_evaluations_no_delete",
     "outcomes_no_update", "outcomes_no_delete",
+    "snapshot_runs_no_update", "snapshot_runs_no_delete",
 } | {
     f"{t}_no_replace" for t in (
         "policy_versions", "decisions_log", "restatements", "signal_snapshots", "signal_rules", "backtest_trials",
-        "backtest_runs", "rule_evaluations", "outcomes",
+        "backtest_runs", "rule_evaluations", "outcomes", "snapshot_runs",
     )
 }  # fmt: skip
 

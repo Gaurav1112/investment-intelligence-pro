@@ -324,3 +324,22 @@ describe("Return-target feasibility — at a glance", () => {
     expect(screen.queryByText(/At a glance/)).not.toBeInTheDocument();
   });
 });
+
+// ------------------------------------------------------------------ fetch (A06)
+
+describe("Scenarios — no full history to show a name (A06)", () => {
+  it("a ?id= deep link resolves the instrument name from /summary, never from the full-history detail", async () => {
+    const calls = stubFetch((url) =>
+      url === "/api/profile"
+        ? json(PROFILE(null))
+        : url.endsWith("/summary")
+          ? json({ instrument: { instrument_id: "mf:900003", name: "SYNTHETIC Fund Z", kind: "mf_scheme", origin: "fixture" } })
+          : json(SCENARIO_EQUITY_ZERO),
+    );
+    renderAt("/scenarios?id=mf:900003");
+    expect((await screen.findAllByText("SYNTHETIC Fund Z")).length).toBeGreaterThan(0);
+    const gets = calls.filter((c) => c.method === "GET").map((c) => c.url);
+    expect(gets).toContain("/api/instruments/mf%3A900003/summary");
+    expect(gets.filter((u) => /^\/api\/instruments\/[^/?]+$/.test(u))).toEqual([]);
+  });
+});

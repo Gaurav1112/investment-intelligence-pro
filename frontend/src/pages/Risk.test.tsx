@@ -55,7 +55,7 @@ describe("Risk page", () => {
     await screen.findByText("Annualised volatility");
     expect(calls.map((c) => c.url).sort()).toEqual([
       "/api/forecast/mf%3A900003",
-      "/api/instruments/mf%3A900003",
+      "/api/instruments/mf%3A900003/summary", // the name comes from the summary, never the full-history detail (A06)
       "/api/risk/mf%3A900003",
     ]);
     // An id from the URL is shown by its name, not as a bare internal id (live-browser finding).
@@ -176,5 +176,17 @@ describe("yield carry on the forecast (TS-1)", () => {
     renderAt("/risk?id=mf:900002");
     const na = await screen.findByRole("region", { name: "Yield carry (debt funds)" });
     expect(na).toHaveTextContent("Yield carry applies to debt-category funds only.");
+  });
+});
+
+describe("Risk — fetch (A06)", () => {
+  it("when the summary is unavailable the id is shown and the full-history detail is still not fetched", async () => {
+    const calls = stubFetch((url) =>
+      url.startsWith("/api/risk/") ? json(RISK_EQUITY) : url.endsWith("/summary") ? json({ code: "NOT_FOUND" }, 404) : json(FORECAST),
+    );
+    renderAt("/risk?id=mf:900003");
+    await screen.findByText("Annualised volatility");
+    expect(screen.getAllByText("mf:900003").length).toBeGreaterThan(0);
+    expect(calls.filter((c) => /^\/api\/instruments\/[^/?]+$/.test(c.url))).toEqual([]);
   });
 });

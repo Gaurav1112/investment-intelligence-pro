@@ -229,7 +229,23 @@ const ONE_GOAL = {
   },
 };
 
-function setupWizard(state: unknown = SETUP_EMPTY, portfolios: unknown[] = [{ portfolio_id: "p1", name: "Mine", nature: "actual", created_at: "2026-01-01T00:00:00Z", transactions: 0 }]) {
+type SetupGoalWire = { goal_id: string | null; name: string; priority: number; target_amount: string | null; target_date: string | null; loss_budget_inr: string | null; recovery_months: number | null };
+type GoalExtras = Record<string, { objective: string | null; h_safe_years: string | null }>;
+
+/** The Goals overview for the same goals (GET /api/goals): it also carries objective and h_safe_years, which the setup
+ * answers do not. */
+function goalsView(state: unknown, extras: GoalExtras = {}) {
+  const goals = ((state as typeof SETUP_EMPTY).answers.goals as SetupGoalWire[]).map((g) => ({
+    ...g, objective: null, h_safe_years: null, ...extras[g.goal_id ?? ""], holdings: [], outcome: "ABSTAIN", abstentions: [],
+  }));
+  return { as_of: "2026-10-16", stress_history: STRESS, goals, setup_complete: false, missing: [] };
+}
+
+function setupWizard(
+  state: unknown = SETUP_EMPTY,
+  portfolios: unknown[] = [{ portfolio_id: "p1", name: "Mine", nature: "actual", created_at: "2026-01-01T00:00:00Z", transactions: 0 }],
+  opts: { extras?: GoalExtras; putAnswers?: (body: typeof SETUP_EMPTY.answers) => unknown } = {},
+) {
   const calls: Call[] = [];
   vi.stubGlobal(
     "fetch",
@@ -237,8 +253,14 @@ function setupWizard(state: unknown = SETUP_EMPTY, portfolios: unknown[] = [{ po
       const method = init?.method ?? "GET";
       const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
       calls.push({ url, method, body });
-      if (url === "/api/goals/setup" && method === "PUT") return json({ ...SETUP_EMPTY, answers: body, missing: [], complete: true });
+      if (url === "/api/goals/setup" && method === "PUT") {
+        // Like the server: a goal sent without an id is created and comes back with one.
+        const goals = (body.goals as SetupGoalWire[]).map((g, i) => ({ ...g, goal_id: g.goal_id ?? `g-new${i + 1}` }));
+        const answers = opts.putAnswers ? opts.putAnswers(body) : { ...body, goals };
+        return json({ ...SETUP_EMPTY, answers, missing: [], complete: true });
+      }
       if (url === "/api/goals/setup") return json(state);
+      if (url === "/api/goals" && method === "GET") return json(goalsView(state, opts.extras));
       if (url === "/api/portfolios" && method === "POST")
         return json({ portfolio_id: "p-new", name: body.name, nature: body.nature, created_at: "2026-01-01T00:00:00Z" });
       if (url === "/api/portfolios") return json({ items: portfolios });
@@ -384,5 +406,128 @@ describe("Setup: one upload and about six answers (C02)", () => {
     await screen.findByRole("heading", { level: 1, name: "Your objectives" });
     await userEvent.click(screen.getByRole("button", { name: "5. Liquidity & extras" }));
     expect(screen.queryByLabelText(/Return you are hoping for/)).not.toBeInTheDocument();
+  });
+
+  it("'Preview CAS import' never submits the setup form: no nested form, no PUT (react-reviewer-1)", async () => {
+    const calls = setupWizard();
+    await screen.findByRole("heading", { level: 1, name: "Setup" });
+    const preview = await screen.findByRole("button", { name: "Preview CAS import" }, { timeout: 5000 });
+    expect(document.querySelector("form form")).toBeNull();
+    await userEvent.click(preview);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(calls.filter((c) => c.method === "PUT").map((c) => c.url)).toEqual([]);
+  });
+
+  it("a second Save sends the server-assigned goal_id, so goals are not created twice (react-reviewer-2)", async () => {
+    const calls = setupWizard();
+    await screen.findByRole("heading", { level: 1, name: "Setup" });
+    await step(/4\. Goals/);
+    await userEvent.click(screen.getByRole("button", { name: "Add “Emergency”" }));
+    await step(/8\. Review/);
+    await userEvent.click(screen.getByRole("button", { name: "Save setup" }));
+    await screen.findByText(/Setup saved/);
+    await userEvent.click(screen.getByRole("button", { name: "Save setup" }));
+    await waitFor(() => expect(calls.filter((c) => c.method === "PUT")).toHaveLength(2));
+    const [first, second] = calls.filter((c) => c.method === "PUT") as [Call, Call];
+    expect((first.body as { goals: SetupGoalWire[] }).goals[0]!.goal_id).toBeNull();
+    expect((second.body as { goals: SetupGoalWire[] }).goals[0]!.goal_id).toBe("g-new1");
+  });
+
+  it("a saved goal cannot be silently 'removed' in setup: it points to Delete on the Goals page (react-reviewer-3)", async () => {
+    setupWizard(ONE_GOAL);
+    await screen.findByRole("heading", { level: 1, name: "Setup" });
+    await step(/4\. Goals/);
+    expect(screen.queryByRole("button", { name: "Remove “Long-term growth”" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Delete it on the Goals page/ })).toHaveAttribute("href", "/goals");
+    // A goal that is not saved yet can still be removed before saving.
+    await userEvent.click(screen.getByRole("button", { name: "Add “Emergency”" }));
+    expect(screen.getByRole("button", { name: "Remove “Emergency”" })).toBeInTheDocument();
+  });
+
+  it("clearing a saved answer that the server keeps is reported, not shown as saved (react-reviewer-3)", async () => {
+    const saved = { ...SETUP_EMPTY, answers: { ...SETUP_EMPTY.answers, extras: { ...SETUP_EMPTY.answers.extras, savings_balance: "50000" } } };
+    setupWizard(saved, undefined, {
+      // The server merges: a null leaves the stored value in place.
+      putAnswers: (body) => ({ ...body, extras: { ...body.extras, savings_balance: "50000" } }),
+    });
+    await screen.findByRole("heading", { level: 1, name: "Setup" });
+    await step(/7\. Optional/);
+    await userEvent.clear(screen.getByLabelText(/Savings account balance/));
+    await step(/8\. Review/);
+    await userEvent.click(screen.getByRole("button", { name: "Save setup" }));
+    const status = await screen.findByText(/Setup saved/);
+    expect(status.closest("[role=status]")).toHaveTextContent(/Not cleared: Savings account balance/);
+    await step(/7\. Optional/);
+    expect(screen.getByLabelText(/Savings account balance/)).toHaveValue("50000");
+  });
+
+  it("saving setup keeps each saved goal's objective and safe-horizon years (typescript-reviewer-2)", async () => {
+    const calls = setupWizard(ONE_GOAL, undefined, { extras: { g1: { objective: "D_growth", h_safe_years: "3" } } });
+    await screen.findByRole("heading", { level: 1, name: "Setup" });
+    await step(/8\. Review/);
+    await userEvent.click(screen.getByRole("button", { name: "Save setup" }));
+    await waitFor(() => expect(calls.some((c) => c.method === "PUT")).toBe(true));
+    expect((calls.find((c) => c.method === "PUT")!.body as { goals: unknown[] }).goals[0]).toMatchObject({
+      goal_id: "g1", objective: "D_growth", h_safe_years: "3",
+    });
+  });
+
+  it("if the goals overview cannot be read, setup does not save over the stored goals (abstains instead)", async () => {
+    const calls: Call[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        const method = init?.method ?? "GET";
+        calls.push({ url, method, body: undefined });
+        if (url === "/api/goals/setup") return json(ONE_GOAL);
+        if (url === "/api/goals") return json({ code: "INTERNAL" }, 500);
+        if (url === "/api/portfolios") return json({ items: [] });
+        return json(STATUS);
+      }),
+    );
+    render(
+      <MemoryRouter initialEntries={["/onboarding"]}>
+        <ProfileProvider>
+          <Onboarding />
+        </ProfileProvider>
+      </MemoryRouter>,
+    );
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save setup" })).not.toBeInTheDocument();
+    expect(calls.some((c) => c.method === "PUT")).toBe(false);
+  });
+});
+
+describe("Setup focus management (a11y-architect-3)", () => {
+  it("Next on the last answer step moves focus to the Review step heading", async () => {
+    setupWizard();
+    await screen.findByRole("heading", { level: 1, name: "Setup" });
+    await step(/7\. Optional/);
+    await userEvent.click(screen.getByRole("button", { name: "Next" }));
+    expect(screen.getByRole("heading", { name: /Review/ })).toBeInTheDocument();
+    expect(document.activeElement).not.toBe(document.body);
+    expect(screen.getByRole("heading", { level: 2, name: /Step 8 of 8: Review/ })).toHaveFocus();
+  });
+
+  it("Back onto the first step moves focus to that step's heading", async () => {
+    setupWizard();
+    await screen.findByRole("heading", { level: 1, name: "Setup" });
+    await step(/2\. Tax/);
+    await userEvent.click(screen.getByRole("button", { name: "Back" }));
+    expect(document.activeElement).not.toBe(document.body);
+    expect(screen.getByRole("heading", { level: 2, name: /Step 1 of 8: Upload CAS/ })).toHaveFocus();
+  });
+
+  it("removing an unsaved goal keeps focus on the page (next goal, else 'Add another goal')", async () => {
+    setupWizard();
+    await screen.findByRole("heading", { level: 1, name: "Setup" });
+    await step(/4\. Goals/);
+    await userEvent.click(screen.getByRole("button", { name: "Add “Emergency”" }));
+    await userEvent.click(screen.getByRole("button", { name: "Add “Medium-term”" }));
+    await userEvent.click(screen.getByRole("button", { name: "Remove “Emergency”" }));
+    expect(screen.getByLabelText("Goal amount (₹) — Medium-term").closest("fieldset")!.querySelector("input")).toHaveFocus();
+    await userEvent.click(screen.getByRole("button", { name: "Remove “Medium-term”" }));
+    expect(document.activeElement).not.toBe(document.body);
+    expect(screen.getByRole("button", { name: "Add another goal" })).toHaveFocus();
   });
 });

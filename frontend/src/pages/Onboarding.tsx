@@ -15,6 +15,8 @@ import {
   rupeesTimesFraction,
   yearsToMonths,
   type GoalIn,
+  type GoalObjective,
+  type GoalsView,
   type SetupAnswers,
   type SetupState,
   type StressHistory,
@@ -472,7 +474,15 @@ function toForm(a: SetupAnswers): Form {
 const optMoney = (t: string) => (t.trim() === "" ? null : money(t));
 const optInt = (t: string) => (t.trim() === "" ? null : Number.parseInt(t, 10));
 
-function toAnswers(f: Form): SetupAnswers {
+/** A saved goal's fields that setup does not edit but the server's write REPLACES (services/goals.py _to_goal), keyed by
+ * goal_id, read from GET /api/goals. Setup sends them back unchanged so saving setup never erases them. */
+type StoredGoalFields = ReadonlyMap<string, { objective: GoalObjective | null; h_safe_years: string | null }>;
+
+function storedGoalFields(view: GoalsView): StoredGoalFields {
+  return new Map(view.goals.map((g) => [g.goal_id, { objective: g.objective ?? null, h_safe_years: g.h_safe_years ?? null }]));
+}
+
+function toAnswers(f: Form, stored: StoredGoalFields): SetupAnswers {
   const conservative = f.taxChoice === "conservative";
   const slab = conservative ? null : pctToFraction(f.slab);
   return {
@@ -493,9 +503,25 @@ function toAnswers(f: Form): SetupAnswers {
       target_date: g.date || null,
       loss_budget_inr: optMoney(g.loss),
       recovery_months: optInt(g.recovery),
+      ...(g.goal_id === null ? {} : stored.get(g.goal_id)),
     })),
     extras: { ltcg_used_inr: optMoney(f.ltcg), savings_balance: optMoney(f.savings), sweep_fd_balance: optMoney(f.sweep) },
   };
+}
+
+/** Answers the user cleared (sent as null) that the server kept: its setup write merges, so a null leaves a stored
+ * value in place. Named after the save instead of being reported as saved. */
+function notCleared(sent: SetupAnswers, got: SetupAnswers): string[] {
+  const pairs: [string, unknown, unknown][] = [
+    ["Income-tax regime", sent.tax.regime, got.tax.regime],
+    ["Marginal income-tax slab", sent.tax.slab_rate, got.tax.slab_rate],
+    ["Essential monthly expenses", sent.emergency.essential_monthly_expenses, got.emergency.essential_monthly_expenses],
+    ["Emergency fund months", sent.emergency.months, got.emergency.months],
+    ["Equity long-term gains already realised elsewhere", sent.extras.ltcg_used_inr, got.extras.ltcg_used_inr],
+    ["Savings account balance", sent.extras.savings_balance, got.extras.savings_balance],
+    ["Sweep / auto FD balance", sent.extras.sweep_fd_balance, got.extras.sweep_fd_balance],
+  ];
+  return pairs.filter(([, a, b]) => a === null && b !== null && b !== undefined).map(([label]) => label);
 }
 
 function validate(f: Form): FieldError[] {
@@ -617,6 +643,8 @@ function inrOrNotGiven(v: string) {
 
 function Setup() {
   const state = useApi<SetupState>("/api/goals/setup");
+  // Only for the fields setup must send back unchanged (StoredGoalFields); never shown.
+  const overview = useApi<GoalsView>("/api/goals");
   const [f, setF] = useState<Form>(() => toForm(EMPTY_ANSWERS));
   const [loaded, setLoaded] = useState(false);
   const [step, setStep] = useState(0);
@@ -624,8 +652,11 @@ function Setup() {
   const [summaryKey, setSummaryKey] = useState(0);
   const [focusField, setFocusField] = useState<string | null>(null);
   const [result, setResult] = useState<SetupState | null>(null);
+  const [kept, setKept] = useState<string[]>([]);
   const nextKey = useRef(1000);
   const summaryRef = useRef<HTMLDivElement>(null);
+  const stepTitle = useRef<HTMLHeadingElement>(null);
+  const shownStep = useRef(step);
   const save = useMutation<SetupAnswers, SetupState>("PUT", "/api/goals/setup");
 
   useEffect(() => {
@@ -642,9 +673,19 @@ function Setup() {
     document.getElementById(focusField)?.focus();
     setFocusField(null);
   }, [focusField, step]);
+  // On every step change, focus the new step's heading: it announces the step and keeps focus on the page when the
+  // control that was pressed disappears or is disabled (Next on the last answer step, Back onto step 1; WCAG 2.4.3).
+  // An error-summary link that also names a field wins (the effect above runs first).
+  useEffect(() => {
+    if (shownStep.current === step) return;
+    shownStep.current = step;
+    if (focusField === null) stepTitle.current?.focus();
+  }, [step, focusField]);
 
   if (state.loading) return <Loading label="Loading your setup" />;
   if (state.error || !state.data) return <ErrorState error={state.error} retry={state.reload} />;
+  // Without the stored goal fields a save could erase them: abstain from offering it rather than guess.
+  if (overview.error) return <ErrorState error={overview.error} retry={overview.reload} />;
   const history = state.data.stress_history;
 
   const errors = validate(f);
@@ -658,7 +699,13 @@ function Setup() {
     const key = nextKey.current;
     setF((x) => ({ ...x, goals: [...x.goals, { key, goal_id: null, name, amount: "", date: "", loss: "", recovery: "" }] }));
   };
-  const removeGoal = (key: number) => setF((x) => ({ ...x, goals: x.goals.filter((g) => g.key !== key) }));
+  const removeGoal = (key: number) => {
+    // The Remove button goes with its goal: focus the next goal (else the previous one, else "Add another goal").
+    const i = f.goals.findIndex((g) => g.key === key);
+    const neighbour = f.goals[i + 1] ?? f.goals[i - 1];
+    setF((x) => ({ ...x, goals: x.goals.filter((g) => g.key !== key) }));
+    setFocusField(neighbour ? `su-g${neighbour.key}-name` : "su-add-goal");
+  };
   const goalLabel = (g: GoalForm) => g.name.trim() || "unnamed goal";
 
   const err = (field: string) => {
@@ -695,9 +742,18 @@ function Setup() {
       setSummaryKey((k) => k + 1);
       return;
     }
+    if (!overview.data) return; // the Save button is disabled until the stored goal fields are known
     setSummaryKey(0);
-    const out = await save.run(toAnswers(f));
-    if (out) setResult(out);
+    const sent = toAnswers(f, storedGoalFields(overview.data));
+    const out = await save.run(sent);
+    if (out) {
+      setResult(out);
+      setKept(notCleared(sent, out.answers));
+      // Rebuild the form from what the server stored: new goals now carry their server-assigned goal_id, so a second
+      // Save updates them instead of creating them again, and a kept answer shows its stored value.
+      setF(toForm(out.answers));
+      overview.reload();
+    }
   }
 
   const noGoals = (
@@ -721,7 +777,7 @@ function Setup() {
           </li>
         ))}
       </ol>
-      <form onSubmit={submit} className="card" noValidate>
+      <div className="card">
         {showSummary ? (
           <div key={summaryKey} className="callout callout--stale" role="alert" tabIndex={-1} ref={summaryRef} aria-labelledby="su-errors-title">
             <p id="su-errors-title">
@@ -746,8 +802,14 @@ function Setup() {
           </div>
         ) : null}
 
+        <h2 id="su-step-title" ref={stepTitle} tabIndex={-1}>
+          Step {step + 1} of {SETUP_STEPS.length}: {SETUP_STEPS[step]}
+        </h2>
+
+        {/* Outside the setup <form>: the CAS import has its own form, and a nested form would also submit setup. */}
         {step === 0 && <CasStep imported={state.data.cas_imported || casDone} onApplied={() => setCasDone(true)} />}
 
+        <form id="su-form" onSubmit={submit} noValidate>
         {step === 1 && (
           <fieldset className="field">
             <legend>Your income-tax regime and slab</legend>
@@ -819,9 +881,18 @@ function Setup() {
                   <label htmlFor={`su-g${g.key}-date`}>Goal date — {goalLabel(g)}</label>
                   <input id={`su-g${g.key}-date`} type="date" value={g.date} onChange={(e) => setGoal(g.key, { date: e.target.value })} />
                 </div>
-                <button type="button" className="btn btn--ghost" onClick={() => removeGoal(g.key)}>
-                  Remove “{goalLabel(g)}”
-                </button>
+                {g.goal_id === null ? (
+                  <button type="button" className="btn btn--ghost" onClick={() => removeGoal(g.key)}>
+                    Remove “{goalLabel(g)}”
+                  </button>
+                ) : (
+                  // Saving setup only creates or updates goals, so removing a saved goal here would do nothing. Deleting
+                  // is done, with its confirmation, on the Goals page.
+                  <p className="hint">
+                    “{goalLabel(g)}” is saved. <Link to="/goals">Delete it on the Goals page</Link> (its holdings then become
+                    Unassigned).
+                  </p>
+                )}
               </fieldset>
             ))}
             <div className="row">
@@ -830,7 +901,7 @@ function Setup() {
                   Add “{name}”
                 </button>
               ))}
-              <button type="button" className="btn" onClick={() => addGoal("")}>
+              <button id="su-add-goal" type="button" className="btn" onClick={() => addGoal("")}>
                 Add another goal
               </button>
             </div>
@@ -919,7 +990,6 @@ function Setup() {
 
         {step === 7 && (
           <div>
-            <h2>Review</h2>
             <dl className="kv">
               <dt>CAS</dt>
               <dd>{state.data.cas_imported || casDone ? "imported" : "not imported yet"}</dd>
@@ -949,6 +1019,8 @@ function Setup() {
           </div>
         )}
 
+        </form>
+
         {save.error ? (
           <p className="callout callout--stale" role="alert">
             Not saved: {save.error instanceof ApiError && save.error.status === 422 ? serverReasons(save.error) : "the request failed."}
@@ -959,6 +1031,12 @@ function Setup() {
             <p>
               Setup saved. {result.missing.length ? `Still missing: ${result.missing.join("; ")}.` : "Nothing is missing."}
             </p>
+            {kept.length ? (
+              <p>
+                Not cleared: {kept.join("; ")}. A saved answer cannot be cleared here yet, so each keeps its stored value
+                (shown again in its step).
+              </p>
+            ) : null}
             <p>
               <Link to="/goals">Open your goals</Link>
             </p>
@@ -973,11 +1051,11 @@ function Setup() {
               Next
             </button>
           ) : null}
-          <button type="submit" className="btn btn--primary" disabled={save.pending}>
+          <button type="submit" form="su-form" className="btn btn--primary" disabled={save.pending || !overview.data}>
             {save.pending ? "Saving…" : "Save setup"}
           </button>
         </div>
-      </form>
+      </div>
     </>
   );
 }

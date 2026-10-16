@@ -183,4 +183,91 @@ describe("Goals page (C02)", () => {
     renderAt();
     expect(await screen.findByRole("link", { name: "Run setup" })).toHaveAttribute("href", "/onboarding");
   });
+
+  it("editing a goal sends back its stored objective and safe-horizon years, so a rename does not erase them (typescript-reviewer-2)", async () => {
+    const withExtras = { ...GOALS, goals: [{ ...GOALS.goals[0]!, objective: "D_growth", h_safe_years: "3" }, GOALS.goals[1]!] };
+    const calls = stub(withExtras);
+    renderAt();
+    const card = await screen.findByRole("region", { name: "Long-term growth" });
+    await userEvent.click(within(card).getByRole("button", { name: "Edit" }));
+    const name = within(card).getByLabelText("Goal name");
+    await userEvent.clear(name);
+    await userEvent.type(name, "Retirement");
+    await userEvent.click(within(card).getByRole("button", { name: "Save goal" }));
+    await waitFor(() => expect(calls.some((c) => c.method === "PUT")).toBe(true));
+    expect(calls.find((c) => c.method === "PUT")!.body).toEqual({
+      name: "Retirement", priority: 1, target_amount: "1000000", target_date: "2036-03-31", objective: "D_growth",
+      loss_budget_inr: "250000", recovery_months: 60, h_safe_years: "3",
+    });
+  });
+});
+
+describe("Goals page focus and tabs (a11y-architect-2/5, react-reviewer-6)", () => {
+  it("Edit focuses the goal name; Cancel returns focus to Edit", async () => {
+    stub();
+    renderAt();
+    const card = await screen.findByRole("region", { name: "Long-term growth" });
+    await userEvent.click(within(card).getByRole("button", { name: "Edit" }));
+    expect(within(card).getByLabelText("Goal name")).toHaveFocus();
+    await userEvent.click(within(card).getByRole("button", { name: "Cancel" }));
+    expect(within(card).getByRole("button", { name: "Edit" })).toHaveFocus();
+  });
+
+  it("Delete focuses 'Yes, delete'; 'Keep it' returns focus to Delete", async () => {
+    stub();
+    renderAt();
+    const card = await screen.findByRole("region", { name: "Long-term growth" });
+    await userEvent.click(within(card).getByRole("button", { name: "Delete" }));
+    expect(document.activeElement).not.toBe(document.body);
+    expect(within(card).getByRole("button", { name: "Yes, delete “Long-term growth”" })).toHaveFocus();
+    await userEvent.click(within(card).getByRole("button", { name: "Keep it" }));
+    expect(within(card).getByRole("button", { name: "Delete" })).toHaveFocus();
+  });
+
+  it("after Save the card stays on screen through the reload and focus returns to its Edit button", async () => {
+    const calls = stub();
+    renderAt();
+    const card = await screen.findByRole("region", { name: "Long-term growth" });
+    await userEvent.click(within(card).getByRole("button", { name: "Edit" }));
+    await userEvent.click(within(card).getByRole("button", { name: "Save goal" }));
+    await waitFor(() => expect(calls.filter((c) => c.url === "/api/goals" && c.method === "GET")).toHaveLength(2));
+    const after = await screen.findByRole("region", { name: "Long-term growth" });
+    await waitFor(() => expect(within(after).getByRole("button", { name: "Edit" })).toHaveFocus());
+    expect(document.activeElement).not.toBe(document.body);
+  });
+
+  it("after a delete, focus moves to the next goal's heading", async () => {
+    stub();
+    renderAt();
+    const card = await screen.findByRole("region", { name: "Long-term growth" });
+    await userEvent.click(within(card).getByRole("button", { name: "Delete" }));
+    await userEvent.click(within(card).getByRole("button", { name: "Yes, delete “Long-term growth”" }));
+    await waitFor(() => expect(screen.getByRole("heading", { level: 3, name: "Home deposit" })).toHaveFocus());
+  });
+
+  it("the tab strip uses the shared .tabs style so the selected view is visible", async () => {
+    stub();
+    renderAt();
+    await screen.findByRole("region", { name: "Long-term growth" });
+    expect(screen.getByRole("tablist").classList.contains("tabs")).toBe(true);
+  });
+
+  it("aria-controls only names a panel that is rendered; arrow keys move between tabs", async () => {
+    stub();
+    renderAt();
+    await screen.findByRole("region", { name: "Long-term growth" });
+    for (const tab of screen.getAllByRole("tab")) {
+      const id = tab.getAttribute("aria-controls");
+      if (id !== null) expect(document.getElementById(id)).not.toBeNull();
+    }
+    const goalsTab = screen.getByRole("tab", { name: "Goals and loss limits" });
+    const feasTab = screen.getByRole("tab", { name: "Return-target feasibility" });
+    expect(goalsTab).toHaveAttribute("tabindex", "0");
+    expect(feasTab).toHaveAttribute("tabindex", "-1");
+    goalsTab.focus();
+    await userEvent.keyboard("{ArrowRight}");
+    expect(await screen.findByRole("heading", { name: "Return-target feasibility", level: 2 })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Return-target feasibility" })).toHaveFocus();
+    expect(screen.getByRole("tab", { name: "Return-target feasibility" })).toHaveAttribute("aria-selected", "true");
+  });
 });
